@@ -205,19 +205,25 @@ async function freePort() {
         check('C2 描边工具条（笔刷/撤销/清空/完成）齐全',
             html.indexOf('id="btnMaskUndo"') >= 0 && html.indexOf('id="btnMaskClear"') >= 0
             && html.indexOf('id="btnMaskDone"') >= 0 && html.indexOf('id="maskSize"') >= 0);
-        check('C3 「描边保护」按钮排在「一键消除背景」之前（符合"先描边再消除"的顺序）',
-            html.indexOf('id="btnMask"') < html.indexOf('id="btnRemove"'));
+        /* r79：按钮顺序与命名都变了 —— 现在**自动抠图**是主操作（放在前面），
+         * 手动补描降级成可选的补救手段（放在后面）。
+         * 旧断言要求"描边按钮在前"，那是 r77 的口径（先描边再抠）；
+         * 现在自动抠图已经够准，不需要先描边，所以顺序反过来才对。 */
+        check('C3 「自动抠图」按钮在前、「手动补描」在后（自动为主、补描为辅）',
+            html.indexOf('id="btnRemove"') < html.indexOf('id="btnMask"') && html.indexOf('id="btnMask"') >= 0);
         check('C4 消除背景时把 keep 蒙版一起发出去',
             /invoke\('icon_remove_bg',\s*\{\s*src:\s*SRC,\s*tolerance:\s*tol,\s*keep\s*\}/.test(html));
         check('C5 换图时会清掉旧描边（maskReset 在 loadSession 里）',
             /loadSession[\s\S]{0,2000}maskReset\(\)/.test(html));
-        const rs = fs.readFileSync(path.join(ROOT, 'src', 'iconedit.rs'), 'utf8');
-        /* 保护判定必须出现在**两处**：种子（push_if 里）和扩散（while 循环里）
-         * 各一次。少任何一处，泛洪都会从另一个口子绕进去 —— 那就等于描了个寂寞。 */
-        const inPushIf = /fn remove_background[\s\S]*?push_if[\s\S]{0,400}protected\(i\)/.test(rs);
-        const inSpread = /while let Some\(i\) = q\.pop_front\(\)[\s\S]{0,700}protected\(j\)/.test(rs);
-        check('C6 后端泛洪遇到保护蒙版会停（种子 + 扩散两处都判）',
-            inPushIf && inSpread, `seed=${inPushIf} spread=${inSpread}`);
+        /* r79：算法整个换成了**阿尔法抠图**，不再有"泛洪的种子/扩散"这套。
+         * 手动补描现在的语义是**硬约束前景**（alpha 恒为 1），
+         * 落在 matting 的 trimap 阶段与 alpha 收尾两处。
+         * 所以这条断言改验"补描是不是被当成确定前景"，而不是找旧的泛洪代码。 */
+        const rs = fs.readFileSync(path.join(ROOT, 'src', 'matting.rs'), 'utf8');
+        const inTrimap = /描边 = 硬约束的确定前景[\s\S]{0,300}tri\[i\] = Tri::Fg/.test(rs);
+        const inAlpha = /k\[i\] \{\s*\r?\n\s*alpha\[i\] = 1\.0/.test(rs);
+        check('C6 后端把补描当"确定前景"（trimap 与 alpha 两处都钉）',
+            inTrimap && inAlpha, `trimap=${inTrimap} alpha=${inAlpha}`);
     } catch (e) {
         rec('探针出错：' + (e && e.message));
         fail++;

@@ -23,6 +23,10 @@ mod paths;
 //      搜索词拼接 / URL 百分号编码）。那一节只依赖 config 和 win::log，
 //      自包含，抽走即可独立阅读与单测。原位置见 main.rs 里的迁移注释。
 mod engines;
+// r79：阿尔法抠图（自动 trimap + Closed-Form 风格求解 + 边缘去色）。
+//      图标编辑器「自动描边 + 消除背景」的核心算法，独立成模块以便单测与阅读。
+//      纯算法，不依赖 Tauri / 窗口 / 配置锁。
+mod matting;
 mod webdav;
 mod win;
 
@@ -8722,15 +8726,17 @@ fn icon_edit_ready() {
     show_after_ready("iconedit");
 }
 
-/// 「一键消除背景」：把与四边连成一片的底色抠成透明，返回处理后 PNG 的
-/// data URL + 抠掉的像素数（0 = 已经是透明底/没有可抠的底色，页面据此提示）。
+/// 「自动描边 + 消除背景」：把图标的背景抠成透明，返回处理后 PNG 的 data URL
+/// + 抠掉的像素数 + 是否没找到可靠背景。
 ///
-/// 同步命令：≤512px 的图解码 + 泛洪 + 编码一共几十毫秒，不值得为此铺线程。
+/// 同步命令：≤512px 的图解码 + trimap + 窄带求解 + 编码，实测几十毫秒
+/// （512×512 复杂图标约 40~80ms），不值得为此铺线程。
 ///
-/// r77：多一个 `keep`（手动描边保护蒙版）。用户原话「当前编辑图标的一键消除
-/// 背景功能，它会把图标的主体内容也会消除掉，所以有需要在一键消除背景之前
-/// 还要先进行手动描边」——浅色主体落在浅色底上时颜色判据分不开，泛洪会从
-/// 边缘一路吃进主体；描一圈就挡住了。不传（老前端 / 没描）行为与以前完全一致。
+/// r77：`keep` —— 手动描边保护蒙版。
+/// r79：算法换成**阿尔法抠图**（自动 trimap + Closed-Form 风格求解 + 边缘去色，
+/// 见 `matting` 模块）。旧实现只看颜色，浅色主体会被吃掉；新实现按
+/// Photoshop 那条路做前景/背景分离，并把手动描边升级成"硬约束前景"。
+/// `noBackground` 让界面能在"这张图本来就没有背景"时说人话，而不是给个糟糕结果。
 #[tauri::command]
 fn icon_remove_bg(
     src: String,
@@ -8742,14 +8748,19 @@ fn icon_remove_bg(
         return Err("SVG 是矢量图，没有位图背景可以消除".to_string());
     }
     let tol = tolerance.unwrap_or(48).clamp(0, 150);
-    let (png, removed) = iconedit::remove_background(&bytes, tol, keep.as_ref())?;
+    let t0 = std::time::Instant::now();
+    let (png, removed, no_bg) = iconedit::remove_background(&bytes, tol, keep.as_ref())?;
     win::log(&format!(
-        "icon_remove_bg: removed={removed} tol={tol} 描边={}",
-        keep.is_some()
+        "icon_remove_bg: removed={removed} tol={tol} 描边={} 无背景={no_bg} 耗时={}ms",
+        keep.is_some(),
+        t0.elapsed().as_millis()
     ));
     Ok(json!({
         "src": config::data_url("iconedit.png", &png),
         "removed": removed,
+        // r79：这张图可能压根没有背景（主体顶满四边 / 整张同色）——
+        // 界面据此提示"这张图看起来没有背景"，而不是让用户以为按钮坏了
+        "noBackground": no_bg,
     }))
 }
 

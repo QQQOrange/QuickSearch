@@ -326,20 +326,22 @@ body { display: flex; flex-direction: column; overflow: hidden; }
             <span class="dim" id="dimAfter"></span>
         </div>
         <div class="cv" id="cvAfter">
-            <div class="ph" id="phAfter">点下面的「一键消除背景」看看效果</div>
+            <div class="ph" id="phAfter">点下面的「自动抠图」看看效果</div>
             <img id="imgAfter" alt="消除背景后的图标" hidden>
         </div>
     </section>
 </main>
 
 <div class="ctl">
-    <!-- r77：描边保护。放在「一键消除背景」**左边** —— 用户的口径是
-         「在一键消除背景之前还要先进行手动描边」，顺序上就是这么走的。 -->
-    <button class="btn" id="btnMask" title="在左边的图上涂出图标主体，涂过的地方不会被消除背景吃掉">
-        描边保护
+    <!-- r79：主按钮改成「自动抠图」—— 现在走的是阿尔法抠图（自动 trimap +
+         边缘平滑 + 去白边），不再需要用户先描边。
+         「手动补描」降级成可选的补救手段：只有主体与背景几乎同色、
+         自动分不开时才需要。 -->
+    <button class="btn primary" id="btnRemove" title="自动识别主体并抠掉背景（阿尔法抠图：边缘平滑、不留白边）">自动抠图</button>
+    <button class="btn" id="btnMask" title="自动抠图已经很准；只有主体与背景几乎同色、自动分不开时才需要手动涂一下">
+        手动补描
     </button>
-    <button class="btn primary" id="btnRemove">一键消除背景</button>
-    <label class="tol" title="颜色差多少之内算「背景」。图标底是纯色/渐变时不用动；抠不干净就调大，主体被吃掉了就调小">
+    <label class="tol" title="背景判定的宽松度。抠不干净就调大；主体被吃掉了就调小">
         容差
         <input type="range" id="tol" min="10" max="120" step="2" value="48" disabled>
         <b id="tolVal">48</b>
@@ -421,7 +423,7 @@ async function loadSession() {
     $('btnSave').disabled = true;
     $('btnSkip').disabled = false;
     $('btnRemove').disabled = false;
-    $('btnRemove').innerHTML = '一键消除背景';
+    $('btnRemove').innerHTML = '自动抠图';
     $('tol').disabled = true;
     $('tol').value = '48';
     $('tolVal').textContent = '48';
@@ -518,13 +520,13 @@ function maskSetMode(on) {
         cv.hidden = false;
         bar.hidden = false;
         if (pane) pane.classList.add('masking');
-        setHint('在左边的图上涂出图标主体 —— 涂过的地方不会被「一键消除背景」吃掉。');
+        setHint('在左边的图上涂出图标主体 —— 涂过的地方一定会被保留。');
         // 已经抠过一次的话，描完顺手重算一遍，让用户立刻看到差别
     } else {
         cv.hidden = true;
         bar.hidden = true;
         if (pane) pane.classList.remove('masking');
-        setHint(maskHasInk() ? '描边已记录 —— 点「一键消除背景」时会保护这些区域。' : '');
+        setHint(maskHasInk() ? '补描已记录 —— 点「自动抠图」时会保留这些区域。' : '');
     }
 }
 
@@ -641,18 +643,18 @@ function maskPayload() {
     window.addEventListener('resize', () => { if (maskOn()) maskSync(); else maskCanvasPx = null; });
 })();
 
-/** 跑一次消除背景。fromSlider=true 表示是拖容差滑块触发的重算。 */
+/** 跑一次自动抠图。fromSlider=true 表示是拖容差滑块触发的重算。 */
 let removing = false;
 async function runRemove(fromSlider) {
     if (removing || VECTOR || !SRC) return;
     removing = true;
     const btn = $('btnRemove');
     btn.classList.add('busy');
-    btn.innerHTML = '<span class="spinner"></span>处理中';
+    btn.innerHTML = '<span class="spinner"></span>抠图中';
     $('cvAfter').classList.add('busy');
     const tol = Number($('tol').value) || 48;
     try {
-        /* r77：带上描边保护蒙版。没描过就是 undefined —— 那条路与 r76 完全一致。 */
+        /* r77/r79：带上手动补描蒙版（没描过就是 undefined）。 */
         const keep = maskPayload();
         const r = await invoke('icon_remove_bg', { src: SRC, tolerance: tol, keep });
         OUT = r.src || '';
@@ -663,22 +665,47 @@ async function runRemove(fromSlider) {
         markDim(img, $('dimAfter'));
         $('btnSave').disabled = false;
         const n = Number(r.removed) || 0;
-        if (n === 0) {
-            setHint('没有找到可消除的底色 —— 这张图可能已经是透明背景。', 'warn');
+        /* r79：后端现在会告诉我们"这张图有没有可靠背景"。
+         * 全同色图 / 主体顶满四边时，硬抠只会伤到主体 —— 这时给一句人话，
+         * 而不是让用户以为按钮坏了。 */
+        if (r.noBackground) {
+            /* r79：这句提示**不能瞎给建议**。
+             *
+             * 我最初写的是"把容差调小试试"，然后写了
+             * `tools/r79-tolerance-sweep.js` 去验证那句话 —— 结论是**反的**：
+             * 白底白主体（对比度≈0）在任何容差下都分不开，而容差调到 36 以下
+             * 反而会把**主体内部也一起抠掉**（实测中心 alpha 从 255 掉到 0）。
+             * 也就是说那条建议会把用户的图弄得更糟。
+             *
+             * 改为给**真正可行**的两条路：手动补描、直接用原图。 */
+            setHint(
+                '这张图主体与背景颜色太接近，自动分不开（比如白色图标落在白底上）—— '
+                + '为避免误删，这次**没有改动**图片。'
+                + '请用「手动补描」涂出图标主体再点一次「自动抠图」；'
+                + '或者直接点「保存」用原图。'
+                + '（注：调「容差」在这里帮不上忙，反而可能把主体一起抠掉。）',
+                'warn'
+            );
+        } else if (n === 0) {
+            setHint('没有抠掉任何像素 —— 这张图可能已经是透明背景。', 'warn');
         } else {
-            setHint('已消除 ' + n.toLocaleString() + ' 个背景像素。拖动「容差」可以重新算。', 'ok');
+            setHint(
+                '已抠掉 ' + n.toLocaleString() + ' 个背景像素（边缘平滑、已去白边）。'
+                + '拖动「容差」可以重新算。',
+                'ok'
+            );
         }
-        // 消过一次之后容差滑块才启用：没消过的时候拖着它没有意义
+        // 抠过一次之后容差滑块才启用：没抠过的时候拖着它没有意义
         $('tol').disabled = false;
     } catch (e) {
         OUT = '';
         $('btnSave').disabled = true;
-        setHint('消除失败：' + ((e && e.message) || e), 'warn');
-        toast('消除背景失败');
+        setHint('抠图失败：' + ((e && e.message) || e), 'warn');
+        toast('抠图失败');
     } finally {
         removing = false;
         btn.classList.remove('busy');
-        btn.innerHTML = '一键消除背景';
+        btn.innerHTML = '自动抠图';
         $('cvAfter').classList.remove('busy');
     }
 }
@@ -715,10 +742,10 @@ $('btnSave').addEventListener('click', async () => {
 /* 跳过编辑，直接用作图标（#146）。
  *
  * 编辑器不该是「换图标」的必经步骤：挑完图只想直接用的人，以前被逼着
- * 要么点「一键消除背景」再保存（怕抠坏主体），要么点「取消」（等于这张
+ * 要么点「自动抠图」再保存（怕抠坏主体），要么点「取消」（等于这张
  * 图白挑）。这条路就是给「我不想编辑」用的 —— 把原图 SRC 原样应用，
  * 和「保存」共用同一条 Rust 链路（icon_editor_save 写 overrideIcons
- * + 广播刷新），只是不要求跑过消除背景。 */
+ * + 广播刷新），只是不要求跑过抠图。 */
 $('btnSkip').addEventListener('click', async () => {
     if (!SRC) { toast('没有可应用的图标'); return; }
     $('btnSkip').disabled = true;
