@@ -29,14 +29,71 @@
 
 use crate::aimodels::{self, Family};
 
+/// 让 ort 从**模型目录**加载 `onnxruntime.dll`（r80g：运行库随模型一起下载）。
+///
+/// # 机制（以及为什么必须"无条件设置"）
+///
+/// ort 的 `load-dynamic` 路径找 dll 的顺序（见它 `src/lib.rs`）：
+///   1. 环境变量 `ORT_DYLIB_PATH`
+///   2. 相对名 `onnxruntime.dll` → 相对 **exe 所在目录**
+///
+/// 两个缓存（`OnceLock`）行为**不同**，这是关键：
+///
+/// | 缓存 | 闭包做什么 | 失败后会不会重试 |
+/// |---|---|---|
+/// | `G_ORT_DYLIB_PATH` | **只读环境变量**，不会 panic | ❌ **永久缓存**第一次读到的值 |
+/// | `G_ORT_LIB` | 真的去加载文件，失败会 panic | ✅ 下次调用会重试 |
+///
+/// # ⚠ 踩过的坑（r80g 探针 4e 抓到的）
+///
+/// 我第一版写的是"**文件存在才设置** `ORT_DYLIB_PATH`"。于是：
+///   1. 用户还没下运行库 → 第一次查状态 → 环境变量没设 → ort 缓存
+///      相对名 `"onnxruntime.dll"`
+///   2. 用户下完运行库（dll 落在「抠图模型」目录）→ 再查 → `G_ORT_DYLIB_PATH`
+///      **已被冻住**，仍去 exe 目录找 → 找不到 → 报"加载不了"
+///
+/// 实测结果：`runtimeFile=true` 但 `runtime=false` —— 文件明明在，就是用不上，
+/// 除非**重启程序**（新进程里缓存是干净的）。
+///
+/// 所以现在改成**无条件设置**：哪怕 dll 还不存在，也把 `ORT_DYLIB_PATH` 指到
+/// 它将来会在的位置。这样 `G_ORT_DYLIB_PATH` 缓存的就是**正确路径**，
+/// 等文件下好之后 `G_ORT_LIB` 自然会在下一次调用时重试成功 —— 不需要重启。
+///
+/// edge case：如果「抠图模型」里没有、但 exe 旁边有（用户手动放的），那就
+/// 优先用 exe 旁边那份 —— 两处都兼容。
+pub fn point_ort_at_runtime() {
+    let prefer = aimodels::runtime_path();
+    if prefer.exists() {
+        std::env::set_var("ORT_DYLIB_PATH", &prefer);
+        return;
+    }
+    // exe 同目录有没有（兼容"用户自己把 dll 放在程序目录"）
+    if let Some(side) = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("onnxruntime.dll")))
+    {
+        if side.exists() {
+            std::env::set_var("ORT_DYLIB_PATH", &side);
+            return;
+        }
+    }
+    /* 两处都没有 —— 仍然把路径指到"将来会在的地方"。
+     * 这一步是修 bug 的关键：不能因为"现在没有"就不设。 */
+    std::env::set_var("ORT_DYLIB_PATH", &prefer);
+}
+
 /// 推理运行时是否可用（`onnxruntime.dll` 能否加载）。
 ///
 /// 为什么单独一个函数而不是"直接调用了失败再说"：设置页要据此告诉用户
 /// "AI 抠图不可用（缺少运行时）"，而不是等到点按钮才报错。
+///
+/// ⚠ ort 在找不到 dll 时会 **panic**（`lib_handle` 里是 `.expect()`），
+///   所以这里用 `catch_unwind` 兜住 —— 用户不该因为缺个文件就看到程序崩溃。
 pub fn runtime_available() -> bool {
+    point_ort_at_runtime();
     // 用一次最小代价的 ORT 调用探测：环境初始化成功即说明 dll 在且版本对得上。
     std::panic::catch_unwind(|| {
-        // ort::init() 在 rc 版里是惰性的，构造一个 SessionBuilder 就足以触发加载
+        // ort 的初始化是惰性的，构造一个 SessionBuilder 就足以触发加载
         ort::session::Session::builder().is_ok()
     })
     .unwrap_or(false)

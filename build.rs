@@ -22,74 +22,16 @@ fn main() {
 
     println!("cargo:rustc-env=QS_BUILD_STAMP={}", build_stamp::now_local());
 
-    copy_ort_runtime();
+    /* ⚠ r80g：这里**不再**把 onnxruntime.dll 拷到产物目录。
+     *
+     * 早期版本（r80）会拷 —— 那时 ort 是静态链接，dll 必须和 exe 放一起。
+     * 现在改用 ort 的 `load-dynamic`：dll 由程序在**运行时**下载到
+     * 「抠图模型」目录（用户要求「运行库随模型一起下载，并且跟模型存在一起」），
+     * 再由 `aimatte::point_ort_at_runtime()` 通过 `ORT_DYLIB_PATH` 指过去。
+     * 所以产物目录**不该**再有它 —— 有的话反而会让"随模型下载"看起来没生效。
+     * 详见 Cargo.toml 的 `ort` 注释与 .cargo/config.toml。 */
 
     tauri_build::build()
-}
-
-/// 把 `onnxruntime.dll` 拷到产物目录（r80 AI 抠图用）。
-///
-/// # 为什么自己拷，不用 ort 的 `copy-dylibs` feature
-///
-/// `copy-dylibs` 期望的目录结构是 `<ORT_LIB_LOCATION>/lib` + `<ORT_LIB_LOCATION>/Release`
-/// （或 `Debug`）。而 ONNX Runtime **官方发布包**只有 `lib/` 一个目录，
-/// 于是它两边都找不到、静默什么都不拷 —— 表现是"编译过了、跑起来报
-/// `The requested API version [22] is not available`"（找不到 dll 就退到
-/// 系统里其它版本的 ortnxruntime，API 版本对不上）。
-///
-/// 这个坑很难查（它不报错、产物看着也正常），所以显式拷一次、并在拷不到时
-/// **不报错**（只是没有 AI 功能，程序仍要能编译能跑）。
-///
-/// 找库位置的顺序：
-///   1. `ORT_LIB_LOCATION`（本地开发时显式指定，最高优先级）
-///   2. `<repo>/vendor/ort/`（发布用的固定位置，随仓库）
-fn copy_ort_runtime() {
-    let Ok(out_dir) = std::env::var("OUT_DIR") else { return };
-    // OUT_DIR = <target>/<profile>/build/<crate>-<hash>/out → 上溯 3 层到 <target>/<profile>
-    let Some(profile_dir) = std::path::Path::new(&out_dir)
-        .ancestors()
-        .nth(3)
-        .map(|p| p.to_path_buf())
-    else {
-        return;
-    };
-
-    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
-    if let Ok(loc) = std::env::var("ORT_LIB_LOCATION") {
-        candidates.push(std::path::PathBuf::from(&loc).join("lib"));
-        candidates.push(std::path::PathBuf::from(&loc));
-    }
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    candidates.push(root.join("vendor").join("ort").join("lib"));
-    candidates.push(root.join("vendor").join("ort"));
-
-    for dir in candidates {
-        let dll = dir.join("onnxruntime.dll");
-        if !dll.exists() {
-            continue;
-        }
-        let dst = profile_dir.join("onnxruntime.dll");
-        // 已存在且大小一致就不重复拷（省构建时间，168MB 项目里这块不小）
-        let same = std::fs::metadata(&dst)
-            .ok()
-            .zip(std::fs::metadata(&dll).ok())
-            .map(|(a, b)| a.len() == b.len())
-            .unwrap_or(false);
-        if !same {
-            if let Err(e) = std::fs::copy(&dll, &dst) {
-                println!("cargo:warning=拷贝 onnxruntime.dll 失败（AI 抠图将不可用）：{e}");
-            } else {
-                println!("cargo:warning=已拷贝 onnxruntime.dll → {}", dst.display());
-            }
-        }
-        return;
-    }
-    // 找不到库不报错：AI 功能会通过 runtime_available() 自动降级，
-    // 不该因为"没放 dll"就让整个编译失败。
-    println!(
-        "cargo:warning=没找到 onnxruntime.dll（AI 抠图不可用）。\
-         把它放到 vendor/ort/lib/ 或用 ORT_LIB_LOCATION 指定目录"
-    );
 }
 
 /// 算「这次构建发生在本地时间的哪一刻」，交给 `cargo:rustc-env` 打进二进制。

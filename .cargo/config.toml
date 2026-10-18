@@ -1,22 +1,27 @@
-# AI 抠图（r80）需要的构建期配置。
+# AI 抠图（r80/r80g）需要的构建期配置。
 #
-# # 为什么写在这里而不是让人每次敲环境变量
-#
-# `ort-sys` 在**编译期**要链接 ONNX Runtime 的导入库，靠两个环境变量找：
-#   · `ORT_LIB_LOCATION` —— 库目录
-#   · `ORT_SKIP_DOWNLOAD` —— 别联网下载（默认会去 GitHub 拉；实测国产网络下
-#     会失败并报 `failed to run custom build command for ort-sys`）
-# 写进这里之后 `cargo build` 直接可用，不必先设环境变量。
-#
-# # ⚠ 为什么必须 `relative = true`
-#
-# ort-sys 拿到**相对路径**时会当成空路径，报
-# `error: empty search path given via -L`（实测踩过）。
-# Cargo 的 `relative = true` 会把值按**本文件所在目录**解析成绝对路径再传给
-# 子进程 —— 于是仓库里不必写死任何机器路径，换机器也能直接编译。
-#
-# 库文件放哪、怎么更新：见 `vendor/ort/README.md`。
-# dll 由根目录的 `build.rs` 自动拷到产物目录（`copy_ort_runtime`）。
+# `ort-sys` 在编译期会联网去 GitHub 拉 ONNX Runtime —— 实测国产网络下大概率失败
+# （报 `failed to run custom build command for ort-sys`）。所以这里关掉联网：
 [env]
 ORT_SKIP_DOWNLOAD = "1"
-ORT_LIB_LOCATION = { value = "vendor/ort/lib", relative = true }
+
+# ---------------------------------------------------------------------------
+# ⚠ r80g：`ORT_LIB_LOCATION` 现在**不再需要**了，故意留空说明原因
+#
+# 之前开了 ort 的 `copy-dylibs`，那要求编译期静态链接 `onnxruntime.lib`，
+# 于是必须用 `ORT_LIB_LOCATION` 指向本地已下好的官方库（还要 `relative = true`，
+# 因为 ort-sys 拿到相对路径会当空路径、报 `empty search path given via -L`）。
+#
+# 但那样做的后果是：`onnxruntime.dll` 变成**进程启动期的硬依赖** —— 缺了它
+# exe 根本起不来。而用户要求「运行库默认不下载，点开 AI 抠图后才随模型一起
+# 下载，并且跟模型存在一起」，启动期硬依赖就做不到这一点。
+#
+# 所以 r80g 改用 ort 的 **`load-dynamic`** feature（见 Cargo.toml 的注释）：
+#   · 编译期**不再链接**任何 ONNX Runtime 库 → 不需要 ORT_LIB_LOCATION
+#   · dll 改为**首次推理时**由 `libloading` 加载
+#   · 认 `ORT_DYLIB_PATH` 环境变量 → 可以指向「抠图模型」目录
+#      （程序在 `aimatte::point_ort_at_runtime()` 里设置它）
+#
+# 原先放在 `vendor/ort/lib/` 的那份 dll 也**不再随程序分发**（安装包省 11.8MB）。
+# 那个目录保留着给人手动排查用，但 `build.rs` 不再往产物目录拷它。
+# ---------------------------------------------------------------------------

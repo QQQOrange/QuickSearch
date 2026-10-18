@@ -41,17 +41,28 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 # ---------------------------------------------------------------------------
 # AI 抠图（r80）：跑 ONNX 模型做神经网络抠图。
 #
-# 为什么是这个组合：
-#   · `ort` 是 ONNX Runtime 的 Rust 绑定。ONNX Runtime 是**唯一**实测能加载
-#     这两个模型的推理引擎 —— 先用纯粹 Rust 的 `tract` 试过，它在两个模型上
-#     都卡在 `Resize` 算子（支持不完整，`FAIL: Building node Resize_42`）。
-#   · 关掉 `download-binaries`：那个 feature 会在**编译期**联网下载 ONNX Runtime
-#     动态库，国产网络下大概率失败（实测报 `failed to run custom build command
-#     for ort-sys`）。改为用 `ORT_SKIP_DOWNLOAD=1` + `ORT_LIB_LOCATION`
-#     指向本地已下好的官方库，编译期不再联网。
-#   · `copy-dylibs`：把 `onnxruntime.dll` 自动拷到产物目录（发布时随 exe 分发）。
-#     **模型不随包**：模型是用户数据，按需下载（4.4MB ~ 168MB 可选，见 aimodels.rs）。
-ort = { version = "=2.0.0-rc.10", features = ["ndarray", "copy-dylibs"] }
+# # ⚠ 必须开 `load-dynamic`（r80g 实测纠正了我之前的错误结论）
+#
+# 不开它时，ort 会在编译期静态链接 `onnxruntime.lib`，于是 `onnxruntime.dll`
+# 是**进程启动期的硬依赖** —— 缺了它 exe 根本起不来。
+# （我第一版据此写了"缺 dll 也能启动"的结论，那次验证被 Windows 的
+#  "找不到 dll"模态错误框骗了：进程活着 ≠ 启动成功。重新验证时进程立刻退出，
+#  证明它确实是硬依赖。）
+#
+# 开了之后 ort 改为在**第一次真正推理时**用 `libloading` 加载 dll，
+# 并且认 `ORT_DYLIB_PATH` 环境变量（见 ort 的 `src/lib.rs::lib_handle`）。
+# 这正是"运行库随模型一起下载、可以放在任意目录"所必需的前提。
+#
+# # 其余 feature
+#
+# · `ndarray`：张量用 ndarray 构造，不手搓裸指针。
+# · 不再要 `copy-dylibs`：dll 改由运行时下载到「抠图模型」目录，不该再拷进程序目录。
+# · 编译期仍用 `ORT_SKIP_DOWNLOAD` + `ORT_LIB_LOCATION` 避免联网（见 .cargo/config.toml）。
+ort = { version = "=2.0.0-rc.10", features = ["ndarray", "load-dynamic"] }
+# r80g：运行库（onnxruntime.dll）现在**随模型一起下载**，而官方只发 zip，
+# 所以要解压。flate2 用纯 Rust 后端（rust_backend）—— 不拉 C 代码，
+# 且它**本来就在依赖树里**（png 那条线），加这个直接依赖零下载量。
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 ndarray = "0.16"
 
 # ---------------------------------------------------------------------------

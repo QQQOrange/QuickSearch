@@ -200,33 +200,30 @@ async function freePort() {
         })()`);
         // 直接读 iconedit.html 的结构（编辑器窗口需要真实会话，探针不硬造）
         const html = fs.readFileSync(path.join(ROOT, 'ui', 'iconedit.html'), 'utf8');
-        check('C1 描边画布 #maskCanvas 在「编辑前」面板里',
-            html.indexOf('id="maskCanvas"') >= 0 && html.indexOf('id="cvBefore"') >= 0);
-        check('C2 描边工具条（笔刷/撤销/清空/完成）齐全',
-            html.indexOf('id="btnMaskUndo"') >= 0 && html.indexOf('id="btnMaskClear"') >= 0
-            && html.indexOf('id="btnMaskDone"') >= 0 && html.indexOf('id="maskSize"') >= 0);
-        /* r79：按钮顺序与命名都变了 —— 现在**自动抠图**是主操作（放在前面），
-         * 手动补描降级成可选的补救手段（放在后面）。
-         * 旧断言要求"描边按钮在前"，那是 r77 的口径（先描边再抠）；
-         * 现在自动抠图已经够准，不需要先描边，所以顺序反过来才对。 */
-        check('C3 「自动抠图」按钮在前、「手动补描」在后（自动为主、补描为辅）',
-            html.indexOf('id="btnRemove"') < html.indexOf('id="btnMask"') && html.indexOf('id="btnMask"') >= 0);
-        /* r80b：命令签名变了 —— `tolerance`（容差）已随本地算法一起删除，
-         * 换成了 `params`（AI 参数对象）。keep 蒙版仍然照发。
-         * 旧断言钉的是"tolerance 与 keep 一起发"，那个参数已经不存在了。 */
-        check('C4 消除背景时把 keep 蒙版与 AI 参数一起发出去',
-            /invoke\('icon_remove_bg',\s*\{\s*src:\s*SRC,\s*keep,\s*params\s*\}/.test(html));
-        check('C5 换图时会清掉旧描边（maskReset 在 loadSession 里）',
-            /loadSession[\s\S]{0,2000}maskReset\(\)/.test(html));
-        /* r79：算法整个换成了**阿尔法抠图**，不再有"泛洪的种子/扩散"这套。
-         * 手动补描现在的语义是**硬约束前景**（alpha 恒为 1），
-         * 落在 matting 的 trimap 阶段与 alpha 收尾两处。
-         * 所以这条断言改验"补描是不是被当成确定前景"，而不是找旧的泛洪代码。 */
-        const rs = fs.readFileSync(path.join(ROOT, 'src', 'matting.rs'), 'utf8');
-        const inTrimap = /描边 = 硬约束的确定前景[\s\S]{0,300}tri\[i\] = Tri::Fg/.test(rs);
-        const inAlpha = /k\[i\] \{\s*\r?\n\s*alpha\[i\] = 1\.0/.test(rs);
-        check('C6 后端把补描当"确定前景"（trimap 与 alpha 两处都钉）',
-            inTrimap && inAlpha, `trimap=${inTrimap} alpha=${inAlpha}`);
+        /* ── r80g：这段断言整体换口径 ──
+         * 原 C1~C5 钉的是 r77 的「手动补描」：一块盖在**原图**上的描边画布、
+         * 一个描边工具条、以及把 keep 蒙版发给后端。
+         * 用户反馈「点击手动补描之后并没有真正的触发」（实测链路是通的，
+         * 但交互上没法判断涂对没有 —— 因为看不到抠完的效果），
+         * 所以升级成「涂抹修饰」：涂在**结果图**上、所见即所得、
+         * 多了「擦除」（修瑕疵的主力）、可放大、可撤销。 */
+        check('C1 涂抹画布 #brushCanvas 在「编辑后」面板里',
+            /id="cvAfter"[\s\S]*?id="brushCanvas"/.test(html) && !/id="maskCanvas"/.test(html));
+        check('C2 涂抹工具条齐全（保留/擦除/笔刷/放大/撤销/重来/应用）',
+            ['brushModeKeep', 'brushModeErase', 'brushSize', 'brushZoom', 'brushUndo', 'brushClear', 'brushApply']
+                .every((id) => html.indexOf('id="' + id + '"') >= 0));
+        check('C3 「自动抠图」按钮在前、「涂抹修饰」在后',
+            html.indexOf('id="btnRemove"') < html.indexOf('id="btnBrush"'));
+        check('C4 抠图时带上 AI 参数与（可选的）换模型',
+            /invoke\('icon_remove_bg',\s*\{\s*src:\s*SRC,\s*keep[\s\S]{0,40}params[\s\S]{0,40}modelId/.test(html));
+        check('C5 换图时会清掉旧涂抹与缩放（brushReset 在 loadSession 里）',
+            /brushReset\(\)[\s\S]{0,200}brushZoomApply/.test(html));
+        /* C6：原断言钉的是"后端把补描当确定前景"（读 matting.rs 里的 trimap/alpha）。
+         * r80g 改了架构：涂抹**不再发给后端**，而是在前端合成到结果图上
+         * （见 iconedit.html 的 brushApplyToImage）—— 因为用户要的是
+         * "涂完立刻看到变化"，而不是"涂完再点一次抠图"。 */
+        check('C6 涂抹在前端合成（不依赖后端 keep 参数）',
+            /brushApplyToImage/.test(html) && /d\[o \+ 3\] = 0/.test(html) && /d\[o \+ 3\] = 255/.test(html));
     } catch (e) {
         rec('探针出错：' + (e && e.message));
         fail++;

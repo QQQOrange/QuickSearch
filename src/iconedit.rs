@@ -93,39 +93,21 @@ fn win_log(msg: &str) {
     }
 
 }
-/// 把一张位图的背景抠成透明（r80：**只走 AI 抠图**）。
+/// 与 `remove_background` 相同，但允许**临时指定模型**（`model_id` 覆盖配置）。
 ///
-/// `keep`：**手动补描蒙版**，可选。非零 = 这块是主体，**无条件**保持不透明
-///   （优先级高于 AI 的判断）。
+/// 用途（r80g）：
+///   · 设置页的独立抠图工具 —— 用户可以在那儿换模型再抠
+///   · 编辑器里"换一个模型重抠"（用户要求「某一个我抠的不满意，
+///     我能立刻换另一个来抠」）
 ///
-/// 返回 `(PNG 字节, 被抠掉的像素数, 是否没找到主体)`。
-///
-/// # 演进（三步，都是用户反馈驱动的）
-///
-/// 1. r76 及以前：**颜色泛洪**。只看颜色像不像四边底色，没有前景/背景的语义
-///    分离 —— 浅色主体落在浅底上会被一路吃光（用户报「把图标里面东西一起消除了」）。
-/// 2. r79：**颜色解混**（`matting.rs`）。按 `I = αF + (1-α)B` 逐像素反解，
-///    配连通性收束与边缘去色。在扁平图标上不错，但"主体与背景同色"时
-///    **方程欠定、数学上无解**（用户报「当前的完全用不了」）。
-/// 3. r80：**AI 抠图**。用神经网络（u2netp / RMBG）做语义分割，能处理
-///    情况 2 无解的那些图。用户要求「原来那个直接去掉」，所以现在**没有本地兜底**
-///    —— 不可用时返回明确错误（含怎么打开），不再静默什么都不做。
-///
-/// ⚠ `keep` 那套仍然复用 `matting.rs` 的**边缘处理**（逐像素背景色拟合 + 去色）：
-///   AI 只给低分辨率的 alpha，边缘像素的 RGB 还是混合色，不去色就是一圈白边。
-///   所以 `matting.rs` 没被删干净 —— 它现在的角色是"专门做边缘"，不再是抠图算法。
-pub fn remove_background(
+/// 为什么用参数传而不是改配置：这是**一次性选择**，不该污染用户的默认设置。
+/// （用户换完觉得好，可以在设置里把它设为默认 —— 那是另一回事。）
+pub fn remove_background_ex(
     bytes: &[u8],
     keep: Option<&KeepMask>,
     params: &crate::aimatte::Params,
+    model_id: Option<&str>,
 ) -> Result<(Vec<u8>, usize, bool), String> {
-    /* 把 KeepMask 摊平成按处理尺寸对齐的 bool 蒙版。
-     *
-     * ⚠ 对齐必须在**缩放之后**做：图可能已经被缩到 MAX_EDGE，而前端画蒙版用
-     *   的是它自己那块 canvas 的尺寸。两处任何一处没对齐，保护区域就会整体
-     *   偏移，用户看到的是"描了但还是被吃"。
-     *
-     * 形状对不上（长度 ≠ w×h）就当没描过 —— 不该因为一个坏蒙版让整条命令失败。 */
     let prepared = crate::matting::prepare(bytes)?;
     let (w, h) = prepared.dimensions();
     let keep_mask: Option<Vec<bool>> = keep.and_then(|m| {
@@ -146,36 +128,11 @@ pub fn remove_background(
                 }
             }
         }
-        if any {
-            win_log(&format!(
-                "iconedit: 补描蒙版生效（{}×{} → {}×{}）",
-                m.w, m.h, w, h
-            ));
-            Some(outv)
-        } else {
-            None
-        }
+        if any { Some(outv) } else { None }
     });
-
-    /* ══ r80：**只走 AI 抠图**（本地颜色解混算法已按用户要求删除）══
-     *
-     * 用户原话：「现在有了 ai 抠图，原来的抠图就直接不要去掉」「是要去掉」。
-     *
-     * 所以这里没有"本地算法兜底"。不可用时返回**能操作**的错误
-     * （见 `iconedit_ai::try_ai` 的三种分类），而不是静默什么都不做。
-     *
-     * ⚠ 这与 r79 的口径相反（那时本地是默认、AI 是增强）。改的原因是：
-     *   本地算法在"主体与背景同色 / 内部细节复杂"的图上**数学上无解**
-     *   （用户报「当前的完全用不了」）；而且两条路并存还有个坏处 ——
-     *   用户永远不知道这次结果是谁给的、该不该相信。只留 AI 更清楚。 */
-    match crate::iconedit_ai::try_ai(bytes, keep_mask.as_deref(), params) {
-        Ok(m) => {
-            win_log("iconedit: AI 抠图完成");
-            Ok(m)
-        }
-        Err(e) => Err(e),
-    }
+    crate::iconedit_ai::try_ai_with(bytes, keep_mask.as_deref(), params, model_id)
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,7 +162,7 @@ mod tests {
     #[test]
     fn 不可用时给出可操作的中文错误() {
         let img = RgbaImage::new(16, 16);
-        let e = remove_background(&png_of(&img), None, &crate::aimatte::Params::default()).unwrap_err();
+        let e = remove_background_ex(&png_of(&img), None, &crate::aimatte::Params::default(), None).unwrap_err();
         assert!(!e.is_empty(), "错误不能为空");
         assert!(
             e.contains("设置") || e.contains("抠图") || e.contains("AI"),
@@ -217,11 +174,11 @@ mod tests {
     #[test]
     fn 坏输入报错不panic() {
         // 不是图片
-        assert!(remove_background(b"not an image at all", None, &crate::aimatte::Params::default()).is_err());
-        assert!(remove_background(&[], None, &crate::aimatte::Params::default()).is_err());
+        assert!(remove_background_ex(b"not an image at all", None, &crate::aimatte::Params::default(), None).is_err());
+        assert!(remove_background_ex(&[], None, &crate::aimatte::Params::default(), None).is_err());
         // 太小（1×1 解出来也过不了 prepare 的下限）
         let tiny = RgbaImage::from_pixel(1, 1, Rgba([255, 0, 0, 255]));
-        let r = remove_background(&png_of(&tiny), None, &crate::aimatte::Params::default());
+        let r = remove_background_ex(&png_of(&tiny), None, &crate::aimatte::Params::default(), None);
         // 允许它因为"没开开关"而失败，也允许因为"图太小"而失败 ——
         // 关键是**不能 panic**
         assert!(r.is_err() || r.is_ok());
@@ -233,7 +190,7 @@ mod tests {
     fn 坏蒙版不连累整条命令() {
         let img = RgbaImage::new(16, 16);
         let bad = KeepMask { w: 10, h: 10, data: vec![255u8; 3] }; // 长度明显不对
-        let r = remove_background(&png_of(&img), Some(&bad), &crate::aimatte::Params::default());
+        let r = remove_background_ex(&png_of(&img), Some(&bad), &crate::aimatte::Params::default(), None);
         // 只会因为"功能没开"而失败，不会因为蒙版坏而 panic
         assert!(r.is_err() || r.is_ok());
     }
@@ -243,7 +200,7 @@ mod tests {
     fn 空蒙版等价于没描过() {
         let img = RgbaImage::new(16, 16);
         let empty = KeepMask { w: 16, h: 16, data: vec![0u8; 16 * 16] };
-        let r = remove_background(&png_of(&img), Some(&empty), &crate::aimatte::Params::default());
+        let r = remove_background_ex(&png_of(&img), Some(&empty), &crate::aimatte::Params::default(), None);
         assert!(r.is_err() || r.is_ok());
     }
 
@@ -252,7 +209,7 @@ mod tests {
     fn 带参数接口不panic() {
         let img = RgbaImage::new(16, 16);
         let p = crate::aimatte::Params::default();
-        let r = remove_background(&png_of(&img), None, &p);
+        let r = remove_background_ex(&png_of(&img), None, &p, None);
         assert!(r.is_err() || r.is_ok());
     }
 

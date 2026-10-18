@@ -228,6 +228,43 @@
         <div id="aiModelWrap" hidden>
             <div class="ai-models" id="aiModels"></div>
             <p class="ai-tip" id="aiMatteTip"></p>
+
+            <!-- r80g：模型存放位置。用户要求「提供直达模型储存位置的按钮和选项，
+                 换完位置之后软件自动把模型都迁移过去」。 -->
+            <div class="ai-dir">
+                <div class="ad-t">
+                    <b>模型存放位置</b>
+                    <small id="aiDirMode">默认位置</small>
+                </div>
+                <div class="ad-path" id="aiDirPath" title="点「打开」可以直接在资源管理器里看到">…</div>
+                <div class="ad-btns">
+                    <button class="btn" id="btnAiDirOpen" title="在资源管理器里打开这个目录">打开</button>
+                    <button class="btn" id="btnAiDirPick" title="换一个目录放模型；已有模型会自动迁移过去">更换…</button>
+                    <button class="btn" id="btnAiDirReset" title="恢复到默认位置（同样会迁移模型）" hidden>恢复默认</button>
+                </div>
+            </div>
+
+            <!-- r80g：独立抠图工具。用户要求「设置通用 ai 抠图这一框最好也有一个
+                 抠图按钮，这样我也可以用这个软件来实现抠图，抠完我就直接自己
+                 自定义地方保存」。 -->
+            <div class="ai-cut">
+                <div class="ac-t">
+                    <b>抠图工具</b>
+                    <small>随便挑一张图来抠，抠完自己选地方保存（不涉及图标、不改任何设置）</small>
+                </div>
+                <div class="ac-btns">
+                    <button class="btn primary" id="btnAiCutout">挑一张图抠…</button>
+                    <button class="btn" id="btnAiCutoutSave" disabled title="把抠好的图另存到你自己选的位置">保存结果…</button>
+                    <label class="ac-model" title="临时换一个模型重抠（不影响你在上面选的默认模型）">
+                        模型
+                        <select id="aiCutModel"></select>
+                    </label>
+                </div>
+                <div class="ac-prev" id="aiCutPrev" hidden>
+                    <div class="ap-box"><img id="aiCutImg" alt="抠图结果"></div>
+                    <div class="ap-meta" id="aiCutMeta"></div>
+                </div>
+            </div>
         </div>
     </section>
     </div>

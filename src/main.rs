@@ -2811,6 +2811,8 @@ fn config_view() -> Value {
         // r80：AI 抠图总开关。**模型选择不进这里** —— 它要走 ai_matting_status
         //      命令才知道"文件在不在、运行时能不能加载"，纯配置项表达不了。
         "aiMattingEnable": cfg.ai_matting_enable,
+        // r80g：模型目录（空 = 默认位置）。设置页据此显示"已自定义/默认"
+        "aiModelDir": cfg.ai_model_dir,
         "iconSize": cfg.icon_size,
         "alpha": cfg.alpha,
         // 待机（鼠标没悬停）时的横条不透明度。设成 100 就等于关掉这套行为。
@@ -2929,6 +2931,7 @@ fn apply_view(v: &Value, cfg: &mut config::Config) {
     if let Some(x) = b("autoElevate") { cfg.auto_elevate = x; }
     // r80：AI 抠图开关（批量导入那条路）
     if let Some(x) = b("aiMattingEnable") { cfg.ai_matting_enable = x; }
+    if let Some(x) = s("aiModelDir") { cfg.ai_model_dir = x.to_string(); }
     if let Some(x) = n("iconSize") { cfg.icon_size = x.clamp(14, 96) as u32; }
     if let Some(x) = n("alpha") { cfg.alpha = x.clamp(30, 100) as u32; }
     // 待机透明度允许压得更低（最低 10%），但夹在 10-100：0% 会让横条直接
@@ -3388,6 +3391,9 @@ fn apply_one_setting(cfg: &mut config::Config, key: &str, value: Value) -> Resul
         // r80：AI 抠图开关。默认 false —— 不开时走本地算法，不该替用户默认开启
         //      （它需要额外下载模型，见 config.rs 字段上的取舍说明）。
         "aiMattingEnable" => cfg.ai_matting_enable = value.as_bool().unwrap_or(false),
+        // r80g：模型目录。⚠ 这里只落配置，**不做迁移** ——
+        // 迁移必须与"选目录"同一个动作（见 ai_model_dir_pick 的注释）。
+        "aiModelDir" => cfg.ai_model_dir = value.as_str().unwrap_or("").to_string(),
         "webdavOnStart" => cfg.webdav_on_start = value.as_bool().unwrap_or(false),
         "webdavOnExit" => cfg.webdav_on_exit = value.as_bool().unwrap_or(false),
         "webdavUrl" => {
@@ -8809,6 +8815,7 @@ fn icon_remove_bg(
     src: String,
     keep: Option<iconedit::KeepMask>,
     params: Option<aimatte::Params>,
+    model_id: Option<String>,
 ) -> Result<Value, String> {
     let (mime, bytes) = read_icon_src(&src)?;
     if mime.contains("svg") {
@@ -8816,10 +8823,12 @@ fn icon_remove_bg(
     }
     let p = params.unwrap_or_default();
     let t0 = std::time::Instant::now();
-    let (png, removed, no_bg) = iconedit::remove_background(&bytes, keep.as_ref(), &p)?;
+    let (png, removed, no_bg) =
+        iconedit::remove_background_ex(&bytes, keep.as_ref(), &p, model_id.as_deref())?;
     win::log(&format!(
-        "icon_remove_bg: removed={removed} 描边={} 无背景={no_bg} 参数={} 耗时={}ms",
+        "icon_remove_bg: removed={removed} 描边={} 无背景={no_bg} 模型={} 参数={} 耗时={}ms",
         keep.is_some(),
+        model_id.as_deref().unwrap_or("(默认)"),
         p.summary(),
         t0.elapsed().as_millis()
     ));
@@ -8829,8 +8838,8 @@ fn icon_remove_bg(
         // 这张图可能压根没有主体可分（AI 找不到前景）——
         // 界面据此提示"这张图看不出主体"，而不是让用户以为按钮坏了
         "noBackground": no_bg,
-        // 回显这次实际用的参数与模型名：用户调参数时要知道"这次是什么配置的结果"
-        "usedModel": p.model_name.clone(),
+        // 回显这次实际用的参数与模型名：用户调参数/换模型时要知道"这次是什么配置的结果"
+        "usedModel": model_id.clone().unwrap_or_default(),
         "elapsedMs": t0.elapsed().as_millis() as u64,
     }))
 }
@@ -8925,15 +8934,25 @@ fn ai_matting_status() -> Value {
     };
     drop(cfg);
 
+    /* r80g：运行库现在**随模型一起下载**（用户要求），所以这里要分三层判断：
+     *   · `runtimeFile` —— 文件在不在（不在 → 需要下载，界面给下载按钮）
+     *   · `runtime`     —— 能不能真加载（文件在但版本不对/损坏时为 false）
+     *   · `runtimeDir`  —— dll 与模型放在同一个目录（界面显示用）
+     * 分开的理由：文件不在是"下一下就好"，加载失败是"文件坏了要重下" ——
+     * 这两种情况给用户的提示完全不同。 */
+    let runtime_file = aimodels::runtime_ready();
     let runtime = aimatte::runtime_available();
     let cur_ready = aimodels::is_ready(&cur_id);
     json!({
         "enable": enabled,
-        // 运行时（onnxruntime.dll）是否可用 —— 缺它的话 AI 路走不通
+        // 运行库文件在不在（缺它 → 引导去下载）
+        "runtimeFile": runtime_file,
+        // 能不能真的加载起来
         "runtime": runtime,
+        "runtimeDir": aimodels::models_dir().to_string_lossy(),
         "current": cur_id,
         "currentReady": cur_ready,
-        // 能不能真的用：开关开了 + 运行时有 + 模型就绪
+        // 能不能真的用：开关开了 + 运行库能加载 + 模型就绪
         "usable": enabled && runtime && cur_ready,
         // 体积同时给"人类可读"版本：前端就不必再实现一套格式化
         // （两处各写一份迟早会不一致）
@@ -8984,14 +9003,22 @@ fn ai_matting_remove(id: String) -> Result<Value, String> {
     Ok(ai_matting_status())
 }
 
-/// 下载一个模型（**后台线程**，通过事件推进度）。
+/// 下载一个模型 + （首次时）**运行库**（后台线程，通过事件推进度）。
+///
+/// # 为什么把运行库也放这条链路里
+///
+/// 用户原话：「这个运行库默认不下载，在点击打开 ai 抠图之后，会随着模型一起下载，
+/// 并且跟模型储存在一起」。所以用户点「下载」时，程序会：
+///   1. 先看运行库在不在 → 不在就先下它（69MB 的 zip，解出 11.8MB 的 dll）
+///   2. 再下模型
+/// 两个文件都落在同一个目录（默认是「软件目录/抠图模型」）。
 ///
 /// 为什么必须异步：168MB 的模型在弱网下要十几分钟，同步命令会把
 /// WebView 的消息循环卡死（整个设置页点不动）。
 ///
 /// 进度事件 `model-download` 的载荷：
-///   `{ "id": ..., "done": N, "total": M, "pct": 0..100, "phase": "downloading" }`
-///   完成时补一条 `{ "phase": "done" }`，失败/取消 `{ "phase": "error"|"canceled", "msg": ... }`
+///   `{ "id": ..., "phase": "runtime"|"downloading"|"done"|"error"|"canceled",
+///      "done": N, "total": M, "pct": 0..100, "msg": ... }`
 #[tauri::command]
 fn ai_matting_download(app: AppHandle, id: String) -> Result<(), String> {
     let Some(spec) = aimodels::find(&id) else {
@@ -9002,6 +9029,43 @@ fn ai_matting_download(app: AppHandle, id: String) -> Result<(), String> {
         let ev = |payload: Value| {
             let _ = app.emit(aimodels::EVENT_PROGRESS, payload);
         };
+
+        /* ---- 第 1 步：运行库（不在就先下）----
+         *
+         * 单独给一个 `phase: "runtime"`：界面上要能显示"正在下载运行库（69MB）"
+         * 而不是笼统的"下载中" —— 第一次点下载的用户看到进度条从 0 开始涨、
+         * 却不知道在下什么大文件，体验很差。 */
+        if !aimodels::runtime_ready() {
+            ev(json!({
+                "id": spec.id, "phase": "runtime",
+                "done": 0, "total": aimodels::RUNTIME_ZIP_BYTES, "pct": 0,
+            }));
+            let mut last_rt = 0i64;
+            let r = aimodels::download_runtime(&mut |_stage, done, total| {
+                let pct = (done.saturating_mul(100)).checked_div(total).unwrap_or(0) as i64;
+                if pct != last_rt {
+                    last_rt = pct;
+                    ev(json!({
+                        "id": spec.id, "phase": "runtime",
+                        "done": done, "total": total, "pct": pct,
+                    }));
+                }
+            });
+            match r {
+                Ok(p) => win::log(&format!("ai_matting_download: 运行库就绪 {}", p.display())),
+                Err(e) if e == "__CANCELED__" => {
+                    ev(json!({ "id": spec.id, "phase": "canceled", "msg": "已取消" }));
+                    return;
+                }
+                Err(e) => {
+                    win::log(&format!("ai_matting_download: 运行库失败 {e}"));
+                    ev(json!({ "id": spec.id, "phase": "error", "msg": format!("运行库下载失败：{e}") }));
+                    return;
+                }
+            }
+        }
+
+        /* ---- 第 2 步：模型 ---- */
         ev(json!({ "id": spec.id, "phase": "downloading", "done": 0, "total": spec.bytes, "pct": 0 }));
         let mut last = 0i64;
         let r = aimodels::download(spec, &mut |done, total| {
@@ -9044,6 +9108,240 @@ fn ai_matting_download(app: AppHandle, id: String) -> Result<(), String> {
 #[tauri::command]
 fn ai_matting_cancel() {
     aimodels::request_cancel();
+}
+
+/* ══ r80g：模型存放位置（用户要求「直达位置 + 可改位置 + 自动迁移」）══ */
+
+/// 模型目录信息：当前路径 + 是不是自定义的 + 默认路径 + 各模型在不在。
+///
+/// 一次给全，设置页不必分几次问。
+#[tauri::command]
+fn ai_model_dir_info() -> Value {
+    let cur = aimodels::models_dir();
+    // ⚠ 用 preferred_dir（"正常情况下应该在的位置"），不用 default_dir
+    //   （那是"exe 目录不可写时的兜底"）—— 否则界面显示的默认位置与实际不符。
+    let def = aimodels::preferred_dir();
+    let custom = crate::try_st()
+        .and_then(|s| s.cfg.lock().ok())
+        .map(|c| !c.ai_model_dir.trim().is_empty())
+        .unwrap_or(false);
+    let items: Vec<Value> = aimodels::MODELS
+        .iter()
+        .map(|m| {
+            let p = cur.join(format!("{}.onnx", m.id));
+            let size = std::fs::metadata(&p).map(|x| x.len()).unwrap_or(0);
+            json!({
+                "id": m.id, "name": m.name,
+                "found": size > 0,
+                "size": size,
+                "sizeText": aimodels::human_size(if size > 0 { size } else { m.bytes }),
+            })
+        })
+        .collect();
+    json!({
+        "dir": cur.to_string_lossy(),
+        "defaultDir": def.to_string_lossy(),
+        "custom": custom,
+        "exists": cur.exists(),
+        "items": items,
+    })
+}
+
+/// 选一个新的模型目录，并**自动把已有模型迁移过去**。
+///
+/// 返回 `{"cancel":true}`（用户取消）/ `{"ok":true,"moved":N,"dir":"...","failed":[...]}`。
+///
+/// 为什么迁移放在这里（而不是让前端分两步调）：选完目录必须**立刻**迁移 ——
+/// 中间隔一次 IPC 往返，万一失败或被打断，用户就处于"配置指向新目录、
+/// 但模型还在旧目录"的夹缝状态，表现是"模型明明下过却用不了"。
+#[tauri::command]
+fn ai_model_dir_pick(app: AppHandle) -> Result<Value, String> {
+    let old = aimodels::models_dir();
+    let (tx, rx) = std::sync::mpsc::channel::<Option<std::path::PathBuf>>();
+    let _ = app.run_on_main_thread(move || {
+        let picked = rfd::FileDialog::new()
+            .set_title("选一个目录放 AI 模型（会自动把已有模型迁过去）")
+            .pick_folder();
+        let _ = tx.send(picked);
+    });
+    let picked = match rx.recv_timeout(std::time::Duration::from_secs(180)) {
+        Ok(p) => p,
+        Err(_) => return Err("目录选择超时".to_string()),
+    };
+    let Some(dir) = picked else {
+        return Ok(json!({ "cancel": true }));
+    };
+
+    // 迁移：先复制后删源（跨盘 rename 会失败，见 aimodels::migrate_all 的注释）
+    let (moved, failed) = aimodels::migrate_all(&old, &dir);
+    win::log(&format!(
+        "ai_model_dir_pick: {} -> {} 迁移 {moved} 个，失败 {}",
+        old.display(),
+        dir.display(),
+        failed.len()
+    ));
+    {
+        let mut cfg = match st().cfg.lock() {
+            Ok(c) => c,
+            Err(_) => return Err("配置锁被占用".to_string()),
+        };
+        cfg.ai_model_dir = dir.to_string_lossy().to_string();
+        config::save(&cfg);
+    }
+    broadcast();
+    Ok(json!({
+        "ok": true,
+        "dir": dir.to_string_lossy(),
+        "moved": moved,
+        "failed": failed,
+    }))
+}
+
+/// 把模型目录恢复成默认位置（同样会迁移已有模型）。
+#[tauri::command]
+fn ai_model_dir_reset() -> Result<Value, String> {
+    let old = aimodels::models_dir();
+    // ⚠ 用 preferred_dir（"正常情况下应该在的位置"），不用 default_dir
+    //   （那是"exe 目录不可写时的兜底"）—— 否则界面显示的默认位置与实际不符。
+    let def = aimodels::preferred_dir();
+    let (moved, failed) = aimodels::migrate_all(&old, &def);
+    {
+        let mut cfg = match st().cfg.lock() {
+            Ok(c) => c,
+            Err(_) => return Err("配置锁被占用".to_string()),
+        };
+        cfg.ai_model_dir = String::new();
+        config::save(&cfg);
+    }
+    broadcast();
+    win::log(&format!("ai_model_dir_reset: 迁回默认，{moved} 个"));
+    Ok(json!({ "ok": true, "dir": def.to_string_lossy(), "moved": moved, "failed": failed }))
+}
+
+/// 用资源管理器打开模型目录（用户要求「直达模型储存位置的按钮」）。
+///
+/// 目录不存在时先建出来 —— 用户点这个按钮就是想"看看里面有什么"，
+/// 打开一个不存在的路径只会弹错误框。
+#[tauri::command]
+fn ai_model_dir_open() {
+    let dir = aimodels::models_dir();
+    if !dir.exists() {
+        let _ = std::fs::create_dir_all(&dir);
+    }
+    let _ = open::that(&dir);
+}
+
+/* ══ r80g：设置页里的独立抠图工具 ══
+ *
+ * 用户原话：「设置通用 ai 抠图这一框最好也有一个抠图按钮，那这样我也可以用这个
+ * 软件来实现抠图，搜完我就直接自己自定义地方保存」。
+ *
+ * 所以这里有两条命令：
+ *   · `ai_cutout_pick`  —— 选一张图进来抠（返回抠好的 data URL 给界面预览）
+ *   · `ai_cutout_save`  —— 把抠好的结果另存到用户选的位置
+ *
+ * 与图标编辑器那条链路的区别：那里是"给图标抠背景"，要写 overrideIcons、
+ * 要跟横条联动；这里是**单纯的图片工具** —— 输入一张图、输出一张图，
+ * 不碰任何配置。所以单独一套，不硬塞进 iconedit 的会话机制里。 */
+
+/// 挑一张图并抠图，返回 `{"src": "<dataUrl>", "removed": N, "noBackground": bool, "elapsedMs": M}`。
+///
+/// 用 `params` 让界面能复用同一套 AI 参数；`modelId` 允许界面**临时换模型**
+/// （用户要求「如果某一个我抠的不满意，我能立刻换另一个来抠」）。
+#[tauri::command]
+fn ai_cutout_pick(
+    app: AppHandle,
+    params: Option<aimatte::Params>,
+    model_id: Option<String>,
+) -> Result<Value, String> {
+    let (tx, rx) = std::sync::mpsc::channel::<Option<std::path::PathBuf>>();
+    let _ = app.run_on_main_thread(move || {
+        let picked = rfd::FileDialog::new()
+            .set_title("挑一张图来抠")
+            .add_filter("图片", &["png", "jpg", "jpeg", "webp", "bmp", "gif", "ico"])
+            .pick_file();
+        let _ = tx.send(picked);
+    });
+    let picked = match rx.recv_timeout(std::time::Duration::from_secs(180)) {
+        Ok(p) => p,
+        Err(_) => return Err("选图超时".to_string()),
+    };
+    let Some(path) = picked else {
+        return Ok(json!({ "cancel": true }));
+    };
+    let bytes = std::fs::read(&path).map_err(|e| format!("读图失败：{e}"))?;
+    if bytes.len() > 32 * 1024 * 1024 {
+        return Err("这张图超过 32MB，换一张小一点的".to_string());
+    }
+    let p = params.unwrap_or_default();
+    let t0 = std::time::Instant::now();
+    let (png, removed, no_bg) = iconedit::remove_background_ex(&bytes, None, &p, model_id.as_deref())?;
+    let name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("cutout.png")
+        .to_string();
+    win::log(&format!(
+        "ai_cutout_pick: {} 抠掉 {removed} 用时 {}ms",
+        path.display(),
+        t0.elapsed().as_millis()
+    ));
+    Ok(json!({
+        // 用原名做 data URL 的"文件名"（前端另存时作为默认文件名）
+        "src": config::data_url(&name, &png),
+        "removed": removed,
+        "noBackground": no_bg,
+        "elapsedMs": t0.elapsed().as_millis() as u64,
+        "name": name,
+    }))
+}
+
+/// 把抠好的图另存到用户选的位置（`ai_cutout_pick` 的结果）。
+///
+/// `suggested`：默认文件名（一般是原图名加 `-抠图`）。
+#[tauri::command]
+fn ai_cutout_save(
+    app: AppHandle,
+    src: String,
+    suggested: Option<String>,
+) -> Result<Value, String> {
+    let (_mime, bytes) = read_icon_src(&src)?;
+    let name = suggested
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "cutout.png".to_string());
+    // 文件名安全化（同 icon_editor_export 的口径）
+    let safe: String = name
+        .trim()
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' || c == ' ' || c == '.' { c } else { '_' })
+        .collect();
+    let safe = safe.trim_matches(|c| c == '.' || c == ' ').to_string();
+    let safe = if safe.is_empty() { "cutout.png".to_string() } else { safe };
+    // 统一存成 PNG（抠图结果恒带 alpha，jpg 存不了透明）
+    let stem = safe.rsplit_once('.').map(|(a, _)| a.to_string()).unwrap_or(safe.clone());
+    let default_name = format!("{stem}.png");
+
+    let (tx, rx) = std::sync::mpsc::channel::<Option<std::path::PathBuf>>();
+    let dlg_name = default_name.clone();
+    let _ = app.run_on_main_thread(move || {
+        let picked = rfd::FileDialog::new()
+            .set_title("保存抠好的图")
+            .set_file_name(&dlg_name)
+            .add_filter("PNG（保留透明）", &["png"])
+            .add_filter("所有文件", &["*"])
+            .save_file();
+        let _ = tx.send(picked);
+    });
+    let picked = match rx.recv_timeout(std::time::Duration::from_secs(180)) {
+        Ok(p) => p,
+        Err(_) => return Err("保存对话框超时".to_string()),
+    };
+    let Some(path) = picked else {
+        return Ok(json!({ "cancel": true }));
+    };
+    std::fs::write(&path, &bytes).map_err(|e| format!("写文件失败：{e}"))?;
+    win::log(&format!("ai_cutout_save: {} 字节 -> {}", bytes.len(), path.display()));
+    Ok(json!({ "ok": true, "path": path.to_string_lossy(), "bytes": bytes.len() }))
 }
 
 /// **导出处理结果到用户选定的文件**（「导出」按钮）。
@@ -11581,6 +11879,14 @@ fn main() {
             ai_matting_remove,
             ai_matting_download,
             ai_matting_cancel,
+            // r80g：模型存放位置（直达 / 更换 / 迁移）
+            ai_model_dir_info,
+            ai_model_dir_pick,
+            ai_model_dir_reset,
+            ai_model_dir_open,
+            // r80g：设置页里的独立抠图工具
+            ai_cutout_pick,
+            ai_cutout_save,
             pick_app_at,
             pick_app_path_at,
             pick_app_file,

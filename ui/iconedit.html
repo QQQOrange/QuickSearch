@@ -185,6 +185,28 @@ body { display: flex; flex-direction: column; overflow: hidden; }
 .mask-bar .mb-t { font-size: 12px; color: var(--fg-dim); }
 .mask-bar .mb-t b { color: var(--fg); font-weight: 600; }
 
+/* r80g：编辑器里的模型下拉（换模型重抠）。
+   宽度限制一下 —— 引擎名 + 体积可能挺长，别把工具栏挤变形。 */
+.mdl { display: inline-flex; align-items: center; }
+.mdl select {
+    font-size: 12px; padding: 4px 8px; border-radius: 7px;
+    border: 1px solid var(--line); background: var(--bg); color: var(--fg);
+    max-width: 190px;
+}
+/* r80g：涂抹模式的两个模式按钮（保留 / 擦除）。
+   做成"分段控件"的样子：选中的那颗高亮，一眼看出当前是哪种笔。 */
+.seg-b {
+    font-size: 12px; padding: 3px 10px; border-radius: 6px;
+    border: 1px solid var(--line); background: var(--bg); color: var(--fg);
+    cursor: pointer; margin-right: 4px;
+}
+.seg-b.on {
+    background: var(--accent); color: #fff; border-color: var(--accent);
+    font-weight: 600;
+}
+/* 涂抹画布与描边画布共用 .mask 的定位方式（都在 .cv 里绝对定位） */
+#brushCanvas { cursor: crosshair; }
+
 /* ------------------------------ 控制行 ------------------------------ */
 .ctl {
     flex: none;
@@ -337,13 +359,10 @@ body { display: flex; flex-direction: column; overflow: hidden; }
         </div>
         <div class="cv" id="cvBefore">
             <img id="imgBefore" alt="编辑前的图标">
-            <!-- r77：手动描边画布。压在「编辑前」那张图上，只在描边模式里接收
-                 指针事件（平时 pointer-events:none，不挡任何东西）。
-                 用户原话：「当前编辑图标的一键消除背景功能，它会把图标的主体内容
-                 也会消除掉，所以有需要在一键消除背景之前还要先进行手动描边」。
-                 画出来的红色是"这块是主体，别抠"的保护蒙版，随「一键消除背景」
-                 一起发给后端（icon_remove_bg 的 keep 参数）。 -->
-            <canvas class="mask" id="maskCanvas" hidden></canvas>
+            <!-- r80g：旧的「手动描边画布」已删除 —— 补描整套升级成了
+                 结果图上的「涂抹修饰」（见 cvAfter 里那块 brushCanvas）。
+                 旧画布压在原图上、看不到抠完的效果，用户反馈"涂了没反应"，
+                 实测链路是通的但交互上没法判断涂对没有。 -->
         </div>
     </section>
     <section class="pane">
@@ -354,26 +373,54 @@ body { display: flex; flex-direction: column; overflow: hidden; }
         <div class="cv" id="cvAfter">
             <div class="ph" id="phAfter">点下面的「自动抠图」看看效果</div>
             <img id="imgAfter" alt="消除背景后的图标" hidden>
+            <!-- r80g：涂抹层。盖在**结果图**上（不是原图）—— 所见即所得，
+                 用户涂哪儿立刻看到哪儿变化（旧补描涂在原图上，看不到效果）。 -->
+            <canvas class="mask" id="brushCanvas" hidden></canvas>
         </div>
     </section>
 </main>
 
 <div class="ctl">
     <!-- r80：走 **AI 抠图**（神经网络语义分割）。原来那个"颜色解混"本地算法
-         已按用户要求删除（「现在有了 ai 抠图，原来的抠图就直接不要去掉」）。
-         「手动补描」保留：描过的区域无条件保留，优先级高于 AI 的判断。 -->
+         已按用户要求删除（「现在有了 ai 抠图，原来的抠图就直接不要去掉」）。 -->
     <button class="btn primary" id="btnRemove"
         title="用 AI 模型识别主体并抠掉背景（神经网络语义分割 + 边缘去色）">自动抠图</button>
-    <button class="btn" id="btnMask"
-        title="AI 判错时手动涂一下：涂过的区域一定会被保留（优先级高于 AI）">
-        手动补描
-    </button>
-    <!-- r80b：AI 参数面板。折叠着（默认不占地方），点「参数」展开。
-         用户要求「在编辑画面里面多添加一些与这些模型相关的参数」。 -->
+    <!-- r80g：换模型重抠。用户要求「某一个我抠的不满意，我能立刻换另一个来抠，
+         这样效率更高」。这是**一次性**选择，不改你在设置里选的默认模型。 -->
+    <label class="mdl" title="临时换一个模型重抠（不影响设置里选的默认模型）">
+        <select id="edModel"></select>
+    </label>
+    <!-- r80b：AI 参数面板。折叠着（默认不占地方），点「参数」展开。 -->
     <button class="btn" id="btnParams" title="调整 AI 抠图的参数（会影响模型后处理与边缘）">
         参数 ▾
     </button>
+    <!-- r80g：修瑕疵。抠完总有小瑕疵 —— 提供一个"擦除"刷子把多余部分涂掉；
+         「保留」刷子则是涂哪里就不抠哪里（原「手动补描」升级为可直接在结果上涂）。 -->
+    <button class="btn" id="btnBrush" title="修瑕疵：涂掉多余的部分 / 保住该留的部分（可在结果图上直接涂）">
+        涂抹修饰
+    </button>
     <span class="hint" id="hint"></span>
+</div>
+
+<!-- r80g：涂抹模式工具条。在**结果图**上涂，所见即所得。 -->
+<div class="mask-bar" id="brushBar" hidden>
+    <span class="mb-t">
+        <button class="seg-b" id="brushModeKeep" title="涂过的部分会保留（补描：AI 抠错的地方救回来）">保留</button>
+        <button class="seg-b on" id="brushModeErase" title="涂过的部分会被擦掉（抠完有小瑕疵时用这个）">擦除</button>
+    </span>
+    <label class="tol" title="画笔粗细（屏幕像素）">
+        笔刷
+        <input type="range" id="brushSize" min="4" max="90" step="2" value="22">
+        <b id="brushSizeVal">22</b>
+    </label>
+    <label class="tol" title="放大看细节再涂 —— 小瑕疵不放大很容易涂错地方">
+        放大
+        <input type="range" id="brushZoom" min="1" max="8" step="0.5" value="1">
+        <b id="brushZoomVal">1×</b>
+    </label>
+    <button class="btn" id="brushUndo" title="撤销上一笔">撤销</button>
+    <button class="btn" id="brushClear" title="丢弃所有涂抹（回到 AI 刚抠完的样子）">重来</button>
+    <button class="btn primary" id="brushApply" title="把涂抹结果固定下来">应用涂抹</button>
 </div>
 
 <!-- r80b：AI 参数抽屉。放"真的会改变输出"的量 —— 每项都标注了作用与方向，
@@ -428,18 +475,12 @@ body { display: flex; flex-direction: column; overflow: hidden; }
     </div>
 </div>
 
-<!-- r77：描边模式的工具条。只在描边模式里出现（平时 hidden，不占高度）。 -->
-<div class="mask-bar" id="maskBar" hidden>
-    <span class="mb-t">在图上涂出<b>主体</b>（不会被消除）</span>
-    <label class="tol" title="画笔粗细">
-        笔刷
-        <input type="range" id="maskSize" min="4" max="64" step="2" value="18">
-        <b id="maskSizeVal">18</b>
-    </label>
-    <button class="btn" id="btnMaskUndo" title="撤销上一笔">撤销</button>
-    <button class="btn" id="btnMaskClear" title="清掉全部描边">清空</button>
-    <button class="btn primary" id="btnMaskDone">完成描边</button>
-</div>
+<!-- ⚠ 旧的「手动补描」工具条已删除（r80g）。
+     用户报「点击手动补描之后，并没有真正的触发补描的作用」——实测链路是通的
+     （见 tools/r80e-mask.js 的 11 项断言全过），真正的问题是**交互**：
+     它让人在"编辑前"的原图上涂，看不到抠完的效果，根本不知道往哪儿涂。
+     现在统一由上面的「涂抹修饰」承担：直接涂结果图、所见即所得、
+     而且多了「擦除」（修瑕疵的主力）。 -->
 
 <footer class="ft">
     <span class="tip" id="tip">消除背景只去掉与四边边缘连成一片的底色；图标主体内部的花纹、镂空不受影响。</span>
@@ -508,13 +549,15 @@ async function loadSession() {
     /* r80：导出按钮跟着"有没有内容"走。刚进来 SRC 就有（挑好的图），
      * 所以直接可用 —— 用户可能只想把这张原图另存一份，不想抠也不想应用。 */
     $('btnExport').disabled = !SRC;
-    $('tol').disabled = true;
-    $('tol').value = '48';
-    $('tolVal').textContent = '48';
     $('cvAfter').classList.remove('busy');
-    // r77：换一张图时描边要一起清掉 —— 留着上一张的保护区域，
-    // 用户会看到"新图上莫名有块地方没被抠掉"，而且那形状跟这张图毫无关系。
-    maskReset();
+    /* r80g：换一张图时把**涂抹层与缩放**一起复位 ——
+     * 留着上一张的涂抹，用户会看到"新图上莫名有块地方被涂花了"，
+     * 而且那形状跟这张图毫无关系。缩放也要回 1×（新图尺寸可能不同）。 */
+    if (typeof brushReset === 'function') {
+        brushReset();
+        if (typeof brushZoomApply === 'function') brushZoomApply(1);
+        if (typeof brushSetMode === 'function' && brushOn()) brushSetMode(false);
+    }
     if (VECTOR) {
         // SVG 是矢量图：没有位图背景可消，但「保存」仍要能用 ——
         // 挑了一张 SVG 当图标，编辑器里点保存就原样应用（取消就是没挑）。
@@ -548,184 +591,344 @@ async function loadSession() {
  *   · 蒙版只在描边模式下接收指针事件，平时 pointer-events 由 CSS 挡住。
  * ========================================================================== */
 
-/** 描边画布的实际绘制坐标 → 蒙版数组（Uint8Array，长度 mw*mh，非零 = 保护）。 */
-let maskCanvasPx = null;   // 画布像素尺寸 (w, h)
-const MASK_MAX = 512;      // 与后端 iconedit::MAX_EDGE 对齐
 
-const maskOn = () => !$('maskCanvas').hidden;
-const maskCtx = () => $('maskCanvas').getContext('2d', { willReadFrequently: true });
+/* ⚠ 旧的 bindMaskPainting IIFE 在 r80g 被整块删除（连同它引用的
+   元素 btnMask / maskBar / maskSize）。它的收尾 })(); 就在这里 ——
+   新涂抹系统用的是自己的 brushBind()，不再需要它。 */
 
-/** 把画布对齐到图片显示框，并按同样的宽高比重建蒙版。 */
-function maskSync() {
-    const img = $('imgBefore');
-    const cv = $('maskCanvas');
-    if (!img || !cv || !SRC) return;
+/* ══════════════════════════════════════════════════════════════════════════
+ * r80g：换模型 + 涂抹修饰（保留/擦除）+ 缩放
+ *
+ * 用户原话：
+ *   · 「在抠图页面最好能够手动切换抠图的模型，因为如果某一个我抠的不满意，
+ *      我能立刻换另一个来抠，这样的话效率更高」
+ *   · 「还要留有一定的手动涂抹的空间，比如说抠完图了，总体我都挺满意，
+ *      但会有一些小瑕疵，那我可以通过涂抹的方式把小瑕疵给涂掉。
+ *      当然最好能够放大编辑后的图片来涂抹，不然容易涂错」
+ *
+ * # 与旧「手动补描」的区别（这是为什么重写而不是改）
+ *
+ * 旧的补描是**在"编辑前"的图上涂**，然后把蒙版单向发给后端当"这些地方保留"。
+ * 它有两个实际问题：
+ *   1. 用户看到的是"编辑前"的原图，涂的时候**看不到抠完的效果**，
+ *      不知道该往哪儿涂（用户报"点了补描没触发"，实测链路是通的，
+ *      但交互上确实难用 —— 他无法判断涂得对不对）
+ *   2. 只能"保留"不能"擦除"，而用户真正需要的是**修瑕疵**（把多余的去掉了）
+ *
+ * 新的涂抹**直接作用在结果图上**：
+ *   · 「擦除」= 把结果里多余的像素抹掉（修瑕疵主力）
+ *   · 「保留」= 把被误抠掉的部分补回来（补描）
+ *   · 两种都是所见即所得：涂完立刻看到变化，不需要再点一次抠图
+ *   · 可放大 1~8 倍再涂（小瑕疵不放大必然涂错）
+ *
+ * 实现方式：维护一份"涂抹层"（与结果同尺寸的 alpha 增量），
+ * 涂完点「应用涂抹」合成到结果上。这样涂抹**不影响** AI 的结果本身，
+ * 随时可以「重来」回到 AI 刚抠完的样子。
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+/** 涂抹层：与结果图同尺寸的 8bit 数组。0=没涂，1=保留，2=擦除。 */
+let BRUSH = {
+    on: false,          // 是否在涂抹模式
+    mode: 'erase',      // 'erase' | 'keep'
+    layer: null,        // Uint8Array（w*h）
+    w: 0, h: 0,         // 尺寸（= 结果图原始像素）
+    zoom: 1,            // 放大倍数
+    history: [],        // 整笔撤销栈（存 layer 的快照副本）
+    drawing: false,
+};
+
+const brushOn = () => BRUSH.on;
+
+/** 进入/退出涂抹模式。 */
+function brushSetMode(on) {
+    const bar = $('brushBar');
+    BRUSH.on = !!on;
+    if (bar) bar.hidden = !on;
+    const btn = $('btnBrush');
+    if (btn) btn.classList.toggle('busy', !!on);
+    if (on) {
+        if (!OUT) {
+            setHint('先点「自动抠图」出结果，再用涂抹修瑕疵。', 'warn');
+            BRUSH.on = false;
+            if (bar) bar.hidden = true;
+            return;
+        }
+        brushReset();
+        brushZoomApply(BRUSH.zoom);
+        setHint(BRUSH.mode === 'erase'
+            ? '在右边的结果图上涂 —— 涂到的地方会被擦掉。可以放大后再涂。'
+            : '在右边的结果图上涂 —— 涂到的地方会被保留。可以放大后再涂。');
+    } else {
+        brushZoomApply(1);
+        setHint('');
+    }
+    brushRenderLayer();
+}
+
+/** 清空涂抹层（回到 AI 刚抠完的样子）。 */
+function brushReset() {
+    const img = $('imgAfter');
+    const w = img && img.naturalWidth ? img.naturalWidth : 0;
+    const h = img && img.naturalHeight ? img.naturalHeight : 0;
+    BRUSH.w = w;
+    BRUSH.h = h;
+    BRUSH.layer = w && h ? new Uint8Array(w * h) : null;
+    BRUSH.history.length = 0;
+}
+
+/** 涂抹层里有没有内容（决定「应用涂抹」要不要真的合成）。 */
+function brushHasInk() {
+    const L = BRUSH.layer;
+    if (!L) return false;
+    for (let i = 0; i < L.length; i++) if (L[i]) return true;
+    return false;
+}
+
+/** 把涂抹层画成一层半透明遮罩（红=擦除，绿=保留），叠在结果图上。 */
+function brushRenderLayer() {
+    const cv = $('brushCanvas');
+    const img = $('imgAfter');
+    if (!cv || !img) return;
+    if (!BRUSH.on || !BRUSH.layer) { cv.hidden = true; return; }
+    // 画布按结果图的显示尺寸放，像素分辨率跟结果图一致
     const box = img.getBoundingClientRect();
-    if (!box.width || !box.height) return;
+    if (!box.width || !box.height) { cv.hidden = true; return; }
     const parent = cv.parentElement.getBoundingClientRect();
-    // 画布贴着图片本身放（图片是居中 contain 的，直接取它的框最准）
     cv.style.left = (box.left - parent.left) + 'px';
     cv.style.top = (box.top - parent.top) + 'px';
     cv.style.width = box.width + 'px';
     cv.style.height = box.height + 'px';
-    // 蒙版分辨率：按显示尺寸等比缩到不超过 MASK_MAX，至少 32
-    const scale = Math.min(1, MASK_MAX / Math.max(box.width, box.height));
-    const mw = Math.max(32, Math.round(box.width * scale));
-    const mh = Math.max(32, Math.round(box.height * scale));
-    if (!maskCanvasPx || maskCanvasPx.w !== mw || maskCanvasPx.h !== mh) {
-        cv.width = mw;
-        cv.height = mh;
-        maskCanvasPx = { w: mw, h: mh };
-        maskReset();
-    }
-}
-
-/** 清空蒙版并抹掉画布上的红。 */
-function maskReset() {
-    const cv = $('maskCanvas');
-    if (!cv) return;
+    cv.width = BRUSH.w;
+    cv.height = BRUSH.h;
     const cx = cv.getContext('2d', { willReadFrequently: true });
-    if (cx) cx.clearRect(0, 0, cv.width, cv.height);
-    maskHistory.length = 0;
+    cx.clearRect(0, 0, cv.width, cv.height);
+    const d = cx.createImageData(BRUSH.w, BRUSH.h);
+    const L = BRUSH.layer;
+    for (let i = 0; i < L.length; i++) {
+        if (!L[i]) continue;
+        const o = i * 4;
+        if (L[i] === 2) { d.data[o] = 255; d.data[o + 1] = 70; d.data[o + 2] = 70; }
+        else { d.data[o] = 60; d.data[o + 1] = 210; d.data[o + 2] = 120; }
+        d.data[o + 3] = 130;   // 半透明：看得见自己涂了哪儿，也看得见底下的图
+    }
+    cx.putImageData(d, 0, 0);
+    cv.hidden = false;
 }
 
-/** 整笔撤销的栈：每项是这一笔之前的 ImageData（一笔可能跨很多 mousemove）。 */
-const maskHistory = [];
+/** 放大结果图（只看，不改数据）。 */
+function brushZoomApply(z) {
+    BRUSH.zoom = Math.max(1, Math.min(8, Number(z) || 1));
+    const img = $('imgAfter');
+    const ph = $('phAfter');
+    if (img) {
+        img.style.maxHeight = BRUSH.zoom > 1 ? 'none' : '';
+        img.style.maxWidth = BRUSH.zoom > 1 ? 'none' : '';
+        img.style.width = BRUSH.zoom > 1 ? (BRUSH.zoom * 100) + '%' : '';
+    }
+    if (ph) {
+        ph.style.maxHeight = BRUSH.zoom > 1 ? 'none' : '';
+    }
+    const zv = $('brushZoomVal');
+    if (zv) zv.textContent = BRUSH.zoom + '×';
+    setTimeout(brushRenderLayer, 30);
+}
 
-/** 进入/退出描边模式。 */
-function maskSetMode(on) {
-    const cv = $('maskCanvas');
-    const bar = $('maskBar');
-    const pane = document.querySelector('.pane');
-    if (!cv || !bar) return;
-    if (on) {
-        // 进模式前先对齐一次（窗口可能刚改过大小）
-        maskSync();
-        cv.hidden = false;
-        bar.hidden = false;
-        if (pane) pane.classList.add('masking');
-        setHint('在左边的图上涂出图标主体 —— 涂过的地方一定会被保留。');
-        // 已经抠过一次的话，描完顺手重算一遍，让用户立刻看到差别
-    } else {
-        cv.hidden = true;
-        bar.hidden = true;
-        if (pane) pane.classList.remove('masking');
-        setHint(maskHasInk() ? '补描已记录 —— 点「自动抠图」时会保留这些区域。' : '');
+/** 把涂抹笔迹写进层里（一次笔迹可能跨很多 pointermove）。 */
+function brushPaint(x, y, r) {
+    const L = BRUSH.layer;
+    if (!L) return;
+    const val = BRUSH.mode === 'erase' ? 2 : 1;
+    const x0 = Math.max(0, Math.floor(x - r));
+    const x1 = Math.min(BRUSH.w - 1, Math.ceil(x + r));
+    const y0 = Math.max(0, Math.floor(y - r));
+    const y1 = Math.min(BRUSH.h - 1, Math.ceil(y + r));
+    const r2 = r * r;
+    for (let yy = y0; yy <= y1; yy++) {
+        for (let xx = x0; xx <= x1; xx++) {
+            const dx = xx - x, dy = yy - y;
+            if (dx * dx + dy * dy <= r2) L[yy * BRUSH.w + xx] = val;
+        }
     }
 }
 
-/** 蒙版里有没有真的画过东西（决定要不要带给后端）。 */
-function maskHasInk() {
-    const cv = $('maskCanvas');
-    if (!cv || !cv.width) return false;
-    try {
-        const d = maskCtx().getImageData(0, 0, cv.width, cv.height).data;
-        // 只看 alpha 通道：画上去的笔迹 alpha 恒 > 0
-        for (let i = 3; i < d.length; i += 4) if (d[i] > 0) return true;
-    } catch (e) { }
-    return false;
+/** 把涂抹结果**合成**到结果图上（点「应用涂抹」时执行）。
+ *
+ *  合成规则：
+ *    · 擦除（2）→ alpha 归零（把像素抹掉）
+ *    · 保留（1）→ alpha 拉满（把被抠掉的补回来；RGB 用邻近像素补齐，
+ *      否则补回来的地方是"透明的颜色"，看着像一块黑斑）
+ */
+async function brushApplyToImage() {
+    if (!OUT || !BRUSH.layer || !brushHasInk()) {
+        setHint('还没有涂抹任何地方。', 'warn');
+        return;
+    }
+    const img = new Image();
+    await new Promise((res, rej) => {
+        img.onload = res;
+        img.onerror = () => rej(new Error('结果图读不出来'));
+        img.src = OUT;
+    });
+    const cv = document.createElement('canvas');
+    cv.width = img.naturalWidth;
+    cv.height = img.naturalHeight;
+    const cx = cv.getContext('2d', { willReadFrequently: true });
+    cx.drawImage(img, 0, 0);
+    const id = cx.getImageData(0, 0, cv.width, cv.height);
+    const d = id.data;
+    const L = BRUSH.layer;
+    // 尺寸可能不完全一致（缩放过的图），按比例采样
+    const sx = BRUSH.w / cv.width, sy = BRUSH.h / cv.height;
+    let erased = 0, kept = 0;
+    for (let y = 0; y < cv.height; y++) {
+        for (let x = 0; x < cv.width; x++) {
+            const lx = Math.min(BRUSH.w - 1, Math.floor(x * sx));
+            const ly = Math.min(BRUSH.h - 1, Math.floor(y * sy));
+            const v = L[ly * BRUSH.w + lx];
+            if (!v) continue;
+            const o = (y * cv.width + x) * 4;
+            if (v === 2) {
+                if (d[o + 3] > 0) erased++;
+                d[o + 3] = 0;
+            } else {
+                if (d[o + 3] < 255) kept++;
+                /* 保留：alpha 拉满。RGB 若原本是透明的（全 0），
+                 * 用周围一圈的不透明像素平均值补上 —— 否则补回来的是黑块。 */
+                if (d[o + 3] < 8) {
+                    let rr = 0, gg = 0, bb = 0, n = 0;
+                    for (let dy = -2; dy <= 2; dy++) {
+                        for (let dx = -2; dx <= 2; dx++) {
+                            const nx = x + dx, ny = y + dy;
+                            if (nx < 0 || ny < 0 || nx >= cv.width || ny >= cv.height) continue;
+                            const no = (ny * cv.width + nx) * 4;
+                            if (d[no + 3] > 200) { rr += d[no]; gg += d[no + 1]; bb += d[no + 2]; n++; }
+                        }
+                    }
+                    if (n > 0) { d[o] = rr / n; d[o + 1] = gg / n; d[o + 2] = bb / n; }
+                }
+                d[o + 3] = 255;
+            }
+        }
+    }
+    cx.putImageData(id, 0, 0);
+    OUT = cv.toDataURL('image/png');
+    showResult(OUT);
+    markDim($('imgAfter'), $('dimAfter'));
+    $('btnSave').disabled = false;
+    brushReset();
+    brushRenderLayer();
+    setHint(`涂抹已应用（擦掉 ${erased.toLocaleString()} 个像素、补回 ${kept.toLocaleString()} 个）。`, 'ok');
 }
 
-/** 取出要发给后端的保护蒙版；没描过就返回 undefined（后端走老路）。 */
-function maskPayload() {
-    const cv = $('maskCanvas');
-    if (!cv || !cv.width || !maskHasInk()) return undefined;
-    const d = maskCtx().getImageData(0, 0, cv.width, cv.height).data;
-    // 单通道：alpha > 0 就是保护（后端只关心非零）
-    const one = new Uint8Array(cv.width * cv.height);
-    for (let i = 0, j = 0; i < d.length; i += 4, j++) one[j] = d[i + 3] > 0 ? 255 : 0;
-    // Tauri 的 Vec<u8> 参数用普通数组最稳（Uint8Array 走 JSON 序列化会变成对象）
-    return { w: cv.width, h: cv.height, data: Array.from(one) };
-}
-
-/** 画笔：指针按下/移动/松开，整笔记一次历史用于撤销。 */
-(function bindMaskPainting() {
-    const cv = $('maskCanvas');
-    if (!cv) return;
-    let drawing = false, strokeBefore = null;
-
-    // 把指针的**窗口坐标**换成画布内坐标（画布有独立像素密度）
+/** 绑定涂抹的指针事件（在结果图上画）。 */
+function brushBind() {
+    const box = $('cvAfter');
+    const cv = $('brushCanvas');
+    if (!box || !cv) return;
+    // 坐标换算：屏幕 → 涂抹层像素
     const posOf = (ev) => {
         const r = cv.getBoundingClientRect();
         return {
-            x: (ev.clientX - r.left) * (cv.width / Math.max(1, r.width)),
-            y: (ev.clientY - r.top) * (cv.height / Math.max(1, r.height)),
+            x: (ev.clientX - r.left) * (BRUSH.w / Math.max(1, r.width)),
+            y: (ev.clientY - r.top) * (BRUSH.h / Math.max(1, r.height)),
         };
     };
-    const strokeWidth = () => {
-        const shown = Number($('maskSize').value) || 18;
+    const radius = () => {
+        const shown = Number($('brushSize').value) || 22;
         const r = cv.getBoundingClientRect();
-        // 滑块的数是"屏幕上多少像素"，换成画布像素
-        return Math.max(1, shown * (cv.width / Math.max(1, r.width)));
+        // 滑块是"屏幕上多少像素"，换算成层像素（放大后同样手感）
+        return Math.max(1, (shown / 2) * (BRUSH.w / Math.max(1, r.width)));
     };
-
     const down = (ev) => {
-        if (!maskOn()) return;
+        if (!BRUSH.on || !BRUSH.layer) return;
         ev.preventDefault();
-        drawing = true;
-        const cx = maskCtx();
-        // 记下这一笔开始前的样子（撤销用）
-        try { strokeBefore = cx.getImageData(0, 0, cv.width, cv.height); } catch (e) { strokeBefore = null; }
-        cx.lineCap = 'round';
-        cx.lineJoin = 'round';
-        cx.strokeStyle = 'rgba(255,60,60,.55)';
-        cx.lineWidth = strokeWidth();
+        BRUSH.drawing = true;
+        BRUSH.history.push(BRUSH.layer.slice());   // 整笔撤销：记按下前的快照
+        if (BRUSH.history.length > 40) BRUSH.history.shift();
         const p = posOf(ev);
-        cx.beginPath();
-        cx.moveTo(p.x, p.y);
-        // 单击也留一个点（不然"点一下"什么都不出现）
-        cx.lineTo(p.x + 0.01, p.y + 0.01);
-        cx.stroke();
-        try { cv.setPointerCapture(ev.pointerId); } catch (_) { }
+        brushPaint(p.x, p.y, radius());
+        brushRenderLayer();
     };
     const move = (ev) => {
-        if (!drawing || !maskOn()) return;
+        if (!BRUSH.drawing) return;
         ev.preventDefault();
-        const cx = maskCtx();
         const p = posOf(ev);
-        cx.lineWidth = strokeWidth();
-        cx.lineCap = 'round';
-        cx.lineJoin = 'round';
-        cx.strokeStyle = 'rgba(255,60,60,.55)';
-        cx.lineTo(p.x, p.y);
-        cx.stroke();
+        brushPaint(p.x, p.y, radius());
+        brushRenderLayer();
     };
-    const up = (ev) => {
-        if (!drawing) return;
-        drawing = false;
-        if (strokeBefore) {
-            // 存的是"这一笔之前"的快照（撤销时直接盖回去）
-            maskHistory.push(strokeBefore);
-            if (maskHistory.length > 30) maskHistory.shift();   // 只留最近 30 笔
-            strokeBefore = null;
-        }
-        try { cv.releasePointerCapture(ev.pointerId); } catch (_) { }
-    };
+    const up = () => { BRUSH.drawing = false; };
     cv.addEventListener('pointerdown', down);
-    cv.addEventListener('pointermove', move);
-    cv.addEventListener('pointerup', up);
-    cv.addEventListener('pointercancel', up);
-    cv.addEventListener('pointerleave', up);
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
 
-    $('btnMask').addEventListener('click', () => maskSetMode(!maskOn() || $('maskBar').hidden));
-    $('btnMaskDone').addEventListener('click', () => maskSetMode(false));
-    $('btnMaskClear').addEventListener('click', () => { maskReset(); setHint('描边已清空。'); });
-    $('btnMaskUndo').addEventListener('click', () => {
-        const cx = maskCtx();
-        const prev = maskHistory.pop();
-        if (prev) {
-            cx.putImageData(prev, 0, 0);
-            setHint('已撤销一笔。');
-        } else {
-            setHint('没有可撤销的笔画了。');
+    // 按钮
+    const bind = (id, fn) => { const el = $(id); if (el) el.addEventListener('click', fn); };
+    bind('btnBrush', () => brushSetMode(!brushOn()));
+    bind('brushApply', () => brushApplyToImage().catch((e) => setHint('应用失败：' + ((e && e.message) || e), 'warn')));
+    bind('brushClear', () => { brushReset(); brushRenderLayer(); setHint('涂抹已清空，回到 AI 刚抠完的样子。'); });
+    bind('brushUndo', () => {
+        const prev = BRUSH.history.pop();
+        if (!prev) { setHint('没有可撤销的笔迹了。'); return; }
+        BRUSH.layer = prev;
+        brushRenderLayer();
+        setHint('已撤销一笔。');
+    });
+    bind('brushModeKeep', () => {
+        BRUSH.mode = 'keep';
+        $('brushModeKeep').classList.add('on');
+        $('brushModeErase').classList.remove('on');
+        setHint('现在是「保留」：涂到的地方会被保住。');
+    });
+    bind('brushModeErase', () => {
+        BRUSH.mode = 'erase';
+        $('brushModeErase').classList.add('on');
+        $('brushModeKeep').classList.remove('on');
+        setHint('现在是「擦除」：涂到的地方会被擦掉。');
+    });
+    const bs = $('brushSize');
+    if (bs) bs.addEventListener('input', () => { $('brushSizeVal').textContent = bs.value; });
+    const bz = $('brushZoom');
+    if (bz) {
+        bz.addEventListener('input', () => {
+            $('brushZoomVal').textContent = bz.value + '×';
+            brushZoomApply(Number(bz.value));
+        });
+    }
+    // 图尺寸变化（放大 / 窗口改大小）后要重新对齐画布
+    window.addEventListener('resize', () => { if (brushOn()) brushRenderLayer(); });
+    const img = $('imgAfter');
+    if (img) img.addEventListener('load', () => { if (brushOn()) brushRenderLayer(); });
+}
+
+/** 填充编辑器里的模型下拉框（只列已下载的 —— 没下载的选了也跑不了）。 */
+async function edModelFill() {
+    const sel = $('edModel');
+    if (!sel) return;
+    try {
+        const st = await invoke('ai_matting_status');
+        const prev = sel.value;
+        sel.innerHTML = '';
+        for (const m of (st.models || [])) {
+            if (!m.downloaded) continue;   // 只列能用的
+            const o = document.createElement('option');
+            o.value = m.id;
+            // 名字里带上体积，用户一眼知道换的是哪个
+            o.textContent = m.name + ' · ' + m.sizeText;
+            sel.appendChild(o);
         }
-    });
-    $('maskSize').addEventListener('input', () => {
-        $('maskSizeVal').textContent = $('maskSize').value;
-    });
-    // 窗口改大小 → 画布得重新对齐（蒙版内容保留，只是缩放网格）
-    window.addEventListener('resize', () => { if (maskOn()) maskSync(); else maskCanvasPx = null; });
-})();
+        if (!sel.options.length) {
+            const o = document.createElement('option');
+            o.value = '';
+            o.textContent = '（没有已下载的模型）';
+            sel.appendChild(o);
+        }
+        // 默认选当前生效的那个
+        sel.value = prev && Array.from(sel.options).some((x) => x.value === prev)
+            ? prev : (st.current || '');
+        if (!sel.value && sel.options.length) sel.value = sel.options[0].value;
+    } catch (e) { }
+}
 
 /* ══════════════════════════════════════════════════════════════════════════
  * AI 抠图参数（r80b）
@@ -831,16 +1034,23 @@ async function runRemove() {
     btn.innerHTML = '<span class="spinner"></span>抠图中';
     $('cvAfter').classList.add('busy');
     try {
-        /* 带上手动补描蒙版（没描过就是 undefined）与 AI 参数。 */
-        const keep = maskPayload();
+        /* 参数 + （可选的）**临时换模型**。
+         *
+         * r80g：旧代码在这里带一个"补描蒙版"（maskPayload）。那一套已升级为
+         * **涂抹修饰** —— 它作用在结果图上、所见即所得，而且多了"擦除"。
+         * 所以抠图这一步不再需要 keep；涂抹在抠完之后做（见 brushApplyToImage）。
+         *
+         * `modelId` 是下拉框里选的：用户可以对同一张图**换模型重抠**
+         * （「某一个我抠的不满意，我能立刻换另一个来抠」）。
+         * 传空串 = 用设置里的默认模型。 */
         const params = paramsPayload();
-        const r = await invoke('icon_remove_bg', { src: SRC, keep, params });
+        const sel = $('edModel');
+        const modelId = sel && sel.value ? sel.value : null;
+        const r = await invoke('icon_remove_bg', { src: SRC, keep: null, params, modelId });
         OUT = r.src || '';
         if (!OUT) throw new Error('后端没返回处理结果');
-        const img = $('imgAfter');
-        img.onload = () => { $('phAfter').hidden = true; img.hidden = false; };
-        img.src = OUT;
-        markDim(img, $('dimAfter'));
+        showResult(OUT);
+        markDim($('imgAfter'), $('dimAfter'));
         $('btnSave').disabled = false;
         const n = Number(r.removed) || 0;
         const ms = Number(r.elapsedMs) || 0;
@@ -883,6 +1093,41 @@ async function runRemove() {
 
 $('btnRemove').addEventListener('click', () => runRemove());
 paramsBind();
+
+/** 把一张 data URL 显示到「编辑后」那一格。
+ *
+ *  ⚠ r80d 修的真 bug：以前写的是
+ *  ```js
+ *  img.onload = () => { ph.hidden = true; img.hidden = false; };
+ *  img.src = OUT;
+ *  ```
+ *  用户报「点一次不出效果，点两次才出成品图」。实测复现（tools/r80d-doubleclick.js）：
+ *  ```
+ *  第一次点击后: outLen=15670  imgHidden=true   imgComplete=true imgW=152
+ *  第二次点击后: outLen=15670  imgHidden=false
+ *  ```
+ *  图片**已经加载完成**（complete=true、宽度已就绪），但 `imgHidden` 还是 true ——
+ *  也就是 `onload` **没有被调用**。
+ *
+ *  为什么：`<img>` 的 `onload` 只在**从"没加载"变成"加载好"**时触发。
+ *  同一个 data URL 第二次赋值（或浏览器同步命中缓存）时，图片状态可能已经是
+ *  complete，于是设 src 之后 onload 不再触发 —— 界面就一直显示占位图，
+ *  直到下一次点击才"碰巧"显示出来。
+ *
+ *  正确做法：**先设 src，再主动查 `complete`**，别指望事件一定会来。
+ *  同时保留 onload 兜底（图确实需要异步解码时用得着）。 */
+function showResult(dataUrl) {
+    const img = $('imgAfter');
+    const ph = $('phAfter');
+    const reveal = () => { ph.hidden = true; img.hidden = false; };
+    img.onload = reveal;
+    img.onerror = () => { setHint('结果图显示失败，但它已经算好了，可以直接保存。', 'warn'); };
+    img.src = dataUrl;
+    /* 关键：设完 src 立刻查一次。已经 complete 就直接显示，不等事件。
+     * （`naturalWidth > 0` 排除"src 是空/坏图但 complete=true"的情况。） */
+    if (img.complete && img.naturalWidth > 0) reveal();
+    else if (img.complete) reveal();   // 尺寸拿不到也先显示，让用户看到东西
+}
 
 /* 保存 / 取消。
  * 保存的内容：处理过就存处理结果（OUT，恒 PNG）；SVG 原样应用时存 SRC。

@@ -1178,7 +1178,46 @@ function renderAllList() {
     // 搜索：不分层级、直接全表（字母分组）—— 输了关键字还要先点三级目录才能
     // 看到结果，那才叫难用。
     const searching = !!kw;
-    const hits = searching ? rows.filter((r) => allRowHit(r, kw)) : rows;
+    /* ⚠ r80f：搜索时**必须按名字去重**（用户报「搜一个引擎出现多个同样的」）。
+     *
+     * 根因是**数据模型**而不是渲染 bug：一个引擎可以同时属于多个分类 ——
+     * 实测 `qsAllEngineRows` 里 777 行有 8 个名字重复，例如
+     * ```
+     *   知乎 ×3    → web/search/知识 + web/search/社交 + web/search/新闻
+     *   微博 ×2    → web/search/社交 + web/search/新闻
+     *   任务管理器 ×2 → app/appopen/常用软件 + hotkey/hotkey/快捷键
+     * ```
+     * 这本身是合理的（知乎既是知识站也是社交平台），**按分类浏览时也该各出现一次**；
+     * 但**搜索结果是一份清单**，同一个引擎列三遍只会让人以为程序出错了。
+     *
+     * 去重口径：同一个名字只留一条，优先留"归属更贴切"的那个 ——
+     * 排序依据是**大类/子类的语义优先级**（不是随便取第一条）：
+     *   网页搜索 > 软件搜索 > 网页直达 > 软件直达 > 快捷键
+     * 因为用户搜一个网站名时，最想要的是"用搜索引擎搜它"，而不是"打开官网"。
+     * （知乎那条就应当留 web/search 而不是 web/open。） */
+    const KIND_RANK = { search: 0, appsearch: 1, open: 2, appopen: 3, hotkey: 4 };
+    const hits = (() => {
+        const list = searching ? rows.filter((r) => allRowHit(r, kw)) : rows;
+        if (!searching) return list;
+        const best = new Map();   // name -> 目前最好的一条
+        for (const r of list) {
+            const cur = best.get(r.name);
+            if (!cur) { best.set(r.name, r); continue; }
+            // 排名小的更优先；同排名时保留**先出现**的（保持原顺序稳定）
+            const a = KIND_RANK[r.kind] === undefined ? 9 : KIND_RANK[r.kind];
+            const b = KIND_RANK[cur.kind] === undefined ? 9 : KIND_RANK[cur.kind];
+            if (a < b) best.set(r.name, r);
+        }
+        // 按原顺序输出（Map 的迭代顺序 = 插入顺序，但替换会保留位置；
+        // 这里显式按 list 顺序过滤，保证界面顺序与去重前一致）
+        const kept = new Set();
+        const out = [];
+        for (const r of list) {
+            if (best.get(r.name) === r) { out.push(r); kept.add(r.name); }
+            else if (!kept.has(r.name) && best.get(r.name) === undefined) { out.push(r); }
+        }
+        return out;
+    })();
 
     let mode = 'none';
     if (searching || allGroupFilter === '*') mode = 'letters';
@@ -7040,13 +7079,19 @@ function aiRenderModels() {
             '</div>';
         el.appendChild(info);
 
-        // 正在下载 → 进度条取代按钮
-        if (downloading && downloading.phase === 'downloading') {
+        // 正在下载（运行库阶段或模型阶段）→ 进度条取代按钮
+        if (downloading && (downloading.phase === 'downloading' || downloading.phase === 'runtime')) {
             const wrap = document.createElement('div');
             wrap.style.flex = '1';
+            /* r80g：运行库阶段要说清楚在下什么 —— 它是个 69MB 的 zip，
+             * 只显示"下载中"会让用户以为在下那个 4MB 的模型。 */
+            const label = downloading.phase === 'runtime'
+                ? '正在下载运行库（解出 11.8MB）'
+                : '正在下载模型';
             wrap.innerHTML =
                 '<div class="ai-dl"><i style="width:' + (downloading.pct || 0) + '%"></i></div>' +
-                '<div class="ai-dl-t"><span>' + (downloading.pct || 0) + '%</span>' +
+                '<div class="ai-dl-t"><span>' + label + '</span>' +
+                '<span>' + (downloading.pct || 0) + '%</span>' +
                 '<span>' + aiSize(downloading.done) + ' / ' + aiSize(downloading.total) + '</span></div>';
             el.appendChild(wrap);
             const cancel = document.createElement('button');
@@ -7103,13 +7148,17 @@ function aiRenderModels() {
         let msg;
         if (!AI_STATUS.runtime) {
             msg = '缺少推理运行时（onnxruntime.dll），下载模型也没法运行。请重新下载完整程序包。';
+        } else if (!AI_STATUS.runtime) {
+            /* r80g：运行库现在**随模型一起下载**，所以这里不再是"重新下程序包"，
+             * 而是"点模型的下载按钮会一起下"（见 ai_matting_download）。 */
+            msg = '运行库（onnxruntime.dll）还没就绪 —— 它会在你点某个模型的「下载」时'
+                + '一起下好，并和模型放在同一个目录里。';
         } else if (!AI_STATUS.currentReady) {
             const cm = models.find((x) => x.id === cur);
             msg = '当前选的是「' + (cm ? cm.name : cur) + '」，但还没下载 —— 点上面的「下载」按钮，'
                 + '下载完成后图标编辑器的自动抠图就会用上它。';
         } else {
-            msg = '已就绪：图标编辑器 → 自动抠图 会先用 AI 模型；'
-                + 'AI 跑不动时自动回退本地算法，不会出现"点了没反应"。';
+            msg = '已就绪：图标编辑器 → 自动抠图、以及下面的「抠图工具」都能用了。';
         }
         tip.textContent = msg;
     }
@@ -7128,6 +7177,8 @@ function aiRender() {
     const rtRow = $('aiRuntimeRow');
     const on = !!(AI_STATUS && AI_STATUS.enable);
     if (wrap) wrap.hidden = !on;
+    // 模型下拉框跟着状态走（哪些已下载会影响"可选但跑不了"的提示）
+    if (on) aiCutFillModels();
     if (rtRow) rtRow.hidden = !(on && AI_STATUS && !AI_STATUS.runtime);
     if (on) aiRenderModels();
 }
@@ -7163,10 +7214,13 @@ function aiBindProgress() {
     listen('model-download', (ev) => {
         const p = (ev && ev.payload) || {};
         if (!p.id) return;
-        if (p.phase === 'downloading') {
+        /* r80g：`runtime` 是"正在下运行库"（69MB 的 zip，解出 11.8MB 的 dll）。
+         * 它是**下载模型的前置步骤**，所以也走同一条进度条 —— 但要能把阶段
+         * 显示清楚，否则用户以为在下一个很小的模型却看到 70MB 的进度。 */
+        if (p.phase === 'runtime' || p.phase === 'downloading') {
             AI_DL.set(p.id, {
                 done: p.done || 0, total: p.total || 0,
-                pct: p.pct || 0, phase: 'downloading',
+                pct: p.pct || 0, phase: p.phase,
             });
             aiRenderModels();
             return;
@@ -7193,6 +7247,7 @@ function aiBindProgress() {
  *   结果是双重绑定（探针 2e 抓到配置没同步到 CONF）。 */
 function aiInit() {
     aiBindProgress();
+    aiToolsInit();
     aiRefresh();
 }
 
@@ -7202,6 +7257,175 @@ function aiInit() {
  *  而 `AI_STATUS` 是后端状态、不随 `CONF` 自动更新，所以要主动拉一次。 */
 async function aiOnSwitchChanged() {
     await aiRefresh();
+    // 模型下拉框要用最新的 AI_STATUS（哪个已下载 / 当前是哪个）
+    aiCutFillModels();
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * r80g：模型存放位置 + 独立抠图工具
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+/** 拉取并显示模型目录信息。 */
+async function aiDirRefresh() {
+    let info = null;
+    try { info = await invoke('ai_model_dir_info'); } catch (e) { }
+    if (!info) return;
+    const pathEl = $('aiDirPath');
+    const modeEl = $('aiDirMode');
+    const resetBtn = $('btnAiDirReset');
+    if (pathEl) pathEl.textContent = info.dir || '（未知）';
+    if (modeEl) {
+        modeEl.textContent = info.custom ? '已自定义' : '默认位置';
+    }
+    // 只有自定义过才显示「恢复默认」（默认状态下这个按钮点了也没意义）
+    if (resetBtn) resetBtn.hidden = !info.custom;
+    /* 目录不存在时给一句提示 —— 用户可能刚改到一个被删掉的路径，
+     * 那时"已下载"全变成"未下载"，不说清楚会以为是程序出错了。 */
+    if (pathEl && info.exists === false) {
+        pathEl.textContent = (info.dir || '') + '（目录还不存在，下载模型时会自动创建）';
+    }
+}
+
+/** 绑定模型目录那三个按钮。 */
+function aiDirBind() {
+    const open = $('btnAiDirOpen');
+    if (open) {
+        open.addEventListener('click', async () => {
+            try { await invoke('ai_model_dir_open'); }
+            catch (e) { toast('打开目录失败：' + ((e && e.message) || e)); }
+        });
+    }
+    const pick = $('btnAiDirPick');
+    if (pick) {
+        pick.addEventListener('click', async () => {
+            pick.disabled = true;
+            try {
+                const r = await invoke('ai_model_dir_pick');
+                if (r && r.cancel) return;          // 用户取消，不当失败
+                if (r && r.ok) {
+                    const msg = r.moved > 0
+                        ? `已迁移 ${r.moved} 个模型`
+                        : '目录已切换（当前没有模型要迁移）';
+                    toast(msg);
+                    if (r.failed && r.failed.length) {
+                        toast('有 ' + r.failed.length + ' 个模型迁移失败：' + r.failed.join('；'));
+                    }
+                }
+            } catch (e) {
+                toast('更换目录失败：' + ((e && e.message) || e));
+            } finally {
+                pick.disabled = false;
+                await aiDirRefresh();
+                await aiRefresh();       // 模型就绪状态要跟着更新
+            }
+        });
+    }
+    const reset = $('btnAiDirReset');
+    if (reset) {
+        reset.addEventListener('click', async () => {
+            reset.disabled = true;
+            try {
+                const r = await invoke('ai_model_dir_reset');
+                if (r && r.ok) {
+                    toast(r.moved > 0 ? `已迁回默认位置（${r.moved} 个模型）` : '已恢复默认位置');
+                }
+            } catch (e) {
+                toast('恢复默认失败：' + ((e && e.message) || e));
+            } finally {
+                reset.disabled = false;
+                await aiDirRefresh();
+                await aiRefresh();
+            }
+        });
+    }
+}
+
+/* ══ 独立抠图工具 ══ */
+
+/** 上次抠好的结果（data URL）与文件名，给「保存结果」用。 */
+let AI_CUT = { src: '', name: '' };
+
+/** 把可选模型填进下拉框（含"未下载"标记，避免用户选了却跑不了）。 */
+function aiCutFillModels() {
+    const sel = $('aiCutModel');
+    if (!sel || !AI_STATUS) return;
+    const prev = sel.value;
+    sel.innerHTML = '';
+    for (const m of AI_STATUS.models || []) {
+        const o = document.createElement('option');
+        o.value = m.id;
+        // 已下载的标出来；没下的也允许选（用户可能先去下载）
+        o.textContent = m.name + (m.downloaded ? '' : '（未下载）');
+        sel.appendChild(o);
+    }
+    // 默认选当前生效的那个
+    sel.value = prev || AI_STATUS.current;
+    if (!sel.value && sel.options.length) sel.value = sel.options[0].value;
+}
+
+/** 绑定抠图工具。 */
+function aiCutBind() {
+    const pick = $('btnAiCutout');
+    if (pick) {
+        pick.addEventListener('click', async () => {
+            pick.disabled = true;
+            const old = pick.textContent;
+            pick.innerHTML = '<span class="spinner"></span>抠图中';
+            try {
+                const modelId = $('aiCutModel') ? $('aiCutModel').value : '';
+                const r = await invoke('ai_cutout_pick', { params: null, modelId: modelId || null });
+                if (r && r.cancel) return;
+                if (!r || !r.src) throw new Error('后端没返回结果');
+                AI_CUT = { src: r.src, name: r.name || 'cutout.png' };
+                const img = $('aiCutImg');
+                const box = $('aiCutPrev');
+                if (img) img.src = r.src;
+                if (box) box.hidden = false;
+                const saveBtn = $('btnAiCutoutSave');
+                if (saveBtn) saveBtn.disabled = false;
+                const meta = $('aiCutMeta');
+                if (meta) {
+                    meta.textContent =
+                        (r.name || '') + ' · 抠掉 ' + (Number(r.removed) || 0).toLocaleString() + ' 个背景像素'
+                        + (r.elapsedMs ? ' · 用时 ' + r.elapsedMs + ' ms' : '')
+                        + (r.noBackground ? ' · ⚠ 没认出主体（换一个模型或换张图试试）' : '');
+                }
+            } catch (e) {
+                toast('抠图失败：' + ((e && e.message) || e));
+            } finally {
+                pick.disabled = false;
+                pick.textContent = old;
+            }
+        });
+    }
+    const save = $('btnAiCutoutSave');
+    if (save) {
+        save.addEventListener('click', async () => {
+            if (!AI_CUT.src) { toast('还没有可保存的抠图结果'); return; }
+            save.disabled = true;
+            try {
+                // 默认文件名：原名去掉扩展名 + `-抠图`
+                const stem = (AI_CUT.name || 'cutout').replace(/\.[^.]+$/, '');
+                const r = await invoke('ai_cutout_save', {
+                    src: AI_CUT.src,
+                    suggested: stem + '-抠图.png',
+                });
+                if (r && r.cancel) return;
+                if (r && r.ok) toast('已保存到 ' + r.path);
+            } catch (e) {
+                toast('保存失败：' + ((e && e.message) || e));
+            } finally {
+                save.disabled = false;
+            }
+        });
+    }
+}
+
+/** 初始化这一整块（在 aiRefresh 之后调，因为下拉框要用 AI_STATUS）。 */
+function aiToolsInit() {
+    aiDirBind();
+    aiCutBind();
+    aiDirRefresh();
 }
 
 

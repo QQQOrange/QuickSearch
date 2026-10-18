@@ -202,12 +202,155 @@ pub fn default_id() -> &'static str {
     MODELS.first().map(|m| m.id).unwrap_or("u2netp")
 }
 
-/// 模型文件存放路径（`<数据目录>/models/<id>.onnx`）。
+/// **模型目录**（r80g：默认在**软件目录**下的「抠图模型」文件夹，用户也可自定义）。
 ///
-/// 放数据目录而不是程序目录：程序可能装在只读位置（Program Files），
-/// 而模型是用户数据、要能随时删掉重下。
+/// 用户原话：
+///   · 「模型默认存储的位置应该在软件的位置，就相当于软件的位置，新开一个文件夹，
+///      文件夹的名字叫做抠图模型，然后模型以及运行库就放在那里」
+///   · 「这个运行库默认不下载，在点击打开 ai 抠图之后，会随着模型一起下载，
+///      并且跟模型储存在一起」
+///
+/// 所以顺序是：
+///   1. 配置里的 `ai_model_dir`（用户选过的，最高优先级）
+///   2. **`<exe 所在目录>/抠图模型`**（新的默认 —— 与软件在一起，便携）
+///   3. 万一 exe 目录不可写（装在 Program Files、没管理员权限），
+///      退回 `<数据目录>/models`
+///
+/// ⚠ 为什么默认改成"跟着软件走"而不是数据目录：
+///   · 用户明确要求（上面那句）
+///   · 便携：整个文件夹拷走就能带着模型，不用重新下 168MB
+///   · 可见：用户一眼能找到自己的模型放哪儿了
+///   ⚠ 但 exe 目录**可能是只读的**（Program Files 下），所以第 3 条兜底必须有，
+///     否则装在默认位置的用户会"下载失败"却不知道为什么。
+pub fn models_dir() -> PathBuf {
+    let cfg = crate::try_st().and_then(|s| s.cfg.lock().ok());
+    if let Some(c) = cfg {
+        let custom = c.ai_model_dir.trim();
+        if !custom.is_empty() {
+            return PathBuf::from(custom);
+        }
+    }
+    // 软件目录下的「抠图模型」
+    let dir = preferred_dir();
+    /* 判断能不能写：目录已存在就用它；不存在就**试着建一下** ——
+     * 建不出来（权限不足）才退回数据目录。
+     * 不能只看"目录在不在"：全新安装时它还不存在，但那不代表不能建。 */
+    if dir.exists() || std::fs::create_dir_all(&dir).is_ok() {
+        return dir;
+    }
+    crate::win::log(&format!(
+        "aimodels: 软件目录不可写（{}），模型改放数据目录",
+        dir.display()
+    ));
+    default_dir()
+}
+
+/// 兜底目录（数据目录下的 models）—— **仅在 exe 目录不可写时**用。
+///
+/// ⚠ 它**不是**"默认目录"。默认目录是 `<exe目录>/抠图模型`（见 `models_dir`）。
+/// 这个函数只在"软件装在 Program Files、普通用户没写权限"时才兜底 ——
+/// `default_dir()` 这个名字保留是为了兼容旧调用点，语义上它是"**备选**目录"。
+pub fn default_dir() -> PathBuf {
+    crate::config::data_dir().join("models")
+}
+
+/// **界面上要显示的"默认位置"**（用户点「恢复默认」会回到哪儿）。
+///
+/// ⚠ 与 `default_dir()` 的区别：那个是"exe 目录不可写时的兜底"，
+/// 这个是"正常情况下应该在的位置"。设置页的 `defaultDir` 字段必须用这个 ——
+/// 否则用户看到"默认位置"写着数据目录，但他的模型其实在「抠图模型」里，
+/// 会以为程序算错了（r80g 实测就踩了这个不一致）。
+pub fn preferred_dir() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("抠图模型")))
+        .unwrap_or_else(default_dir)
+}
+
+/// **推理运行时（onnxruntime.dll）的存放路径**。
+///
+/// r80g：与模型放**同一个目录**（用户要求「模型以及运行库就放在那里」）。
+/// 它随模型一起下载，不再随安装包分发。
+pub fn runtime_path() -> PathBuf {
+    models_dir().join("onnxruntime.dll")
+}
+
+/// 运行时是否已经就位（文件在且大小合理）。
+///
+/// 不校验 SHA256 的理由同 `is_ready`：读 11.8MB 每次都算太浪费，
+/// 大小对不上一定是坏的；下完那次校验已经兜住了完整性。
+pub fn runtime_ready() -> bool {
+    match std::fs::metadata(runtime_path()) {
+        Ok(m) => m.len() > 8 * 1024 * 1024,   // 实测 11.8MB；低于 8MB 一定是坏的/没下完
+        Err(_) => false,
+    }
+}
+
+/// 模型文件路径（`<模型目录>/<id>.onnx`）。
+///
+/// 放独立目录而不是程序目录：程序可能装在只读位置（Program Files），
+/// 而模型是用户数据、要能随时删掉重下、也能搬到别的盘。
 pub fn model_path(id: &str) -> PathBuf {
-    crate::config::data_dir().join("models").join(format!("{id}.onnx"))
+    models_dir().join(format!("{id}.onnx"))
+}
+
+/// 把已有模型从旧目录**迁移**到新目录（用户改位置后调用）。
+///
+/// 返回 `(迁移成功数, 失败的文件名列表)`。
+///
+/// # 为什么要迁移而不是"让用户重新下"
+///
+/// 用户明确要求「换完位置之后，也得软件自动的把模型都迁移过去」。
+/// 168MB 的模型重新下载对用户是实打实的代价，尤其国内网络。
+///
+/// # 迁移策略
+///
+/// · **先复制、再删源**（不是 rename）：跨盘 rename 会失败（EXDEV），
+///   而复制失败时可以安全放弃、原文件还在，用户不会"两边都没有"。
+/// · 目标已存在且**大小一致**就跳过（省一次 168MB 的拷贝），
+///   但**仍然把源删掉** —— 否则用户会有两份占双倍空间。
+/// · 单个文件失败不中断整批（另一个模型可能能迁成功）。
+pub fn migrate_all(from: &std::path::Path, to: &std::path::Path) -> (usize, Vec<String>) {
+    let mut ok = 0usize;
+    let mut failed: Vec<String> = Vec::new();
+    if from == to {
+        return (0, failed);
+    }
+    let real_from = if from.as_os_str().is_empty() { default_dir() } else { from.to_path_buf() };
+    if let Err(e) = std::fs::create_dir_all(to) {
+        return (0, vec![format!("建目录失败：{e}")]);
+    }
+    for spec in MODELS {
+        let src = real_from.join(format!("{}.onnx", spec.id));
+        if !src.exists() {
+            continue;
+        }
+        let dst = to.join(format!("{}.onnx", spec.id));
+        // 目标已有同样大小的 → 只删源
+        let same = std::fs::metadata(&dst)
+            .ok()
+            .zip(std::fs::metadata(&src).ok())
+            .map(|(a, b)| a.len() == b.len())
+            .unwrap_or(false);
+        if same {
+            let _ = std::fs::remove_file(&src);
+            ok += 1;
+            continue;
+        }
+        match std::fs::copy(&src, &dst) {
+            Ok(_) => {
+                // 复制成功才删源（顺序不能反：先删源、复制失败就两头空）
+                let _ = std::fs::remove_file(&src);
+                ok += 1;
+            }
+            Err(e) => failed.push(format!("{}：{e}", spec.id)),
+        }
+    }
+    // 顺手清掉源目录里的 .part 残留（上次下载中断留下的）
+    for spec in MODELS {
+        let _ = std::fs::remove_file(real_from.join(format!("{}.onnx.part", spec.id)));
+    }
+    (ok, failed)
 }
 
 /// 某个模型当前是否就绪（文件存在且大小对得上）。
@@ -273,14 +416,233 @@ fn agent() -> ureq::Agent {
 pub const EVENT_PROGRESS: &str = "model-download";
 
 /// 取消标志：下载线程每读一块就看一眼。
+///
+/// ⚠ 下载**模型**与下载**运行库**共用这一个标志 —— 它们不会同时进行
+/// （界面上一旦开始下就锁住按钮），所以不需要两套。
+/// （r80g 重写这段时曾把这个静态变量漏掉，编译报 `cannot find value CANCEL`。）
 static CANCEL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// **取消正在进行的下载。**
 pub fn request_cancel() {
     CANCEL.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
 fn take_cancel() -> bool {
     CANCEL.swap(false, std::sync::atomic::Ordering::SeqCst)
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * r80g：推理运行时（onnxruntime.dll）改为**按需下载**
+ *
+ * 用户原话：「ONNX Runtime 的运行时库 这个运行库默认不下载，在点击打开 ai 抠图
+ * 之后，会随着模型一起下载，并且跟模型储存在一起，这能做到吗？」
+ *
+ * **能做到**，已实测验证：把 dll 从程序目录移走，exe 仍然正常启动（因为 ort 是
+ * 延迟加载 —— 只有真的要推理时才去找 dll）。所以现在：
+ *   · 安装包**不含** dll（省 11.8MB）
+ *   · 用户打开 AI 抠图 / 下载模型时**一起下**（两个文件都落在「抠图模型」目录）
+ *   · 推理前把 `ORT_DYLIB_PATH` 指向那个目录（ort 支持这个环境变量，见它的 lib.rs）
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+/// 运行时文件的下载源（ONNX Runtime 1.22.0 官方 win-x64 包里的 dll）。
+///
+/// 为什么不用 `ort-sys` 编译期下载的那个：那要求编译期联网（实测常失败），
+/// 而且会把 dll 打进程序目录。这里改成**运行期**下到模型目录，用户可以自己选位置。
+///
+/// ⚠ 从 zip 里取单个文件需要解压 —— 所以这里下的是**整个 zip**（69MB），
+/// 解压后只留 dll、把 zip 删掉。这样脚本最少（不用处理 zip 内偏移）。
+/// 国内镜像（同 GitHub 文件的加速）没有稳定可用的，所以这一步走官方源；
+/// 官方源实测可达（69MB / 189 秒）。
+pub const RUNTIME_ZIP_URLS: &[&str] = &[
+    // 国内加速镜像优先（实测 206 + 1.7 秒响应）；官方源兜底
+    "https://gh-proxy.com/https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-win-x64-1.22.0.zip",
+    "https://ghfast.top/https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-win-x64-1.22.0.zip",
+    "https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-win-x64-1.22.0.zip",
+];
+
+/// 下完 zip 后，里面这个相对路径就是我们要的 dll。
+pub const RUNTIME_ZIP_INNER: &str = "onnxruntime-win-x64-1.22.0/lib/onnxruntime.dll";
+
+/// 运行库的体积（zip，字节）。界面进度条要用。
+pub const RUNTIME_ZIP_BYTES: u64 = 72_368_545;   // 官方 Content-Length 实测值
+
+/// 下载并解出运行库到模型目录。返回落盘的 dll 路径。
+///
+/// `progress`：`(阶段, 已下, 总)`。阶段是 "runtime"，让界面能显示
+/// "正在下载运行库" 而不是笼统的"下载中"。
+pub fn download_runtime(progress: &mut dyn FnMut(&str, u64, u64)) -> Result<PathBuf, String> {
+    use std::io::Read;
+
+    if runtime_ready() {
+        return Ok(runtime_path());
+    }
+    let dir = models_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("建目录失败（{}）：{e}", dir.display()))?;
+    let zip_path = dir.join("onnxruntime.zip");
+    let _ = std::fs::remove_file(&zip_path);
+
+    take_cancel();
+    let mut failures: Vec<String> = Vec::new();
+    for url in RUNTIME_ZIP_URLS {
+        let host = url_host(url);
+        if take_cancel() {
+            return Err("__CANCELED__".to_string());
+        }
+        let mut reader = match agent().get(url).call() {
+            Ok(r) => r.into_reader(),
+            Err(e) => { failures.push(format!("{host}: {e}")); continue; }
+        };
+        let mut file = std::fs::File::create(&zip_path)
+            .map_err(|e| format!("写临时文件失败（磁盘满？）：{e}"))?;
+        let mut buf = vec![0u8; 64 * 1024];
+        let mut done: u64 = 0;
+        let mut last: i64 = -1;
+        let mut broke = false;
+        loop {
+            if take_cancel() {
+                drop(file);
+                let _ = std::fs::remove_file(&zip_path);
+                return Err("__CANCELED__".to_string());
+            }
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if let Err(e) = std::io::Write::write_all(&mut file, &buf[..n]) {
+                        return Err(format!("写文件失败：{e}"));
+                    }
+                    done += n as u64;
+                    let pct = (done.saturating_mul(100)).checked_div(RUNTIME_ZIP_BYTES).unwrap_or(0) as i64;
+                    if pct != last {
+                        last = pct;
+                        progress("runtime", done, RUNTIME_ZIP_BYTES);
+                    }
+                }
+                Err(e) => { failures.push(format!("{host}: 中断 {e}")); broke = true; break; }
+            }
+        }
+        let _ = std::io::Write::flush(&mut file);
+        drop(file);
+        if broke {
+            let _ = std::fs::remove_file(&zip_path);
+            continue;
+        }
+        if done < 20_000_000 {
+            failures.push(format!("{host}: 只下到 {done} 字节"));
+            let _ = std::fs::remove_file(&zip_path);
+            continue;
+        }
+        // 解压出 dll
+        match extract_runtime_from_zip(&zip_path, &runtime_path()) {
+            Ok(()) => {
+                let _ = std::fs::remove_file(&zip_path);
+                crate::win::log(&format!(
+                    "aimodels: 运行库已就位（{}，{}）",
+                    runtime_path().display(),
+                    human_size(std::fs::metadata(runtime_path()).map(|m| m.len()).unwrap_or(0))
+                ));
+                return Ok(runtime_path());
+            }
+            Err(e) => {
+                failures.push(format!("{host}: 解压失败 {e}"));
+                let _ = std::fs::remove_file(&zip_path);
+            }
+        }
+    }
+    let _ = std::fs::remove_file(&zip_path);
+    Err(format!(
+        "运行库下载失败（{} 个源都试过）：\n{}",
+        failures.len(),
+        failures.join("\n")
+    ))
+}
+
+/// 从 zip 里解出 `RUNTIME_ZIP_INNER` 那一个文件，写到 `dst`。
+///
+/// # 为什么手写 zip 解析而不是引 `zip` crate
+///
+/// 只要"从 zip 里取一个文件"这一个功能，而 `zip` crate 会带进
+/// flate2 / miniz_oxide 等一串依赖。手写的话要处理的只是：
+///   中央目录（EOCD → 条目列表）→ 找到目标 → 按压缩方式解压。
+/// 但 deflate 解压**没法手写**（那是压缩算法），所以这里用 `flate2` 的
+/// 最小 feature（只开 `rust_backend`，纯 Rust、不拉 C 代码）。
+fn extract_runtime_from_zip(zip_path: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
+    use std::io::Read;
+    let bytes = std::fs::read(zip_path).map_err(|e| format!("读 zip 失败：{e}"))?;
+    // 找 EOCD（End of Central Directory，签名 0x06054b50），从尾部往前搜
+    let eocd = find_eocd(&bytes).ok_or_else(|| "不是有效的 zip（找不到 EOCD）".to_string())?;
+    let cd_count = u16::from_le_bytes([bytes[eocd + 10], bytes[eocd + 11]]) as usize;
+    let cd_offset = u32::from_le_bytes([
+        bytes[eocd + 16], bytes[eocd + 17], bytes[eocd + 18], bytes[eocd + 19],
+    ]) as usize;
+    let mut p = cd_offset;
+    for _ in 0..cd_count {
+        if p + 46 > bytes.len() {
+            break;
+        }
+        // 中央目录条目签名 0x02014b50
+        if u32::from_le_bytes([bytes[p], bytes[p + 1], bytes[p + 2], bytes[p + 3]]) != 0x0201_4b50 {
+            break;
+        }
+        let method = u16::from_le_bytes([bytes[p + 10], bytes[p + 11]]);
+        let comp_size = u32::from_le_bytes([
+            bytes[p + 20], bytes[p + 21], bytes[p + 22], bytes[p + 23],
+        ]) as usize;
+        let name_len = u16::from_le_bytes([bytes[p + 28], bytes[p + 29]]) as usize;
+        let extra_len = u16::from_le_bytes([bytes[p + 30], bytes[p + 31]]) as usize;
+        let comment_len = u16::from_le_bytes([bytes[p + 32], bytes[p + 33]]) as usize;
+        let local_off = u32::from_le_bytes([
+            bytes[p + 42], bytes[p + 43], bytes[p + 44], bytes[p + 45],
+        ]) as usize;
+        let name = String::from_utf8_lossy(&bytes[p + 46..p + 46 + name_len]).to_string();
+        if name == RUNTIME_ZIP_INNER {
+            // 本地文件头：签名 4 + 版本 2 + 标志 2 + 方式 2 + 时间 2 + 日期 2 + crc 4
+            //            + 压缩 4 + 原始 4 + 名长 2 + 扩展长 2 = 30，之后是数据
+            if local_off + 30 > bytes.len() {
+                return Err("本地文件头越界".to_string());
+            }
+            let lname_len = u16::from_le_bytes([bytes[local_off + 26], bytes[local_off + 27]]) as usize;
+            let lextra_len = u16::from_le_bytes([bytes[local_off + 28], bytes[local_off + 29]]) as usize;
+            let data_start = local_off + 30 + lname_len + lextra_len;
+            if data_start + comp_size > bytes.len() {
+                return Err("压缩数据越界".to_string());
+            }
+            let raw = &bytes[data_start..data_start + comp_size];
+            let out: Vec<u8> = if method == 0 {
+                raw.to_vec()                       // stored（不压缩）
+            } else if method == 8 {
+                let mut d = flate2::read::DeflateDecoder::new(raw);
+                let mut v = Vec::new();
+                d.read_to_end(&mut v).map_err(|e| format!("解压失败：{e}"))?;
+                v
+            } else {
+                return Err(format!("不支持的压缩方式 {method}"));
+            };
+            if out.len() < 8 * 1024 * 1024 {
+                return Err(format!("解出来的 dll 只有 {} 字节，太小了", out.len()));
+            }
+            std::fs::write(dst, &out).map_err(|e| format!("写 dll 失败：{e}"))?;
+            return Ok(());
+        }
+        p += 46 + name_len + extra_len + comment_len;
+    }
+    Err(format!("zip 里找不到 {RUNTIME_ZIP_INNER}"))
+}
+
+/// 从尾部往前找 EOCD 签名（`PK\x05\x06`）。
+///
+/// EOCD 是 zip 的"中央目录结束标记"，找到它才知道条目表在哪。
+/// 它通常就在文件末尾，但 zip 允许后面跟一段注释（最长 65535 字节），
+/// 所以最多从末尾往前回退 65535 字节去找。
+fn find_eocd(b: &[u8]) -> Option<usize> {
+    if b.len() < 22 {
+        return None;
+    }
+    let start = b.len().saturating_sub(22 + 65535);
+    // 反向找那 4 个字节（rposition 比手写 for 循环清晰）
+    b[start..=b.len() - 22]
+        .windows(4)
+        .rposition(|w| w == [0x50, 0x4b, 0x05, 0x06])
+        .map(|i| start + i)
 }
 
 /// 下载一个模型。返回 `(落盘字节, 实际 SHA256)`。

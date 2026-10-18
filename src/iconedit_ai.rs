@@ -35,15 +35,15 @@
 use crate::aimodels;
 use crate::matting::{self, Tri};
 
-/// 走 AI 抠图，返回 `(png 字节, 抠掉像素数, 是否没找到主体)`。
+/// 与 `try_ai` 相同，但可**临时指定模型**（`model_override` 优先于配置里的选择）。
 ///
-/// `params`：AI 参数（见 `aimatte::Params`）。界面上的滑块/开关直接映射到这里。
-///
-/// 失败时返回**给人看的**错误（见模块文档的三种分类）。
-pub fn try_ai(
+/// 用户要求「某一个我抠的不满意，我能立刻换另一个来抠」——
+/// 换模型是一次性动作，不该改用户的默认设置，所以走参数而不是写配置。
+pub fn try_ai_with(
     bytes: &[u8],
     keep: Option<&[bool]>,
     params: &crate::aimatte::Params,
+    model_override: Option<&str>,
 ) -> Result<(Vec<u8>, usize, bool), String> {
     // ---- 1. 三道门槛：开关 / 运行时 / 模型 ----
     /* ⚠ 读配置要容忍"应用状态还没初始化"（单测环境就是这样）：
@@ -55,15 +55,26 @@ pub fn try_ai(
     let model_id = cfg.ai_matting_model.clone();
     drop(cfg);
 
-    if !enabled {
+    /* 开关判断：**显式换模型时跳过它**。
+     *
+     * 为什么：用户可能只在设置页用独立抠图工具（那儿也可以换模型），
+     * 而图标编辑器的开关是另一回事 —— 把两者绑在一起会让"能抠图却不能换模型"
+     * 这种奇怪的限制。真正的门槛是"运行时在不在 + 模型下没下"。 */
+    if !enabled && model_override.is_none() {
         return Err(
             "抠图功能没有打开。请到「设置 → 通用 → AI 抠图」打开开关并下载一个模型".to_string(),
         );
     }
-    let id = if model_id.trim().is_empty() {
+    // 显式指定的模型优先（空串当没指定）
+    let picked = model_override
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .unwrap_or(model_id);
+    let id = if picked.trim().is_empty() {
         aimodels::default_id().to_string()
     } else {
-        model_id
+        picked
     };
     let spec = aimodels::find(&id).ok_or_else(|| format!("模型标识无效：{id}"))?;
     if !aimodels::is_ready(&id) {
@@ -265,7 +276,7 @@ mod tests {
         let png = matting::encode_png(&img).unwrap();
         // 测试环境里拿不到应用状态 / 开关默认关，两条路都会 Err；
         // 无论哪条，错误信息都必须**能读、能指引**，不能是空串或英文堆栈。
-        let e = try_ai(&png, None, &crate::aimatte::Params::default()).unwrap_err();
+        let e = try_ai_with(&png, None, &crate::aimatte::Params::default(), None).unwrap_err();
         assert!(!e.is_empty(), "错误信息不能是空的");
         assert!(
             e.contains("设置") || e.contains("抠图") || e.contains("AI"),
@@ -276,8 +287,8 @@ mod tests {
     /// 坏输入不能 panic（要返回 Err）。
     #[test]
     fn 坏输入返回错误而不是panic() {
-        assert!(try_ai(b"not an image", None, &crate::aimatte::Params::default()).is_err());
-        assert!(try_ai(&[], None, &crate::aimatte::Params::default()).is_err());
+        assert!(try_ai_with(b"not an image", None, &crate::aimatte::Params::default(), None).is_err());
+        assert!(try_ai_with(&[], None, &crate::aimatte::Params::default(), None).is_err());
     }
 
     /// 补描蒙版长度不符也不能 panic。
@@ -286,6 +297,6 @@ mod tests {
         let img = image::RgbaImage::new(4, 4);
         let png = matting::encode_png(&img).unwrap();
         let keep = vec![true; 3]; // 明显太短
-        let _ = try_ai(&png, Some(&keep), &crate::aimatte::Params::default()); // 只要不 panic 即可
+        let _ = try_ai_with(&png, Some(&keep), &crate::aimatte::Params::default(), None); // 只要不 panic 即可
     }
 }

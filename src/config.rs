@@ -741,6 +741,13 @@ pub ocr_accurate: bool,
     /// 存 **id** 而不是文件名：换下载源/改名都不影响用户配置。
     #[serde(default)]
     pub ai_matting_model: String,
+    /// **模型存放目录**（r80g）。空串 = 用默认目录（`<数据目录>/models`）。
+    ///
+    /// 用户原话：「下载的模型它位置在哪儿呢？……如果我点击更换模型位置，
+    /// 换完位置之后，也得软件自动的把模型都迁移过去」。
+    /// 存**绝对路径**：数据目录一变（换机器/改 APPDATA），相对路径就失效了。
+    #[serde(default)]
+    pub ai_model_dir: String,
     /// 识图**默认引擎**。配了之后截图完成**直接**跳这个引擎，不再让用户选。
     ///
     /// 用户原话：「支持在设置中配置默认引擎，设置后截图完成即直接跳转浏览器
@@ -922,6 +929,7 @@ impl Default for Config {
              * 模型选择留空 = 还没选过，运行时会落到 `aimodels::default_id()`。 */
             ai_matting_enable: false,
             ai_matting_model: String::new(),
+            ai_model_dir: String::new(),
             img_default_engine: imgsearch::DEFAULT_ENGINE.to_string(),
             img_engines: imgsearch::DEFAULT_ENGINES.iter().map(|s| s.to_string()).collect(),
             img_add_to_bar: true,
