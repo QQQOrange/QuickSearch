@@ -333,11 +333,11 @@ body { display: flex; flex-direction: column; overflow: hidden; }
 </main>
 
 <div class="ctl">
-    <!-- r79：主按钮改成「自动抠图」—— 现在走的是阿尔法抠图（自动 trimap +
-         边缘平滑 + 去白边），不再需要用户先描边。
+    <!-- r79：主按钮改成「自动抠图」—— 现在走的是**颜色解混**
+         （自动 trimap + I=αF+(1-α)B 逐像素反解 + 边缘去色），不再需要先描边。
          「手动补描」降级成可选的补救手段：只有主体与背景几乎同色、
-         自动分不开时才需要。 -->
-    <button class="btn primary" id="btnRemove" title="自动识别主体并抠掉背景（阿尔法抠图：边缘平滑、不留白边）">自动抠图</button>
+         方程欠定、自动分不开时才需要。 -->
+    <button class="btn primary" id="btnRemove" title="自动识别主体并抠掉背景（颜色解混：边缘平滑、不留白边、主体内部细节保留）">自动抠图</button>
     <button class="btn" id="btnMask" title="自动抠图已经很准；只有主体与背景几乎同色、自动分不开时才需要手动涂一下">
         手动补描
     </button>

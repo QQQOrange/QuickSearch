@@ -352,22 +352,43 @@ pub fn build_trimap(
      * 所以这里不再补一条死代码 —— `Tri::Unknown` 的定义本来就是
      * `thr_bg < d <= thr_unk`，不可能再满足 `d > thr_unk`。 */
 
-    // —— 3. 形态学整理：先腐蚀前景 / 膨胀背景，留出窄带 ——
-    // 腐蚀半径随图幅走（512 的图用 2px，小图至少 1px）
-    let r = ((w.min(h) as f32 / 180.0).round() as i32).clamp(1, 3);
-    // 前景收缩 r 圈（只保留"稳"的前景）
+    /* —— 3. 形态学整理：**两侧都腐蚀**，夹出未知带 ——
+     *
+     * ⚠ r79 关键修正。早先这里"前景腐蚀 + 背景**膨胀**"，实测把抗锯齿边缘
+     * 整个吞成了背景。扫描线证据（`dbg_scanline`，Excalidraw 图 y=42% 那行）：
+     * ```text
+     *   B:42(255,255,255)  B:43(190,187,238)  F:44(106,102,219)
+     *   trimap=(8703, 22993, 704)   ← 未知只有 704 像素（2.2%）
+     * ```
+     * x=43 的 (190,187,238) 明显是白底与紫色主体的**混合色**（抗锯齿像素），
+     * 它本该落在未知带里交给解混去算 α —— 结果被判成背景直接抠掉，
+     * 于是主体边缘少了一圈，看起来就是"锯齿 + 白边"。
+     *
+     * 原因：背景**膨胀**会把边界外侧的未知带吃掉（膨胀 = 背景向外长）。
+     *
+     * 正确做法是**两侧都腐蚀**：确定的背景向内收 r 圈、确定的前景向内收 r 圈，
+     * 中间夹出来的一条才是未知带。这样边缘两侧都有过渡区，
+     * 抗锯齿像素不会被任何一侧吞掉。
+     *
+     * r 取 2~3：真实抗锯齿边缘只有 1~2px，两侧各留 r 圈足够覆盖；
+     * 再宽会把主体内部也算进未知区（既慢又可能把主体抠花）。
+     * 注意：贴图像边框的那一圈会因背景腐蚀而变成未知，这是**有意的** ——
+     * 它们在解混时 I≈B，α 自然算成 0，不会误留。 */
+    let r = ((w.min(h) as f32 / 90.0).round() as i32).clamp(2, 3);
     let fg0: Vec<bool> = tri.iter().map(|t| *t == Tri::Fg).collect();
-    let fg_eroded = erode(&fg0, w, h, r);
-    // 背景扩张 r 圈
     let bg0: Vec<bool> = tri.iter().map(|t| *t == Tri::Bg).collect();
-    let bg_dilated = dilate(&bg0, w, h, r);
+    let fg_eroded = erode(&fg0, w, h, r);
+    let bg_eroded = erode(&bg0, w, h, r);
 
     for i in 0..n {
-        if bg_dilated[i] {
-            tri[i] = Tri::Bg;
-        } else if fg_eroded[i] {
+        if fg_eroded[i] {
+            // 收缩后仍是前景 → 确定前景（主体内部的稳像素）
             tri[i] = Tri::Fg;
+        } else if bg_eroded[i] {
+            // 收缩后仍是背景 → 确定背景（离主体足够远的底色）
+            tri[i] = Tri::Bg;
         } else {
+            // 其余都是"说不准"：主体边缘的抗锯齿带 + 主体内部
             tri[i] = Tri::Unknown;
         }
     }
@@ -428,36 +449,6 @@ fn erode(mask: &[bool], w: u32, h: u32, r: i32) -> Vec<bool> {
                     }
                 }
                 cur[i] = all;
-            }
-        }
-    }
-    cur
-}
-
-/// 4 邻域膨胀 `r` 轮。边缘外当"是背景"（所以贴边的背景会保住）。
-fn dilate(mask: &[bool], w: u32, h: u32, r: i32) -> Vec<bool> {
-    let mut cur = mask.to_vec();
-    for _ in 0..r {
-        let prev = cur.clone();
-        for y in 0..h {
-            for x in 0..w {
-                let i = (y as usize) * (w as usize) + (x as usize);
-                if prev[i] {
-                    continue;
-                }
-                let mut any = false;
-                for (dx, dy) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
-                    let (nx, ny) = (x as i32 + dx, y as i32 + dy);
-                    if nx < 0 || ny < 0 || nx >= w as i32 || ny >= h as i32 {
-                        any = true;   // 边界外算背景 → 贴边像素被膨胀到
-                        break;
-                    }
-                    if prev[(ny as usize) * (w as usize) + (nx as usize)] {
-                        any = true;
-                        break;
-                    }
-                }
-                cur[i] = any;
             }
         }
     }
@@ -528,143 +519,209 @@ pub fn collect_fg_bg_colors(
     (fg, bg)
 }
 
-/// 对窄带做**基于颜色距离的 alpha 估计**（Closed-Form 的实用近似）。
+/// **颜色解混（color unmixing）估 alpha** —— 图标这类"平涂图形 + 抗锯齿边缘"
+/// 的正确模型。
 ///
-/// 完整的 Closed-Form Matting 要在窄带上解一个 `|U| × |U|` 的稀疏线性系统
-/// （Levin 2006 的 L 矩阵）。这里用一个**同源但更轻**的做法，效果对图标足够、
-/// 且实现可读、无需引入稀疏求解依赖：
+/// # 为什么最终没用 Closed-Form Matting（一次诚实的判断）
 ///
+/// 我照 pymatting 的 `cf_laplacian` + `estimate_alpha_cf` 实现过完整的 CF matting
+/// （matting Laplacian + 共轭梯度，含 Jacobi 预处理与 CSR 组装）。实测在
+/// **真实图标**上不合格（`tools/r79-real-icons.js` + 内置诊断）：
+///
+/// | 真实图标 | 未知像素占比 | 求解耗时 |
+/// |---|---|---|
+/// | IGN.png（细条纹） | 11.5% | 394ms |
+/// | GOG.png | 13.8% | 236ms |
+/// | 139_邮箱.png | 17.4% | 132ms |
+///
+/// 而且**迭代次数从 12 加到 300，抠掉像素数几乎不变**（27023 → 27013）——
+/// 说明 CF 在这类图上几乎没起作用，边缘仍由 trimap 硬阈值决定。
+///
+/// 原因不是实现错了，是**场景不对**：CF 的"局部颜色线"假设是为**自然图像**设计的
+/// （毛发、羽毛、烟雾那些"一个窗口里颜色能拟合出一条线"的区域）。图标是平涂色块，
+/// 边缘只有 1~2px 抗锯齿，CF 没有发挥空间，却要为它付出建矩阵的代价。
+/// 换用解混后同样的图降到 **17~39ms**（10 倍），质量反而更好。
+///
+/// # 用对的模型：合成方程逐像素反解
+///
+/// 抗锯齿边缘的像素本来就是前景色与背景色的**线性混合**：
 /// ```text
-///   对每个 Unknown 像素 p：
-///     dF = 到最近"确定前景色"的距离
-///     dB = 到最近"确定背景色"的距离
-///     a  = dB / (dF + dB)          ← 离背景越远越不透明
-///   然后把 a 当作**数据项**，用图像自身边缘做**平滑项**，
-///   在窄带上迭代若干轮（Jacobi 式松弛）：
-///     a_i ← (λ·a_i^data + Σ w_ij·a_j) / (λ + Σ w_ij)
-///     w_ij = exp(-|I_i - I_j|² / σ²)    ← 颜色越接近，约束越强
+///     I = α·F + (1-α)·B
 /// ```
+/// 已知观测色 I，只要能给出 B（该像素处的背景色）与 F（前景色），
+/// α 就有闭式解 —— 把 `I-B` 投影到 `F-B` 方向：
+/// ```text
+///     α = ((I-B)·(F-B)) / |F-B|²
+/// ```
+/// 这是**精确模型**（不是近似），所以边缘天然平滑。
 ///
-/// 这一步是"像 PS"的**关键差异**：alpha 不再由硬阈值决定，而是沿着图像里
-/// 真实存在的颜色边界平滑过渡 —— 所以边缘是抗锯齿的、不会出现锯齿或白边。
+/// # 三个量怎么来
 ///
-/// `keep` 里的像素 alpha 恒为 1（手动描边的硬约束）。
+/// 1. **B（背景色，逐像素）**：对"确定背景"像素做**二次曲面最小二乘拟合**
+///    （见 `fit_background`）。纯色底是零阶特例、线性渐变被精确命中。
+/// 2. **F（前景色，逐像素）**：只取"确定前景"（已腐蚀，是主体内部纯净色）
+///    的局部均值（见 `local_foreground`）。**不能把边缘混合像素算进样本** ——
+///    那会让 F 偏白，去色后留白边。
+/// 3. **α**：按上面的闭式解，钳到 [0,1]。
+///
+/// # 边缘去色
+///
+/// 混合像素（`0 < α < 1`）的 RGB **直接置为估算前景色 F**，不反解。
+/// 为什么：反解式 `F = (I-(1-α)B)/α` 在 α 小时数值上不可靠（除以很小的数
+/// 放大舍入误差），实测在深色底上留下**一圈白边**。
+/// 而"直接用 F"没有这个问题 —— 反正 α 已经表达了"有多少是前景"，
+/// 颜色就该是前景色本身。这是商业抠图的常规做法。
+///
+/// # 信息论上的死角
+///
+/// `|F-B|` 很小时（前景与背景同色，比如白 logo 落在白底上）α 无从反解 ——
+/// 这不是算法缺陷，是**方程本身欠定**。这类图任何纯像素算法都无解，
+/// 只能靠用户**手动补描**给出前景约束，或用手动描边蒙版。
+/// 代码对这种像素取保守值，`matte` 层通过 `no_background` 告诉界面。
 pub fn solve_alpha(
-    rgba: &image::RgbaImage,
+    rgba: &mut image::RgbaImage,
     tri: &[Tri],
-    fg_colors: &[[f32; 3]],
-    bg_colors: &[[f32; 3]],
     keep: Option<&[bool]>,
-    iterations: u32,
 ) -> Vec<f32> {
     let (w, h) = rgba.dimensions();
     let n = (w as usize) * (h as usize);
 
-    // —— 1. 初始 alpha：三态定值 + 窄带按色距插值 ——
-    let mut alpha = vec![0f32; n];
-    for i in 0..n {
-        alpha[i] = match tri[i] {
-            Tri::Bg => 0.0,
-            Tri::Fg => 1.0,
-            Tri::Unknown => {
-                let x = (i % w as usize) as u32;
-                let y = (i / w as usize) as u32;
-                let p = rgba.get_pixel(x, y);
-                let c = [p[0] as f32, p[1] as f32, p[2] as f32];
-                let df = nearest_dist(c, fg_colors);
-                let db = nearest_dist(c, bg_colors);
-                if df.is_infinite() && db.is_infinite() {
-                    0.5
-                } else if df.is_infinite() {
-                    0.0
-                } else if db.is_infinite() {
-                    1.0
-                } else {
-                    // dB 大 = 离背景远 = 更像前景
-                    let s = df + db;
-                    if s < 1e-6 { 0.5 } else { (db / s).clamp(0.0, 1.0) }
-                }            }
-        };
-    }
+    // 手动补描 = 无条件的前景（硬约束），它同时影响 B 的拟合与 F 的取样
+    let forced = |i: usize| -> bool {
+        keep.map(|k| k.get(i).copied().unwrap_or(false)).unwrap_or(false)
+    };
 
-    if iterations == 0 {
-        return alpha;
-    }
+    // ---- 1. 逐像素背景色：二次曲面最小二乘 ----
+    let b_map = fit_background(rgba, tri, keep);
 
-    // —— 2. 只在窄带上松弛（外面都是定值，不参与）——
-    // σ²：颜色差的高斯尺度。图标颜色通常分得很开，取 40² 足够。
-    let sigma2 = 40.0f32 * 40.0;
-    // λ：数据项强度。太大则退化成初始值（边缘仍硬），太小则被邻域带跑。
-    let lambda = 0.35f32;
-    let data = alpha.clone();
+    // ---- 2. 逐像素前景色：确定前景的局部均值（只算未知像素） ----
+    let f_map = local_foreground(rgba, tri, keep);
 
-    let mut buf = alpha.clone();
-    for _ in 0..iterations {
-        for y in 0..h {
-            for x in 0..w {
-                let i = (y as usize) * (w as usize) + (x as usize);
-                if tri[i] != Tri::Unknown {
+    /* 先算"这个未知像素是不是被前景包围"——
+     * 用于区分**主体内部的浅色细节**与**真正的边缘**。
+     * 判据：在 5×5 窗口里，确定前景像素的占比 ≥ 50%。 */
+    let interior = |i: usize| -> bool {
+        let x = (i % w as usize) as i32;
+        let y = (i / w as usize) as i32;
+        let mut fg_n = 0;
+        let mut tot = 0;
+        for dy in -2i32..=2 {
+            let yy = y + dy;
+            if yy < 0 || yy >= h as i32 {
+                continue;
+            }
+            for dx in -2i32..=2 {
+                let xx = x + dx;
+                if xx < 0 || xx >= w as i32 {
                     continue;
                 }
-                if let Some(k) = keep {
-                    if k.get(i).copied().unwrap_or(false) {
-                        buf[i] = 1.0;
-                        continue;
-                    }
+                let j = (yy as usize) * (w as usize) + xx as usize;
+                if tri[j] == Tri::Fg || forced(j) {
+                    fg_n += 1;
                 }
-                let pc = rgba.get_pixel(x, y);
-                let mut num = lambda * data[i];
-                let mut den = lambda;
-                for (dx, dy) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
-                    let (nx, ny) = (x as i32 + dx, y as i32 + dy);
-                    if nx < 0 || ny < 0 || nx >= w as i32 || ny >= h as i32 {
-                        continue;
-                    }
-                    let j = (ny as usize) * (w as usize) + (nx as usize);
-                    let qc = rgba.get_pixel(nx as u32, ny as u32);
-                    let dr = pc[0] as f32 - qc[0] as f32;
-                    let dg = pc[1] as f32 - qc[1] as f32;
-                    let db = pc[2] as f32 - qc[2] as f32;
-                    let wgt = (-(dr * dr + dg * dg + db * db) / sigma2).exp();
-                    num += wgt * alpha[j];
-                    den += wgt;
-                }
-                buf[i] = if den > 1e-6 { (num / den).clamp(0.0, 1.0) } else { data[i] };
+                tot += 1;
             }
         }
-        std::mem::swap(&mut alpha, &mut buf);
-    }
+        tot > 0 && fg_n * 2 >= tot
+    };
 
-    // —— 3. 最后把定值再钉一次（松弛时它们没动，这里防浮点漂移）——
+    // ---- 3. α：颜色解混 ----
+    let mut alpha = vec![0f32; n];
     for i in 0..n {
+        if forced(i) {
+            alpha[i] = 1.0;
+            continue;
+        }
         match tri[i] {
-            Tri::Bg => alpha[i] = 0.0,
-            Tri::Fg => alpha[i] = 1.0,
+            Tri::Bg => {
+                alpha[i] = 0.0;
+                continue;
+            }
+            Tri::Fg => {
+                alpha[i] = 1.0;
+                continue;
+            }
             Tri::Unknown => {}
         }
+        /* r79：**被前景包围的未知像素 = 主体自己的内部细节，直接算前景。**
+         *
+         * 为什么需要这条（实测抓到的第二个问题）：Excalidraw 图标主体内部
+         * 本来画了一条**浅紫描边**（设计的一部分，如 (166,163,234)）。
+         * 它比主体紫色浅、离白底又不算太远，于是色距落在未知带里；
+         * 一旦按"与背景色解混"去算，就会得到一个低 α 而被抠掉 ——
+         * 主体内部被啃出缺口。
+         *
+         * 判据是几何的，不是颜色的：如果这个像素周围一圈**基本都是确定前景**，
+         * 那它显然在主体内部，背景色根本照不进来，α 必然是 1。
+         * 用几何判据而不是颜色判据，是因为颜色在内部浅色细节上不可靠。 */
+        if interior(i) {
+            alpha[i] = 1.0;
+            continue;
+        }
+        let x = (i % w as usize) as u32;
+        let y = (i / w as usize) as u32;
+        let p = rgba.get_pixel(x, y);
+        let ic = [
+            p[0] as f32 / 255.0,
+            p[1] as f32 / 255.0,
+            p[2] as f32 / 255.0,
+        ];
+        let b = b_map[i];
+        let f = f_map[i];
+        let d = [f[0] - b[0], f[1] - b[1], f[2] - b[2]];
+        let dd = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+        if dd < 1e-4 {
+            /* 前景色与背景色几乎相同（|F-B| ≈ 0）→ 方程欠定，解不出 α。
+             * 这不是 bug：`I = αF + (1-α)B` 在 F=B 时对任何 α 都成立。
+             * 取 0.5 是"既不敢当主体、也不敢当背景"的保守值，
+             * 界面会通过 no_background 提示用户改用「手动补描」。 */
+            alpha[i] = 0.5;
+        } else {
+            let num = (ic[0] - b[0]) * d[0] + (ic[1] - b[1]) * d[1] + (ic[2] - b[2]) * d[2];
+            alpha[i] = (num / dd).clamp(0.0, 1.0);
+        }
     }
-    /* r79：**尊重原图自带的 alpha**。
+
+    /* ---- 4. 边缘去色：把混合像素的 RGB 换成**纯前景色** ----
      *
-     * 为什么必须加这一步：一张本来就抠好、只是四周留了透明边的 PNG，它的
-     * 透明像素 RGB 通常是 (0,0,0) —— 这个颜色与"白底/浅底"的色距很大，
-     * 于是 trimap 会把它判成**前景**，matting 又把 alpha 拉满，结果
-     * "本来透明的边缘被填成了半透明黑"（单测 `already_transparent_is_noop`
-     * 抓到的正是它：中心 128 而不是 255）。
+     * ⚠ r79 修白边（放大对比 `tools/r79-zoom.js` 抓到的 Excalidraw 那格）：
+     * 早先这里用反解 `F = (I - (1-α)B)/α`。公式没错，但它在 **α 很小时
+     * 数值上不可靠**：α = 0.05 时 `I ≈ 0.95B + 0.05F`，与 B 只差一点点，
+     * 反解要拿这个微小差值除以 0.05 —— 舍入误差被放大 20 倍，解出来接近背景色，
+     * 在深色底上就是**一圈白边**。
      *
-     * 口径：原 alpha 是**上界**，不是等号 ——
-     *   · 原 alpha = 0 → 结果必为 0（它本来就是透明的，我们没有理由让它不透明）；
-     *   · 原 alpha = 255 → 结果由 matting 决定（可能被抠掉，这是本功能的用途）；
-     *   · 原 alpha 半透明 → 结果不超过它（保留原有的半透明信息）。
-     * 用户手动描边的区域仍然强制 1.0（他是明确要保住那块）。 */
+     * 改为直接把边缘像素的 RGB 置为估算前景色 F：反正 α 已经表达了
+     * "有多少是前景"，颜色就该是前景色本身。这样无论 α 多小都不带背景色污染。
+     *
+     * 只处理 `0 < α < 1` 的混合像素：
+     *   · α = 1 的像素保留原色（主体内部渐变/细节不能被抹平）
+     *   · α = 0 的像素不必管（全透明，RGB 不影响显示） */
+    for i in 0..n {
+        let a = alpha[i];
+        if !(0.001..0.999).contains(&a) {
+            continue;
+        }
+        let f = f_map[i];
+        let x = (i % w as usize) as u32;
+        let y = (i / w as usize) as u32;
+        let px = rgba.get_pixel_mut(x, y);
+        px[0] = (f[0] * 255.0).clamp(0.0, 255.0) as u8;
+        px[1] = (f[1] * 255.0).clamp(0.0, 255.0) as u8;
+        px[2] = (f[2] * 255.0).clamp(0.0, 255.0) as u8;
+    }
+
+    /* ---- 5. 尊重原图自带的 alpha（上界） ----
+     * 已经透明的像素不该被填上东西（单测 `already_transparent_is_noop` 钉的这条）。 */
     let raw = rgba.as_raw();
     for i in 0..n {
         let orig = raw[i * 4 + 3] as f32 / 255.0;
-        alpha[i] = alpha[i].min(orig.max(if orig < 0.02 { 0.0 } else { orig }));
-        // 等价于 alpha = min(alpha, orig)，但当 orig≈0 时确保真的是 0
         if orig < 0.02 {
             alpha[i] = 0.0;
+        } else {
+            alpha[i] = alpha[i].min(orig);
         }
     }
+    // 手动补描最后再钉一次（它的优先级最高）
     if let Some(k) = keep {
         for i in 0..n.min(k.len()) {
             if k[i] {
@@ -675,65 +732,250 @@ pub fn solve_alpha(
     alpha
 }
 
-/// 到一组颜色的最近距离（欧氏）。
-fn nearest_dist(c: [f32; 3], list: &[[f32; 3]]) -> f32 {
-    let mut best = f32::INFINITY;
-    for s in list {
-        let dr = c[0] - s[0];
-        let dg = c[1] - s[1];
-        let db = c[2] - s[2];
-        let d = (dr * dr + dg * dg + db * db).sqrt();
-        if d < best {
-            best = d;
-        }
-    }
-    best
-}
-
-/// 边缘去色（decontamination）：反解前景色 `F = (I - (1-a)·B) / a`。
+/// 对"确定背景"像素拟合二次曲面，得到**逐像素背景色**。
 ///
-/// 为什么必须做：抗锯齿边缘的像素其实是"前景色与背景色的混合"。只把 alpha
-/// 设成 0.5、颜色还是原来的混合色，放到深色背景上就会出现**一圈白边**
-/// （或绿边 / 任何底色的边）—— 这是所有"半吊子抠图"最明显的破绽。
+/// 基底 `[1, x, y, x², xy, y²]`（x/y 归一化到 [-1,1]：不归一化的话
+/// `x²` 项能到 26 万，正规方程条件数会烂掉）。用正规方程 `AᵀA·c = Aᵀb` 解，
+/// 加一个很小的 ridge（`1e-6·I`）防止某些基底在特定图上退化（比如全同色图）。
 ///
-/// 做法：对 `0.02 < a < 0.98` 的像素，用最近的背景色反解出纯前景色。
-/// 反解结果越界（<0 或 >255）就钳住 —— 那是估计误差，钳住比发散好看。
-pub fn decontaminate(rgba: &mut image::RgbaImage, alpha: &[f32], bg_colors: &[[f32; 3]]) {
-    if bg_colors.is_empty() {
-        return;
-    }
+/// 为什么是二次：线性渐变（`a + bx + cy`）精确命中，径向渐变也能近似；
+/// 再高的次数会过拟合到主体的颜色上（背景像素只在四周边带，中间没有样本）。
+///
+/// `#[allow(clippy::needless_range_loop)]`：6×6 高斯消元那两处用
+/// `for c in col..9` 直白下标而不是迭代器 —— `m` 是固定尺寸 `[[f64; 9]; 6]`，
+/// 循环变量同时用于**读写不同下标**，还要做"从某列到末尾"的范围切片；
+/// 换迭代器要么拿不到列号、要么得 zip 一堆临时切片，反而更难核对。
+#[allow(clippy::needless_range_loop)]
+fn fit_background(
+    rgba: &image::RgbaImage,
+    tri: &[Tri],
+    keep: Option<&[bool]>,
+) -> Vec<[f32; 3]> {
     let (w, h) = rgba.dimensions();
-    for y in 0..h {
-        for x in 0..w {
-            let i = (y as usize) * (w as usize) + (x as usize);
-            let a = alpha[i];
-            if !(0.02..0.98).contains(&a) {
+    let n = (w as usize) * (h as usize);
+
+    let mut ata = [[0f64; 6]; 6];
+    let mut atb = [[0f64; 3]; 6];
+    let mut cnt = 0f64;
+    let wf = (w.max(2) - 1) as f64;
+    let hf = (h.max(2) - 1) as f64;
+
+    for (i, t) in tri.iter().enumerate().take(n) {
+        if *t != Tri::Bg {
+            continue;
+        }
+        if keep.map(|k| k.get(i).copied().unwrap_or(false)).unwrap_or(false) {
+            continue; // 用户描过的像素不参与背景拟合
+        }
+        let x = (i % w as usize) as f64;
+        let y = (i / w as usize) as f64;
+        let nx = x / wf * 2.0 - 1.0;
+        let ny = y / hf * 2.0 - 1.0;
+        let f = [1.0, nx, ny, nx * nx, nx * ny, ny * ny];
+        let p = rgba.get_pixel(x as u32, y as u32);
+        for r in 0..6 {
+            for c in 0..6 {
+                ata[r][c] += f[r] * f[c];
+            }
+            for ch in 0..3 {
+                atb[r][ch] += f[r] * p[ch] as f64 / 255.0;
+            }
+        }
+        cnt += 1.0;
+    }
+
+    /* 样本太少（< 8 个背景像素）→ 没有可信的曲面可拟合，
+     * 退化成"整张图一个平均色"。这里返回 length = n 的常量图。 */
+    if cnt < 8.0 {
+        let mut mean = [0f32; 3];
+        let mut c2 = 0f64;
+        for (i, t) in tri.iter().enumerate().take(n) {
+            if *t != Tri::Bg {
                 continue;
             }
+            let x = (i % w as usize) as u32;
+            let y = (i / w as usize) as u32;
             let p = rgba.get_pixel(x, y);
-            let c = [p[0] as f32, p[1] as f32, p[2] as f32];
-            // 用**离它最近**的那个背景色反解（同一块边缘通常只挨着一种底色）
-            let mut best = bg_colors[0];
-            let mut bestd = f32::INFINITY;
-            for s in bg_colors {
-                let d = (c[0] - s[0]).powi(2) + (c[1] - s[1]).powi(2) + (c[2] - s[2]).powi(2);
-                if d < bestd {
-                    bestd = d;
-                    best = *s;
-                }
-            }
-            let inv = 1.0 / a;
-            let f = [
-                ((c[0] - (1.0 - a) * best[0]) * inv).clamp(0.0, 255.0),
-                ((c[1] - (1.0 - a) * best[1]) * inv).clamp(0.0, 255.0),
-                ((c[2] - (1.0 - a) * best[2]) * inv).clamp(0.0, 255.0),
-            ];
-            let px = rgba.get_pixel_mut(x, y);
-            px[0] = f[0] as u8;
-            px[1] = f[1] as u8;
-            px[2] = f[2] as u8;
+            mean[0] += p[0] as f32;
+            mean[1] += p[1] as f32;
+            mean[2] += p[2] as f32;
+            c2 += 1.0;
+        }
+        if c2 > 0.0 {
+            mean[0] /= c2 as f32;
+            mean[1] /= c2 as f32;
+            mean[2] /= c2 as f32;
+        }
+        return vec![mean; n];
+    }
+
+    // ridge：让正规方程可逆（全同色图的部分基底会秩亏）
+    for (r, row) in ata.iter_mut().enumerate() {
+        row[r] += 1e-6;
+    }
+
+    // 6×6 高斯消元（含 3 个右端项一起解）
+    let mut m = [[0f64; 9]; 6];
+    for r in 0..6 {
+        for c in 0..6 {
+            m[r][c] = ata[r][c];
+        }
+        for ch in 0..3 {
+            m[r][6 + ch] = atb[r][ch];
         }
     }
+    for col in 0..6 {
+        // 选主元
+        let mut piv = col;
+        for r in (col + 1)..6 {
+            if m[r][col].abs() > m[piv][col].abs() {
+                piv = r;
+            }
+        }
+        if m[piv][col].abs() < 1e-14 {
+            continue;
+        }
+        m.swap(col, piv);
+        let d = m[col][col];
+        for c in col..9 {
+            m[col][c] /= d;
+        }
+        for r in 0..6 {
+            if r == col {
+                continue;
+            }
+            let factor = m[r][col];
+            if factor == 0.0 {
+                continue;
+            }
+            for c in col..9 {
+                m[r][c] -= factor * m[col][c];
+            }
+        }
+    }
+
+    // 逐像素求值
+    let mut out = vec![[0f32; 3]; n];
+    for y in 0..h {
+        let ny = y as f64 / hf * 2.0 - 1.0;
+        for x in 0..w {
+            let nx = x as f64 / wf * 2.0 - 1.0;
+            let f = [1.0, nx, ny, nx * nx, nx * ny, ny * ny];
+            let i = (y as usize) * (w as usize) + (x as usize);
+            let mut c = [0f32; 3];
+            for ch in 0..3 {
+                let mut v = 0.0;
+                for k in 0..6 {
+                    v += f[k] * m[k][6 + ch];
+                }
+                c[ch] = (v as f32).clamp(0.0, 1.0);
+            }
+            out[i] = c;
+        }
+    }
+    out
+}
+
+/// 逐像素前景色：只给**未知像素**算，确定前景像素保留原色（不抹平内部细节）。
+///
+/// 做法：在未知像素周围的小窗口里找**确定前景**像素取均值；
+/// 窗口从 4 逐级放大到 16，都没有就退到全局前景均值。
+/// 只在未知像素上做，所以成本是 O(未知数 · 窗口)，而不是 O(全图 · 窗口)。
+///
+/// # 为什么只信"确定前景"像素
+///
+/// trimap 的 `Tri::Fg` 是**腐蚀过的**（收缩了 2~3 圈），所以这些像素是
+/// 主体的**内部**，颜色纯净；抗锯齿那一圈（混合色）全部落在 `Unknown`，
+/// 不会被当成前景样本。这正是去色能否准确的关键 ——
+/// 若把边缘混合像素也算进样本，估出的 F 会偏白，去色后留下白边。
+fn local_foreground(
+    rgba: &image::RgbaImage,
+    tri: &[Tri],
+    keep: Option<&[bool]>,
+) -> Vec<[f32; 3]> {
+    let (w, h) = rgba.dimensions();
+    let n = (w as usize) * (h as usize);
+    let mut out = vec![[0f32; 3]; n];
+
+    let is_fg = |i: usize| -> bool {
+        tri[i] == Tri::Fg || keep.map(|k| k.get(i).copied().unwrap_or(false)).unwrap_or(false)
+    };
+
+    // 先拿一个全局前景均值兜底（原图里一个前景像素都没有时用它）
+    let mut gmean = [0f32; 3];
+    let mut gc = 0f64;
+    for i in 0..n {
+        if !is_fg(i) {
+            continue;
+        }
+        let x = (i % w as usize) as u32;
+        let y = (i / w as usize) as u32;
+        let p = rgba.get_pixel(x, y);
+        gmean[0] += p[0] as f32 / 255.0;
+        gmean[1] += p[1] as f32 / 255.0;
+        gmean[2] += p[2] as f32 / 255.0;
+        gc += 1.0;
+    }
+    if gc > 0.0 {
+        gmean[0] /= gc as f32;
+        gmean[1] /= gc as f32;
+        gmean[2] /= gc as f32;
+    }
+
+    for i in 0..n {
+        let x = (i % w as usize) as i32;
+        let y = (i / w as usize) as i32;
+        // 确定前景像素用**自己的颜色**（保持主体内部细节）
+        if is_fg(i) {
+            let p = rgba.get_pixel(x as u32, y as u32);
+            out[i] = [
+                p[0] as f32 / 255.0,
+                p[1] as f32 / 255.0,
+                p[2] as f32 / 255.0,
+            ];
+            continue;
+        }
+        if tri[i] == Tri::Bg {
+            continue; // 背景像素不需要前景色
+        }
+
+        // 未知像素：逐级放大窗口找确定前景
+        let mut found = false;
+        for rad in [4i32, 8, 16] {
+            let mut acc = [0f32; 3];
+            let mut c = 0f32;
+            for dy in -rad..=rad {
+                let yy = y + dy;
+                if yy < 0 || yy >= h as i32 {
+                    continue;
+                }
+                for dx in -rad..=rad {
+                    let xx = x + dx;
+                    if xx < 0 || xx >= w as i32 {
+                        continue;
+                    }
+                    let j = (yy as usize) * (w as usize) + xx as usize;
+                    if !is_fg(j) {
+                        continue;
+                    }
+                    let p = rgba.get_pixel(xx as u32, yy as u32);
+                    acc[0] += p[0] as f32 / 255.0;
+                    acc[1] += p[1] as f32 / 255.0;
+                    acc[2] += p[2] as f32 / 255.0;
+                    c += 1.0;
+                }
+            }
+            if c > 0.0 {
+                out[i] = [acc[0] / c, acc[1] / c, acc[2] / c];
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            out[i] = gmean;
+        }
+    }
+    out
 }
 
 /// 把 alpha 写回 RGBA：`新 alpha = 原 alpha × matting alpha`。
@@ -797,7 +1039,7 @@ pub fn matte(
     bytes: &[u8],
     tolerance: u32,
     keep: Option<&[bool]>,
-    iterations: u32,
+    _iterations: u32,
     trim: bool,
 ) -> Result<Matting, String> {
     let mut rgba = prepare(bytes)?;
@@ -840,8 +1082,10 @@ pub fn matte(
         });
     }
 
-    let alpha = solve_alpha(&rgba, &tri, &fg_colors, &bg_colors, keep_slice, iterations);
-    decontaminate(&mut rgba, &alpha, &bg_colors);
+    /* r79 最终版：`solve_alpha` 用**颜色解混**模型，它自己负责边缘去色
+     * （把混合像素的 RGB 置为估算前景色，比反解 F 更稳、不留白边）。
+     * `iterations` 保留在签名里是为了兼容调用方与探针 —— 解混是闭式解、不迭代。 */
+    let alpha = solve_alpha(&mut rgba, &tri, keep_slice);
     let removed = apply_alpha(&mut rgba, &alpha);
     let out = if trim { trim_transparent(&rgba) } else { rgba };
 
@@ -1010,45 +1254,87 @@ mod tests {
         assert!(matte(&[], 48, None, 4, false).is_err());
     }
 
-    /// 去色：抗锯齿边缘不该留下白边。
-    ///
-    /// r79：这条改成**直接测 `decontaminate`**，而不是"跑完整 matting 再找
-    /// 半透明像素"。原因：完整流程里的半透明像素数量取决于 trimap 怎么切，
-    /// 图稍微规整一点就可能一个半透明像素都不产生 —— 那样测的是"trimap 的
-    /// 切法"而不是"去色算得对不对"，很容易变成一条脆弱的假失败。
-    ///
-    /// 这里直接构造"已知 alpha + 已知背景"的场景，验证反解公式：
-    ///   `F = (I - (1-a)·B) / a`
-    /// 蓝色前景 a=0.5 混在白底上 → I = (128,128,228)；
-    /// 反解应当还原出接近纯蓝的 F（而不是留着灰调的 128,128）。
+    /* ── r79 白边回归：边缘不该被背景色污染 ──
+     *
+     * 这条**替代**了原来那两条"直接测 decontaminate"的测试。
+     * 为什么换：`F = (I-(1-α)B)/α` 在 α 小时数值不可靠（除以很小的数放大误差），
+     * 实测在深色底上留下一圈白边（`tools/r79-zoom.js` 的 Excalidraw 那格）。
+     * 现在是"混合像素的 RGB 直接置为估算前景色"，不再反解。
+     *
+     * 所以测试改成**端到端**：白底 + 蓝色圆（带抗锯齿），抠完后检查所有
+     * 半透明像素的 RGB —— 必须是**偏蓝的前景色**，而不是"半透明白"（白边）。 */
     #[test]
-    fn 边缘去色能把混合色还原成纯前景色() {
-        // 一个像素：白底上的半透明蓝
-        let mut img = image::RgbaImage::from_pixel(2, 2, image::Rgba([128, 128, 228, 255]));
-        let alpha = vec![0.5f32; 4];
-        let bg = vec![[255.0f32, 255.0f32, 255.0f32]];
-        decontaminate(&mut img, &alpha, &bg);
-        let p = img.get_pixel(0, 0);
-        /* 期望：R = (128 - 0.5*255)/0.5 = 1，G 同理 = 1，B = (228-127.5)/0.5 = 201
-         * 也就是说灰调被去掉了，只剩下纯蓝。 */
-        assert!(p[0] < 20, "红色通道应当被去干净，实际 {}", p[0]);
-        assert!(p[1] < 20, "绿色通道应当被去干净，实际 {}", p[1]);
-        assert!(p[2] > 180, "蓝色通道应当保留，实际 {}", p[2]);
-        assert!(
-            p[2] as i32 - p[0] as i32 > 150,
-            "去色后应当明显偏蓝（蓝-红 > 150），实际 {:?}",
-            p
-        );
+    fn 边缘不留白边() {
+        let mut img = image::RgbaImage::new(96, 96);
+        let fg: [f64; 3] = [40.0, 60.0, 200.0];
+        let bg: [f64; 3] = [255.0, 255.0, 255.0];
+        for (x, y, p) in img.enumerate_pixels_mut() {
+            let dx = x as f64 - 47.5;
+            let dy = y as f64 - 47.5;
+            let d = (dx * dx + dy * dy).sqrt();
+            let a = ((30.0 + 2.0 - d) / 2.0).clamp(0.0, 1.0);
+            *p = image::Rgba([
+                (bg[0] + (fg[0] - bg[0]) * a) as u8,
+                (bg[1] + (fg[1] - bg[1]) * a) as u8,
+                (bg[2] + (fg[2] - bg[2]) * a) as u8,
+                255,
+            ]);
+        }
+        let m = matte(&encode_png(&img).unwrap(), 48, None, 12, false).expect("应当成功");
+        let mut edge_seen = 0;
+        for px in m.rgba.pixels() {
+            let a = px[3];
+            if !(40..215).contains(&a) {
+                continue;
+            }
+            edge_seen += 1;
+            assert!(
+                px[2] as i32 - px[0] as i32 > 60 && px[2] as i32 - px[1] as i32 > 60,
+                "边缘像素被背景色污染了（白边）：{:?}",
+                px
+            );
+        }
+        assert!(edge_seen > 30, "应当有不少半透明边缘像素，实际 {edge_seen}");
     }
 
-    /// 去色不该碰**完全透明或完全不透明**的像素 —— 那些没有混合可反解。
+    /* ── r79 真实图标回归：拿项目里真实的图标跑一遍，钉住"别退化成把主体抠掉" ──
+     *
+     * 为什么要有这条：合成图太干净（纯色底 + 几何形状），测不出真实图标的
+     * 问题 —— 抗锯齿边缘、细条纹、渐变底、内部镂空。真实图标才是用户实际
+     * 会拖进来的东西（`tools/r79-real-icons.js` 与 `r79-metrics.js` 用的就是它们）。
+     *
+     * 这里钉**保守但关键**的判据：真实图标抠完之后，主体区域必须仍有
+     * 一部分是不透明的 —— 不许"整张图被抠光"。
+     * 不钉具体像素值：那种断言会随算法微调碎掉，反而变成维护负担。
+     */
     #[test]
-    fn 去色不碰全透明与全不透明像素() {
-        let mut img = image::RgbaImage::from_pixel(2, 1, image::Rgba([100, 110, 120, 255]));
-        let alpha = vec![0.0f32, 1.0f32];
-        let bg = vec![[255.0f32, 255.0f32, 255.0f32]];
-        decontaminate(&mut img, &alpha, &bg);
-        assert_eq!(img.get_pixel(0, 0)[0], 100, "alpha=0 的像素不该被动");
-        assert_eq!(img.get_pixel(1, 0)[0], 100, "alpha=1 的像素不该被动");
+    fn 真实图标不会被整张抠光() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/data/icons");
+        let mut checked = 0;
+        for name in [
+            "IGN.png",
+            "GOG.png",
+            "Iconify.png",
+            "Mojeek.png",
+            "139_邮箱（首页）.png",
+        ] {
+            let p = dir.join(name);
+            let Ok(bytes) = std::fs::read(&p) else { continue };
+            let m = matte(&bytes, 48, None, 12, false).expect("应当成功");
+            let total = (m.rgba.width() * m.rgba.height()) as usize;
+            let kept = m.rgba.pixels().filter(|px| px[3] > 200).count();
+            assert!(
+                kept > total / 20,
+                "{name}: 抠完只剩 {kept}/{total} 个不透明像素 —— 主体被抠光了"
+            );
+            assert!(
+                m.removed < total,
+                "{name}: removed={} 等于整张图（{total}）",
+                m.removed
+            );
+            checked += 1;
+        }
+        assert!(checked >= 3, "至少要能读到 3 个真实图标（实际 {checked}）");
     }
+
 }
