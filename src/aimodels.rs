@@ -149,8 +149,13 @@ pub const MODELS: &[ModelSpec] = &[
         note: "42 MB，人像/产品照片效果好；图标上会把文字与底座当噪声删掉。",
         bytes: 44_403_226,
         urls: &[
-            "https://gh-proxy.com/https://github.com/QQQOrange/QuickSearch/releases/download/v1.1.1/rmbg-quantized.onnx",
+            /* r80p 实测（同机同一时刻，各下 20 秒看真实字节）：
+             *   modelscope  11.63 MB/s   gh-proxy（自己 release） 8.24 MB/s
+             *   hf-mirror / huggingface 更慢
+             * 所以 modelscope 排第一，自己 release 保底 —— 两个都快，
+             * 谁先成功用谁（多源回退会逐个试）。 */
             "https://www.modelscope.cn/models/AI-ModelScope/RMBG-1.4/resolve/master/onnx/model_quantized.onnx",
+            "https://gh-proxy.com/https://github.com/QQQOrange/QuickSearch/releases/download/v1.1.1/rmbg-quantized.onnx",
             "https://hf-mirror.com/briaai/RMBG-1.4/resolve/main/onnx/model_quantized.onnx",
             "https://huggingface.co/briaai/RMBG-1.4/resolve/main/onnx/model_quantized.onnx",
         ],
@@ -166,8 +171,8 @@ pub const MODELS: &[ModelSpec] = &[
         note: "84 MB，比量化版准一点、比全精度小一半。",
         bytes: 88_217_533,
         urls: &[
-            "https://gh-proxy.com/https://github.com/QQQOrange/QuickSearch/releases/download/v1.1.1/rmbg-fp16.onnx",
             "https://www.modelscope.cn/models/AI-ModelScope/RMBG-1.4/resolve/master/onnx/model_fp16.onnx",
+            "https://gh-proxy.com/https://github.com/QQQOrange/QuickSearch/releases/download/v1.1.1/rmbg-fp16.onnx",
             "https://hf-mirror.com/briaai/RMBG-1.4/resolve/main/onnx/model_fp16.onnx",
             "https://huggingface.co/briaai/RMBG-1.4/resolve/main/onnx/model_fp16.onnx",
         ],
@@ -183,8 +188,8 @@ pub const MODELS: &[ModelSpec] = &[
         note: "168 MB，官方原始精度。追求照片级效果时用，图标场景没必要。",
         bytes: 176_153_355,
         urls: &[
-            "https://gh-proxy.com/https://github.com/QQQOrange/QuickSearch/releases/download/v1.1.1/rmbg-full.onnx",
             "https://www.modelscope.cn/models/AI-ModelScope/RMBG-1.4/resolve/master/onnx/model.onnx",
+            "https://gh-proxy.com/https://github.com/QQQOrange/QuickSearch/releases/download/v1.1.1/rmbg-full.onnx",
             "https://hf-mirror.com/briaai/RMBG-1.4/resolve/main/onnx/model.onnx",
             "https://huggingface.co/briaai/RMBG-1.4/resolve/main/onnx/model.onnx",
         ],
