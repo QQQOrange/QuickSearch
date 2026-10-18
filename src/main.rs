@@ -9024,8 +9024,21 @@ fn ai_matting_download(app: AppHandle, id: String) -> Result<(), String> {
     let Some(spec) = aimodels::find(&id) else {
         return Err(format!("未知的模型：{id}"));
     };
+    /* r80i：**在这里就拿下载锁**（同步、进入命令时），拿不到就直接报错 ——
+     * 不能让两个下载同时跑。
+     *
+     * ⚠ 锁的位置很关键：必须在 **spawn 之前**、且覆盖 **运行库 + 模型两段**。
+     * 我第一版把锁放在 `aimodels::download()` 里面，结果盖不住它前面的
+     * "下运行库"那一段 —— 两个线程照样并发下同一个 `onnxruntime.zip`，
+     * 互相删、互相读到半个文件，日志里每个源都报"解压失败 找不到 EOCD"。
+     * 探针 r80j 的 1a/1b 就是抓这个的。 */
+    let Some(guard) = aimodels::BusyGuard::try_acquire() else {
+        return Err("已经有一个下载在进行中，请等它结束（或点「取消」）再试".to_string());
+    };
     win::log(&format!("ai_matting_download: 开始 {}", spec.id));
     std::thread::spawn(move || {
+        // 锁跟着线程走（`guard` 被 move 进来），线程结束自动释放
+        let _guard = guard;
         let ev = |payload: Value| {
             let _ = app.emit(aimodels::EVENT_PROGRESS, payload);
         };
@@ -9229,6 +9242,26 @@ fn ai_model_dir_open() {
         let _ = std::fs::create_dir_all(&dir);
     }
     let _ = open::that(&dir);
+}
+
+/// 清理下载残留与旧位置的模型（r80i）。
+///
+/// 用户要求：「原来已经把模型都下了一遍，现在在软件里面已经把模型位置做了修改，
+/// 那么原来的版本的好像还在一开始下载的位置，需要你做进一步的清除」。
+///
+/// 清理口径见 `aimodels::cleanup_stale`：只删**确定是垃圾**的
+/// （`.part` / `.zip` / 旧位置的 `.onnx`），当前模型目录里的 `.onnx` 一个不碰。
+#[tauri::command]
+fn ai_cleanup_stale() -> Value {
+    let (removed, bytes) = aimodels::cleanup_stale();
+    json!({
+        "ok": true,
+        "count": removed.len(),
+        "bytes": bytes,
+        "sizeText": aimodels::human_size(bytes),
+        // 把删了哪些列出来 —— 用户要求"做清除"，那就该看得见清了什么
+        "items": removed,
+    })
 }
 
 /* ══ r80g：设置页里的独立抠图工具 ══
@@ -11884,6 +11917,8 @@ fn main() {
             ai_model_dir_pick,
             ai_model_dir_reset,
             ai_model_dir_open,
+            // r80i：清理下载残留 + 旧位置的模型
+            ai_cleanup_stale,
             // r80g：设置页里的独立抠图工具
             ai_cutout_pick,
             ai_cutout_save,

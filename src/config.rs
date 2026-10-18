@@ -8,7 +8,22 @@ use serde::{Deserialize, Serialize};
 use crate::imgsearch;
 
 pub const APP_DIR: &str = "QuickSearch";
-pub const VERSION: &str = "1.0.0";
+
+/// 程序版本 —— **直接取自 `Cargo.toml`**，不手写。
+///
+/// # ⚠ 为什么改成这样（r80i 修的 bug）
+///
+/// 这里原来是手写的 `"1.0.0"`。发 v1.1.0 时我只改了 `Cargo.toml` /
+/// `tauri.conf.json` / `package.json` 三处，**漏了这里** —— 于是：
+///   · 关于页显示 "v1.0.0"
+///   · 界面右下角显示 "v1.0.0"
+///   · 而 exe 的版本资源是 1.1.0（那个来自 tauri.conf.json）
+/// 用户直接看到"桌面版本的版本号没有更新"。
+///
+/// 手写版本号就是这么容易漏 —— 所以改成编译期从 `CARGO_PKG_VERSION` 取，
+/// 它由 cargo 根据 `Cargo.toml` 自动注入，**根本不可能写错**。
+/// 以后升版本只需要改 `Cargo.toml` 一处（另外两处是给打包/前端用的）。
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// 开发者。「关于」页要显示出来（用户明确要求）。
 pub const DEVELOPER: &str = "QQQOrange";

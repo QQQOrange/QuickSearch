@@ -241,6 +241,9 @@
                     <button class="btn" id="btnAiDirOpen" title="在资源管理器里打开这个目录">打开</button>
                     <button class="btn" id="btnAiDirPick" title="换一个目录放模型；已有模型会自动迁移过去">更换…</button>
                     <button class="btn" id="btnAiDirReset" title="恢复到默认位置（同样会迁移模型）" hidden>恢复默认</button>
+                    <!-- r80i：清理下载残留（半截的 .part / 下运行库的 zip）
+                         与**旧位置**留下的模型。用户要求"做进一步的清除"。 -->
+                    <button class="btn" id="btnAiCleanup" title="清掉下载残留（.part / zip）与旧位置遗留的模型文件">清理残留</button>
                 </div>
             </div>
 
@@ -1226,7 +1229,12 @@
         <h2>关于</h2>
         <div class="about-meta">
             <div class="am-row"><span class="am-k">开发者</span><span class="am-v" id="aboutDev">QQQOrange</span></div>
-            <div class="am-row"><span class="am-k">当前版本</span><span class="am-v" id="aboutVer">v1.0.0</span></div>
+            <!-- ⚠ r80k：这里的初值不要写死具体版本号 ——
+                 它由 JS 从 CONF.version 填（见 settings.js 的 aboutVer）。
+                 写死的话，万一 JS 还没跑（或取值失败），用户就会看到一个
+                 **过期的版本号**，而那正是"版本号没更新"这个 bug 的观感来源。
+                 放个占位符，宁可显示"—"，也不显示一个错的版本。 -->
+            <div class="am-row"><span class="am-k">当前版本</span><span class="am-v" id="aboutVer">—</span></div>
             <div class="am-row"><span class="am-k">版本更新时间</span><span class="am-v" id="aboutBuilt">—</span></div>
             <div class="am-row"><span class="am-k">界面渲染</span><span class="am-v" id="aboutWebview">—</span></div>
         </div>

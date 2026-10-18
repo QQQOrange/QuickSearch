@@ -44,6 +44,7 @@
 
 use std::io::Read;
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 
 /// 模型清单的一项：够不够用、多大、从哪下、校验值。
 #[derive(Clone, Debug, serde::Serialize)]
@@ -415,12 +416,157 @@ fn agent() -> ureq::Agent {
 /// 下载进度事件名（前端监听这个画进度条）。
 pub const EVENT_PROGRESS: &str = "model-download";
 
+/// 清理**不该残留的文件**（r80i）。
+///
+/// 返回 `(删掉的路径, 释放的字节)`。
+///
+/// # 清什么、为什么
+///
+/// 1. **模型目录里的 `*.zip` / `*.zip.part`** —— 下运行库时的中间产物。
+///    正常路径下 `download_runtime` 自己会删，但"解压失败/被取消/进程被杀"
+///    都会留下几十 MB 的残骸。实测在用户机器上捡到一个 **68MB 的
+///    `onnxruntime.zip`** —— 用户会认为"下完了怎么还占着空间"。
+/// 2. **`*.onnx.part`** —— 模型下到一半中断的临时文件。
+/// 3. **旧位置的模型**（`<数据目录>/models/*.onnx`）—— r80g 把默认位置改成
+///    `<exe目录>/抠图模型` 之后，早期版本下到数据目录的模型就**没人管了**。
+///    用户明确要求：「原来已经把模型都下了一遍，现在模型位置做了修改，
+///    那么原来的版本的好像还在一开始下载的位置，需要你做进一步的清除」。
+/// 4. **数据目录里那个空的 `models/` 目录**（`download()` 早期版本建错的，
+///    见那边的注释）。只有**空**的时候才删 —— 万一里面有用户自己放的东西，别动。
+///
+/// ⚠ **只删"确定是垃圾"的**：`.part` / `.zip` 与已被弃用的旧路径。
+/// 当前模型目录里的 `.onnx` 一个都不碰 —— 那是用户的模型，删了要重下 168MB。
+pub fn cleanup_stale() -> (Vec<String>, u64) {
+    let mut removed: Vec<String> = Vec::new();
+    let mut bytes: u64 = 0;
+
+    // 1+2. 当前模型目录里的中间产物
+    /* 先定义一个"这个文件是不是垃圾"的小判断，两处复用 ——
+     * 免得同样的后缀列表写两遍（写两遍迟早会漏一处）。 */
+    fn is_junk(name: &str) -> bool {
+        name.ends_with(".zip")
+            || name.ends_with(".zip.part")
+            || name.ends_with(".onnx.part")
+    }
+
+    /** 扫一个目录，删掉里面符合条件的文件。返回（删掉数, 字节数）。 */
+    fn sweep(
+        dir: &std::path::Path,
+        pred: &dyn Fn(&str) -> bool,
+        removed: &mut Vec<String>,
+    ) -> u64 {
+        let mut freed = 0u64;
+        let Ok(rd) = std::fs::read_dir(dir) else { return 0 };
+        for e in rd.flatten() {
+            let p = e.path();
+            let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            if !pred(name) {
+                continue;
+            }
+            let sz = e.metadata().map(|m| m.len()).unwrap_or(0);
+            if std::fs::remove_file(&p).is_ok() {
+                removed.push(p.to_string_lossy().to_string());
+                freed += sz;
+            }
+        }
+        freed
+    }
+
+    // 1+2. 当前模型目录里的中间产物（.part / zip）
+    let cur = models_dir();
+    bytes += sweep(&cur, &is_junk, &mut removed);
+
+    /* 3. 旧位置的模型（数据目录下的 models/）—— 连 .onnx 一起清，
+     *    因为那是 r80g 改默认位置之前下的，现在已经用不上了。
+     *    ⚠ 与当前位置**相同**时跳过 —— 用户可能就把模型目录设成了那儿。 */
+    let legacy = default_dir();
+    if legacy != cur && legacy.exists() {
+        bytes += sweep(
+            &legacy,
+            &|n| is_junk(n) || n.ends_with(".onnx"),
+            &mut removed,
+        );
+        // 4. 旧目录空了就把目录也删掉（非空则留着，不碰用户自己放的东西）
+        let empty = std::fs::read_dir(&legacy)
+            .map(|mut d| d.next().is_none())
+            .unwrap_or(false);
+        if empty && std::fs::remove_dir(&legacy).is_ok() {
+            removed.push(legacy.to_string_lossy().to_string());
+        }
+    }
+
+    if !removed.is_empty() {
+        crate::win::log(&format!(
+            "cleanup_stale: 删掉 {} 项，释放 {}",
+            removed.len(),
+            human_size(bytes)
+        ));
+    }
+    (removed, bytes)
+}
+
 /// 取消标志：下载线程每读一块就看一眼。
 ///
 /// ⚠ 下载**模型**与下载**运行库**共用这一个标志 —— 它们不会同时进行
 /// （界面上一旦开始下就锁住按钮），所以不需要两套。
 /// （r80g 重写这段时曾把这个静态变量漏掉，编译报 `cannot find value CANCEL`。）
 static CANCEL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// **下载互斥锁** —— 同一时刻只允许一个下载在跑（r80i 修的真 bug）。
+///
+/// # 为什么必须有这个锁
+///
+/// 用户报：「点击下载引擎，它会下完之后再进一步的重复下载」。
+/// 实测日志（`%APPDATA%\QuickSearch\log.txt`）把现场记下来了：
+///
+/// ```text
+/// 134368000379  ai_matting_download: 开始 rmbg-full
+/// 134368000384  ai_matting_download: 开始 rmbg-fp16
+/// 134368000389  ai_matting_download: 开始 rmbg-quantized
+/// 134368000395  ai_matting_download: 开始 u2netp      ← 4 个下载在 16ms 内同时开始
+/// 134368000910  运行库失败：gh-proxy.com: 解压失败 不是有效的 zip（找不到 EOCD）
+///               ghfast.top:   解压失败 不是有效的 zip（找不到 EOCD）
+///               github.com:   解压失败 不是有效的 zip（找不到 EOCD）
+/// 134368001737  开始 rmbg-full / rmbg-fp16 / rmbg-quantized / u2netp   ← 又来一轮
+/// ```
+///
+/// 每次下载都会先下**运行库**，而运行库的 zip 用的是**固定文件名**
+/// `onnxruntime.zip`。四个下载并发跑就变成了：
+///   · 线程 A 刚创建 zip，线程 B 把它 `remove_file` 删了
+///     → A 之后 `read(zip_path)` 报 `os error 2`
+///   · 线程 C 写到一半，线程 D 去读 → "找不到 EOCD"（读到不完整的文件）
+///   · 谁都没成功 → 界面看起来就是"下完了又下一遍"，而且每轮都失败
+///
+/// 修法有两层：
+///   1. **这个锁**：同一时刻只让一个下载跑（后来的排队等，而不是齐头并进）
+///   2. 临时文件名带**唯一后缀**（见 `download_runtime`）——
+///      万一将来真的允许并行，也不会再互相踩
+///
+/// 用 `compare_exchange` 而不是 `Mutex`：这里要的是"忙就等着"，
+/// 不需要锁保护共享数据（共享的只有环境变量与文件系统）。
+static BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 拿下载锁；已在下载就返回 `None`（让调用方给用户一句明确的话）。
+pub(crate) struct BusyGuard;
+
+impl BusyGuard {
+    pub(crate) fn try_acquire() -> Option<BusyGuard> {
+        if BUSY
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            Some(BusyGuard)
+        } else {
+            None
+        }
+    }
+}
+
+impl Drop for BusyGuard {
+    fn drop(&mut self) {
+        BUSY.store(false, Ordering::SeqCst);
+    }
+}
 
 /// **取消正在进行的下载。**
 pub fn request_cancel() {
@@ -478,7 +624,22 @@ pub fn download_runtime(progress: &mut dyn FnMut(&str, u64, u64)) -> Result<Path
     }
     let dir = models_dir();
     std::fs::create_dir_all(&dir).map_err(|e| format!("建目录失败（{}）：{e}", dir.display()))?;
-    let zip_path = dir.join("onnxruntime.zip");
+
+    /* ⚠ r80i：临时文件带**唯一后缀**，不再叫固定的 `onnxruntime.zip`。
+     *
+     * 为什么：原来四个下载并发跑时共用这一个文件名，互相删、互相读到半个文件，
+     * 结果是"每个源都报解压失败、界面看着像重复下载"（实测日志见 `BUSY` 的注释）。
+     * 现在加了下载锁（并发已被挡住），但文件名仍然不共用 ——
+     * 这是**第二层保险**：万一将来放开了并行、或者有别的进程在同一个目录里下，
+     * 也不会再互相踩。进程 id + 纳秒时间戳足够唯一。 */
+    let zip_path = dir.join(format!(
+        "onnxruntime-{}-{}.zip.part",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
     let _ = std::fs::remove_file(&zip_path);
 
     take_cancel();
@@ -675,12 +836,24 @@ pub fn download(
     use sha2::Digest;
     use std::io::Write;
 
+
     take_cancel(); // 清掉上一次可能残留的取消标志
 
-    let dir = crate::config::data_dir().join("models");
-    std::fs::create_dir_all(&dir).map_err(|e| format!("建模型目录失败：{e}"))?;
-    // 临时文件用 `.part` 后缀：**中途失败不会留下一个看起来正常的模型文件**
+    /* ⚠ r80i 修的 bug：这里原来写的是 `data_dir().join("models")`，
+     * 但真正落盘的位置是 `model_path()`（= `models_dir()`，r80g 起默认在
+     * `<exe目录>/抠图模型`）。两者**曾经是同一个地方**，r80g 改了默认位置之后
+     * 就分叉了 —— 于是每下完一个模型，都会在数据目录里**凭空多出一个空的
+     * `models` 文件夹**（建了却没用上）。用户看到的就是"删不干净的多余目录"。
+     *
+     * 修法：目录一律从 `model_path()` 推导，不再另算一份 ——
+     * 这样"建目录"和"写文件"永远指向同一个地方。 */
     let final_path = model_path(spec.id);
+    let dir = final_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(models_dir);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("建模型目录失败（{}）：{e}", dir.display()))?;
+    // 临时文件用 `.part` 后缀：**中途失败不会留下一个看起来正常的模型文件**
     let tmp_path = final_path.with_extension("onnx.part");
 
     // 每个源的失败原因，最后拼起来给用户看

@@ -6225,13 +6225,39 @@ function webviewLabel() {
  *  写的时候守两条规矩：
  *   1. **从上往下是新到旧**，最新的排最前；
  *   2. 每条都用「用户能看懂的词」，不写模块名、不写函数名 ——
- *      看这页的人是用户，不是读代码的人。 */
+ *      看这页的人是用户，不是读代码的人。
+ *
+ *  ⚠ r80k 改掉的一个毛病：原来最新那条写的是
+ *  `ver: 'v' + CONF.version + ' · 最新'` —— 版本号是**动态**的，
+ *  于是不管发到哪个版本，它都显示"当前版本"，而里面的文字却还是
+ *  v1.0.0 那批功能。用户看到的就是"版本号没更新"（其实更新了，
+ *  但日志内容没跟着走）。现在**每条都写死自己的版本号**，
+ *  发新版时**同时**加一条，对不上就是漏了。 */
 const CHANGELOG = [
     {
-        ver: 'v1.0.0 · 最新',
+        ver: 'v1.1.1',
+        items: [
+            '<b>修：点一次下载却像下了好几遍</b> —— 同时发起多个下载时，它们会抢同一个临时文件、互相把对方下到一半的文件删掉，结果每一轮都失败、界面看着像"重复下载"。现在同一时刻只允许一个下载，重复点会明确提示"已经有一个在进行中"。',
+            '<b>修：关于页的版本号不跟着更新</b> —— 之前版本号有两处是手写的，发新版时容易漏改。现在只从一处（构建配置）读取，不可能再对不上。',
+            '<b>新增「清理残留」</b> —— 自动清掉下载中断留下的临时文件、以及旧位置遗留的模型（换过模型存放位置的话）。程序每次启动也会自动清一次。',
+        ],
+    },
+    {
+        ver: 'v1.1.0',
+        items: [
+            '<b>图标抠图换成 AI</b>：用神经网络识别主体，主体和背景颜色接近的图也能抠。四个模型按需下载（<b>4.4MB 的轻量版实测反而最准</b>，另有三档 42/84/168MB 可选），不打开这个功能就一个都不下。',
+            '<b>涂抹修饰</b>：抠完直接在结果图上涂 —— 「擦除」把多余的部分涂掉、「保留」把误删的部分补回来；可<b>放大 1~8 倍</b>再涂，涂错能撤销、能重来。',
+            '<b>换模型重抠</b>：同一张图不满意，下拉换个模型立刻重抠（只列已下载的）。',
+            '<b>设置页里直接抠图</b>：不用进图标编辑器，挑一张图就能抠，抠完自己选地方保存（存 PNG，透明不丢）。',
+            '<b>模型存放位置可改</b>：设置里能看到模型在哪、能一键打开那个目录、也能换位置；<b>换位置时已有模型自动搬过去</b>。默认就放在程序目录下的「抠图模型」文件夹里，整个文件夹拷走就带着模型。',
+            '<b>提示更准</b>：抠图相关的失败都给能照着做的中文提示（缺模型、缺运行库、模型还没下），不再有"点了没反应"。',
+        ],
+    },
+    {
+        ver: 'v1.0.0',
         items: [
             '<b>识图搜索</b>：横条上多一颗 🖼，框一块屏幕就能以图搜图。十二家引擎可选（Yandex / 百度 / SauceNAO / trace.moe 是框选完直接把图交给它、浏览器落在结果上；六家 AI 是打开页面自动粘贴；另有两家按图片地址搜），默认带上 Yandex 和 SauceNAO；勾多家则一次框选后每家的结果各开一个新标签页。动漫截图可以用 trace.moe —— 番名（含中文）、第几集、几分几秒、相似度直接列在本地结果页上。',
-            '<b>文件路径快捷打开</b>：选中一段本地路径（<code>C:\\...</code>、<code>\\server\\share</code>、带斜杠的、含 %VAR% 的都认），横条上自动多一颗 📁，点一下就在资源管理器里定位到它。',
+            '<b>文件路径快捷打开</b>：选中一段本地路径（<code>C:\\...</code>、<code>\\\\server\\share</code>、带斜杠的、含 %VAR% 的都认），横条上自动多一颗 📁，点一下就在资源管理器里定位到它。',
             '<b>明文导入 / 导出</b>：「数据」页里挑着导出自己想要的几项，导出的是纯文本 JSON，可以直接发给别人导入；导入是<b>合并式</b>的，不会动你别的设置。和加密的「备份」是两条独立的路。',
             '<b>OCR 同时识别多家</b>：默认引擎下面勾几家，一次识别它们就同时跑同一张图，结果各占一段；结果窗默认停在默认引擎那一档，不会自作主张跳走。',
             '<b>引擎库扩充到 777 个</b>，三大类（网页 705 / 软件 46 / 快捷键 26）分组 + 「更多引擎」面板三层下钻 + 面板内直接搜。',
@@ -6245,7 +6271,7 @@ const CHANGELOG = [
 
 function fillAbout() {
     qsSetText('aboutDev', CONF.developer || 'QQQOrange');
-    qsSetText('aboutVer', 'v' + (CONF.version || '1.0.0'));
+    qsSetText('aboutVer', 'v' + (CONF.version || '—'));
     qsSetText('aboutBuilt', CONF.builtAt || '未知');
 
     const wv = $('aboutWebview');
@@ -6321,7 +6347,7 @@ listen('qs://config', (ev) => {
 
 /** 广播到达后的整段刷新（拆成函数只是为了给调用处套 try/catch）。 */
 function applyConfigBroadcast() {
-    qsSetText('ver', 'v' + (CONF.version || '1.0.0'));
+    qsSetText('ver', 'v' + (CONF.version || '—'));
     fillAbout();
     // 自定义引擎可能刚被增删改，先后并一次再渲染
     qsMergeCustomEngines(CATALOG, BY_NAME, CONF);
@@ -6957,7 +6983,7 @@ requestAnimationFrame(() => requestAnimationFrame(() => {
      * 只有 renderAllList 一条路（见上面 r73 那段）。 */
 
     CONF = window.CONF = await invoke('get_config');
-    $('ver').textContent = 'v' + (CONF.version || '1.0.0');
+    $('ver').textContent = 'v' + (CONF.version || '—');
     fillAbout();
     // 调试构建才打开自动化辅助（坐标上报等）
     if (CONF.debug) document.body.dataset.qsDebug = '1';
@@ -7193,8 +7219,22 @@ async function aiRefresh() {
     aiRender();
 }
 
-/** 开始下载：先把本地状态标成"下载中"（立刻出进度条），再发命令。 */
+/** 开始下载：先把本地状态标成"下载中"（立刻出进度条），再发命令。
+ *
+ *  ⚠ r80i：后端现在**同一时刻只允许一个下载**（拿不到锁会明确报错）。
+ *  所以这里在发命令前先挡一道：已经有别的模型在下时，
+ *  不去发起第二次（否则会拿到"已经有一个下载在进行中"的报错，
+ *  而用户其实只是手快点了两个按钮）。
+ *  挡完给一句说明 —— 静默不响应会被当成"按钮坏了"。 */
 async function aiStartDownload(id) {
+    // 已经有下载在进行（不管是不是这个模型）→ 只提示，不再发命令
+    if (AI_DL.size > 0) {
+        const other = Array.from(AI_DL.keys())[0];
+        toast(other === id
+            ? '这个模型正在下载中，稍等一下'
+            : '已经有模型在下载了 —— 等它下完再点这个（同时下会互相打断）');
+        return;
+    }
     AI_DL.set(id, { done: 0, total: 0, pct: 0, phase: 'downloading' });
     aiRenderModels();
     try {
@@ -7249,6 +7289,15 @@ function aiInit() {
     aiBindProgress();
     aiToolsInit();
     aiRefresh();
+    /* r80i：启动时**自动清一次残留**（用户不必手动点）。
+     * 只清"确定是垃圾"的（.part / zip / 旧位置遗留的模型），
+     * 当前模型目录里的 .onnx 一个都不碰 —— 所以自动执行是安全的。 */
+    invoke('ai_cleanup_stale').then((r) => {
+        if (r && r.count > 0) {
+            console.log('[启动清理] 清掉', r.count, '项：', r.items);
+            aiDirRefresh();
+        }
+    }).catch(() => { });
 }
 
 /** 开关变化后刷新模型列表 —— 由 `SWITCHES` 的绑定逻辑调用。
@@ -7333,6 +7382,35 @@ function aiDirBind() {
                 toast('恢复默认失败：' + ((e && e.message) || e));
             } finally {
                 reset.disabled = false;
+                await aiDirRefresh();
+                await aiRefresh();
+            }
+        });
+    }
+    /* r80i：清理残留。用户要求「原来的版本的好像还在一开始下载的位置，
+     * 需要你做进一步的清除」—— 除了换位置时自动迁移，还要能主动清一次，
+     * 因为残留的来源不止一个：半截的 .part、下运行库的 zip、
+     * 以及 r80g 改默认位置之前下到数据目录的模型。 */
+    const clean = $('btnAiCleanup');
+    if (clean) {
+        clean.addEventListener('click', async () => {
+            clean.disabled = true;
+            try {
+                const r = await invoke('ai_cleanup_stale');
+                if (r && r.ok) {
+                    if (r.count > 0) {
+                        toast(`清掉了 ${r.count} 项，释放 ${r.sizeText}`);
+                        /* 把删了什么写进日志区的思路不适合这里（太长），
+                         * 但至少让用户能在控制台看到具体路径。 */
+                        try { console.log('[清理残留] 删除了：', r.items); } catch (e) { }
+                    } else {
+                        toast('没有需要清理的残留');
+                    }
+                }
+            } catch (e) {
+                toast('清理失败：' + ((e && e.message) || e));
+            } finally {
+                clean.disabled = false;
                 await aiDirRefresh();
                 await aiRefresh();
             }
