@@ -133,3 +133,8 @@ Get-FileHash .\QuickSearch.exe -Algorithm SHA256
 ## 许可
 
 [MIT License](LICENSE) —— 可自由使用、修改、分发与商用，只需保留版权声明。
+
+> ⚠ **注意：v1.1.0 起许可已变更**，改为
+> [PolyForm Noncommercial 1.0.0](LICENSE) —— **不再允许商用**。
+> 本页描述的是 v1.0.0 当时的许可状态，留作历史记录。
+> 当前许可见 [RELEASE-v1.1.0.md](RELEASE-v1.1.0.md) 的「许可变更」一节。

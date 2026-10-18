@@ -1,6 +1,13 @@
-# 推送到 GitHub（一键脚本）
+# 推送与发布流程
 
-本仓库已经**完全就绪**，只差你本人授权一次。下面两种方式任选其一。
+> ⚠ **重要约定（2026-10-18 用户明确要求）**
+>
+> **未经用户主动提出"上传到 GitHub"之前，不要推送。** 但**本地源码要照常更新**。
+>
+> 换句话说：改代码 → 提交到本地（可以做）→ 推送远端（**只在用户说了才做**）。
+>
+> 这条约定的由来：推送是**对外可见**的动作，而 `github.com:443` 在本机时通时不通，
+> 推送经常要重试十几轮；让"什么时候对外发布"由用户决定，比自动推送更合理。
 
 ---
 
@@ -8,103 +15,102 @@
 
 | 项 | 状态 |
 |---|---|
-| 本地仓库 | ✅ 已初始化，分支 `main`，3 个提交，875 个跟踪文件 |
-| 远端配置 | ✅ `origin` = `https://github.com/QuickSearch-Desktop/QuickSearch.git` |
-| 网络到 GitHub | ✅ 通（`git ls-remote` 公共库成功，读端点 200） |
-| GitHub 凭据 | ❌ **没有**（无 gh CLI、无 SSH key、无 token、无凭据管理器记录） |
-| 目标仓库 | ❌ 尚不存在（`QuickSearch-Desktop/QuickSearch` 返回空） |
-
-> 换而言之：**代码没问题、网络没问题，只差认证。** 浏览器里的登录态无法直接
-> 变成 git 的推送凭据（那是安全设计），必须显式授权一次。
+| 本地仓库 | ✅ 分支 `main`，工作区干净 |
+| 远端配置 | ✅ `origin` = `https://github.com/QQQOrange/QuickSearch.git` |
+| GitHub 凭据 | ✅ 凭据管理器里有（`git credential fill` 能拿到） |
+| 网络 | ⚠️ **间歇性**：`github.com:443` 时通时不通；`api.github.com` 一直可用 |
+| 发布 | ✅ Release `v1.0.0`、`v1.1.0` |
 
 ---
 
-## 方式 A：用 Personal Access Token（最快，2 分钟）
-
-### 1. 建 token
-
-浏览器已登录 GitHub，直接打开：
-
-**https://github.com/settings/tokens/new**
-
-- Note：`QuickSearch push`
-- Expiration：按需（30 天即可）
-- 勾选 **`repo`**（完整仓库权限，新建私有库必需）
-- 点 **Generate token**，复制那串 `ghp_...`（**只显示一次**）
-
-### 2. 在本机执行
-
-打开 PowerShell，粘贴执行（把 `<TOKEN>` 换成刚才那串）：
+## 正常推送（网络通时）
 
 ```powershell
 cd "D:\Local AI\git\Quick search 源代码"
-git remote set-url origin https://<TOKEN>@github.com/QuickSearch-Desktop/QuickSearch.git
-git push -u origin main
+git add -A
+git -c user.name="QQQOrange" -c user.email="62794181+QQQOrange@users.noreply.github.com" commit -m "说明"
+git push origin main
 ```
 
-成功后**立刻**把 URL 里的 token 去掉（别留在 `.git/config` 里）：
+### ⚠ 判断"推送成功"不能看退出码
 
-```powershell
-git remote set-url origin https://github.com/QuickSearch-Desktop/QuickSearch.git
-```
+`git push` 失败时**也可能退出码为 0**，而且输出里会出现误导性的
+`Everything up-to-date`（那是它对自己缓存的判断）。**必须看有没有
+`main -> main` 这一行**，或者去 API 核对远端 SHA。
 
-### 3. 仓库还没建？
+### 网络不通时（本机常见）
 
-上面第 2 步会失败（`repository not found`）。先在浏览器建一个空仓库：
+`github.com:443` 会超时（`curl 000` / `RPC failed; Connection was reset`），
+而 `api.github.com` 正常。两种情况：
 
-**https://github.com/new**
+- **只是间歇** → 脚本里多试几轮（实测有时第 11 轮才通）
+- **持续不通** → 走 GitHub API 的 git 对象接口推送（blob → tree → commit → PATCH ref）。
+  这是一条**正规途径**（不需要 git 协议端口），推完用 **blob SHA 逐文件核对**
+  证明内容一致。
 
-- Repository name：`QuickSearch`
-- Owner：`QuickSearch-Desktop`（或你自己的账号，那就把上面的 URL 一起改掉）
-- **不要**勾 "Add a README"（否则要先 pull）
-- Public / Private 随意
-
-建完再执行第 2 步。
+> 注意：走 API 建出来的 commit，其 SHA 与本地不同（author/committer 元数据不同），
+> 所以本地 `origin/main` 会显示落后。**内容是对的**（逐文件核对过）。
+> 等网络恢复后 `git fetch` 一次即可对齐。
 
 ---
 
-## 方式 B：用 SSH key（一次配置，长期免 token）
+## 发布新版本 Release
+
+### 1. 改版本号（三处，必须一致）
 
 ```powershell
-# 1. 生成 key（一路回车即可）
-ssh-keygen -t ed25519 -C "quicksearch@local"
-
-# 2. 复制公钥
-Get-Content "$env:USERPROFILE\.ssh\id_ed25519.pub" | Set-Clipboard
+# Cargo.toml / tauri.conf.json / package.json 里的 version
 ```
 
-浏览器打开 **https://github.com/settings/keys** → **New SSH key** → 粘贴 → 保存。
+### 2. 写发布说明
+
+`docs/RELEASE-v<版本>.md` —— 参考 `RELEASE-v1.1.0.md` 的结构：
+主要改动 / 修掉的 bug / 安装 / 质量指标 / 已知限制 / **校验值** / **许可**。
+
+### 3. 构建并算校验值
 
 ```powershell
-# 3. 验证
-ssh -T git@github.com
-
-# 4. 切远端并推送
+$env:PATH = "C:\Users\64381\.cargo\bin;$env:PATH"
+$env:ORT_SKIP_DOWNLOAD = '1'
 cd "D:\Local AI\git\Quick search 源代码"
-git remote set-url origin git@github.com:QuickSearch-Desktop/QuickSearch.git
-git push -u origin main
+cargo build --release
+Get-FileHash target\release\QuickSearch.exe -Algorithm MD5, SHA256
 ```
 
----
+> ⚠ **产物目录不该有 `onnxruntime.dll`**（r80g 起运行库随模型下载）。
+> 有的话说明 `build.rs` 的拷贝逻辑又回来了。
 
-## 方式 C：让我代劳（如果你愿意给凭据）
-
-你可以在下一条消息里告诉我 token（或用完即焚的临时 token），我来执行推送并
-**在推送完成后立刻把 token 从 `.git/config` 里清掉**。
-
-⚠ 但更推荐你自己跑方式 A —— token 不该经过任何第三方，包括我。
-
----
-
-## 推送完成后验证
+### 4. 打 tag + 推送
 
 ```powershell
-cd "D:\Local AI\git\Quick search 源代码"
-git log --oneline                    # 应有 3 个提交
-git ls-remote --heads origin         # 应能看到 refs/heads/main
+git tag -a v1.1.0 -m "Quick Search v1.1.0"
+git push origin main
+git push origin v1.1.0
 ```
 
-浏览器打开仓库页面，应能看到 `README.md` 与 `docs/PRD.md`。
+### 5. 建 Release + 上传 exe
+
+用 API（不依赖 git 协议端口，网络更稳）：
+
+```powershell
+# 需要 token：git credential fill 取
+$h = @{ Authorization = "token <TOKEN>"; Accept = "application/vnd.github+json" }
+$body = @{ tag_name="v1.1.0"; name="Quick Search v1.1.0"; body=(Get-Content docs\RELEASE-v1.1.0.md -Raw); draft=$false; prerelease=$false } | ConvertTo-Json
+Invoke-WebRequest -Method Post -Uri "https://api.github.com/repos/QQQOrange/QuickSearch/releases" -Headers $h -Body $body -ContentType "application/json"
+# 再上传资产：POST /releases/{id}/assets?name=QuickSearch.exe  （二进制 body）
+```
+
+---
+
+## 发布前检查清单
+
+- [ ] `cargo test` 全过、`cargo clippy` 0 warning
+- [ ] 真机探针全过
+- [ ] 三处版本号一致
+- [ ] `docs/RELEASE-v<版本>.md` 已写，校验值与实际产物一致
+- [ ] 产物目录没有 `onnxruntime.dll`
+- [ ] README 与 PRD 里**没有**已删除功能的描述（如"手动补描""颜色解混"）
+- [ ] 许可文件与 README/发布说明里的许可是同一个
 
 ---
 
@@ -112,13 +118,13 @@ git ls-remote --heads origin         # 应能看到 refs/heads/main
 
 | 部分 | 大小 |
 |---|---|
-| `.git` | 约 5 MB |
 | 工作区 | 约 20 MB |
 | `ui/data/icons`（407 个图标） | 2.5 MB |
+| `.git` | 约 6 MB |
 
-`docs/evidence/`（22MB 截图）与 `tools/probe-out/`（16MB 探针日志）**已排除在版本
-控制之外**（`.gitignore` 里写死了）。它们被归档到
-`D:\Local AI\git\QuickSearch-evidence-archive`，需要追溯历史实测结果时去那里看。
+`docs/evidence/`（22MB 截图）、`tools/probe-out/`（16MB 探针日志）、
+`tools/*.txt`（探针输出）**已排除在版本控制之外**（`.gitignore` 里写死）。
+它们被归档到 `D:\Local AI\git\QuickSearch-evidence-archive`。
 
-> 之所以另存而不是删掉：这些截图与日志是"当时的实测证据"，重跑探针能再生成
-> 新的，但旧的那份对应的是旧版本的实测状态，删了就没了。
+> 之所以另存而不是删掉：这些截图与日志是"当时的实测证据"。
+> 重跑探针能生成新的，但旧的那份对应旧版本的实测状态，删了就没了。
