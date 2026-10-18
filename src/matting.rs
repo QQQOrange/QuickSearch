@@ -51,18 +51,6 @@ pub enum Tri {
     Unknown,
 }
 
-/// 抠图结果。
-pub struct Matting {
-    /// 处理后的 RGBA（尺寸 = 输入经缩放后的尺寸）
-    pub rgba: image::RgbaImage,
-    /// 被判定为背景的像素数（alpha 从有到无）
-    pub removed: usize,
-    /// 是否没找到可靠背景（主体顶满四边 / 全不透明同色）
-    pub no_background: bool,
-    /// 三态分布，调试与日志用
-    pub tri_counts: (usize, usize, usize),
-}
-
 /// 背景色样本：`(代表色, 权重)`。权重 = 该色在边缘环带里的出现次数。
 #[derive(Clone, Copy, Debug)]
 pub struct BgSample {
@@ -453,70 +441,6 @@ fn erode(mask: &[bool], w: u32, h: u32, r: i32) -> Vec<bool> {
         }
     }
     cur
-}
-
-/// 从 trimap 里的三态，数出"有没有可靠背景"。
-///
-/// 判据三条（任一成立即"没有可靠背景"）：
-///   ① 背景占比太小（< 3%）—— 主体顶满四边，没有可用的背景样本；
-///   ② **前景样本为空** —— 全图被判成背景候选，根本不存在"主体像素"，
-///      算法无从知道要保留什么。全同色图正是这一条（r79 加了连通性收束后，
-///      它的候选背景全部与边界连通，于是没有像素落在前景态）。
-///   ③ **背景样本与前景样本几乎同色** —— "背景色"其实等于"主体色"，
-///      任何按颜色分离的算法都无从下手。
-///
-/// 返回 false 时 `matte` 会走保守出口（原图不动），界面提示"这张图看起来
-/// 没有背景"——而不是给一个糟糕结果。
-pub fn has_reliable_background(
-    counts: (usize, usize, usize),
-    total: usize,
-    fg_colors: &[[f32; 3]],
-    bg_colors: &[[f32; 3]],
-) -> bool {
-    let (fg, bg, _unk) = counts;
-    if total == 0 {
-        return false;
-    }
-    if (bg as f32 / total as f32) < 0.03 {
-        return false;
-    }
-    // ② 一个前景像素都没有 → 没有"要保留的东西"，谈不上抠背景
-    if fg == 0 || fg_colors.is_empty() {
-        return false;
-    }
-    // ③ 前景/背景主色几乎重合 → 分不开
-    if let (Some(f), Some(b)) = (fg_colors.first(), bg_colors.first()) {
-        let d = ((f[0] - b[0]).powi(2) + (f[1] - b[1]).powi(2) + (f[2] - b[2]).powi(2)).sqrt();
-        if d < 12.0 {
-            return false;
-        }
-    }
-    true
-}
-
-/// 把 trimap 三态里"背景占比"最高的一批像素当作背景样本，供后续 matting 用。
-pub fn collect_fg_bg_colors(
-    rgba: &image::RgbaImage,
-    tri: &[Tri],
-) -> (Vec<[f32; 3]>, Vec<[f32; 3]>) {
-    let (w, _h) = rgba.dimensions();
-    let mut fg = Vec::new();
-    let mut bg = Vec::new();
-    // 采样上限：颜色样本太多会让后面的"最近色"查询变慢
-    const MAX: usize = 4096;
-    let step = (tri.len() / MAX).max(1);
-    for i in (0..tri.len()).step_by(step) {
-        let x = (i % w as usize) as u32;
-        let y = (i / w as usize) as u32;
-        let p = rgba.get_pixel(x, y);
-        let c = [p[0] as f32, p[1] as f32, p[2] as f32];
-        match tri[i] {
-            Tri::Fg => fg.push(c),
-            Tri::Bg => bg.push(c),
-            Tri::Unknown => {}
-        }
-    }
-    (fg, bg)
 }
 
 /// **颜色解混（color unmixing）估 alpha** —— 图标这类"平涂图形 + 抗锯齿边缘"
@@ -1000,103 +924,6 @@ pub fn apply_alpha(rgba: &mut image::RgbaImage, alpha: &[f32]) -> usize {
     removed
 }
 
-/// 裁掉四周全透明的空白，返回裁切后的图（让图标在格子里更"满"）。
-///
-/// 这一步替代了旧实现里那个"光学尺寸归一"要做的一半事情 ——
-/// 抠完之后主体周围常留一圈空，裁掉它视觉上会大一圈。
-pub fn trim_transparent(img: &image::RgbaImage) -> image::RgbaImage {
-    let (w, h) = img.dimensions();
-    let mut x0 = w;
-    let mut y0 = h;
-    let mut x1 = 0u32;
-    let mut y1 = 0u32;
-    for y in 0..h {
-        for x in 0..w {
-            if img.get_pixel(x, y)[3] > 8 {
-                if x < x0 { x0 = x; }
-                if y < y0 { y0 = y; }
-                if x > x1 { x1 = x; }
-                if y > y1 { y1 = y; }
-            }
-        }
-    }
-    if x1 < x0 || y1 < y0 {
-        return img.clone();   // 全透明，原样返回
-    }
-    // 留 1px 余量，避免把边缘抗锯齿切掉
-    let x0 = x0.saturating_sub(1);
-    let y0 = y0.saturating_sub(1);
-    let x1 = (x1 + 1).min(w - 1);
-    let y1 = (y1 + 1).min(h - 1);
-    image::imageops::crop_imm(img, x0, y0, x1 - x0 + 1, y1 - y0 + 1).to_image()
-}
-
-/// 一条龙：估背景 → 建 trimap → 解 alpha → 去色 → 合成。
-///
-/// `keep`：手动描边蒙版（`None` = 全自动）。
-/// `trim`：抠完是否裁掉四周空白。
-pub fn matte(
-    bytes: &[u8],
-    tolerance: u32,
-    keep: Option<&[bool]>,
-    _iterations: u32,
-    trim: bool,
-) -> Result<Matting, String> {
-    let mut rgba = prepare(bytes)?;
-    let (w, h) = rgba.dimensions();
-    if w < 2 || h < 2 {
-        return Err("图太小了（至少 2×2）".to_string());
-    }
-    let n = (w as usize) * (h as usize);
-    let keep_slice = keep.map(|k| &k[..k.len().min(n)]);
-
-    let samples = estimate_background(&rgba);
-    let (tri, counts) = build_trimap(&rgba, &samples, tolerance, keep_slice);
-    /* 先取前景/背景颜色样本，再判"有没有可靠背景" ——
-     * 后者要看两者的色差（全同色图靠这个识别出来）。 */
-    let (fg_colors, bg_colors) = collect_fg_bg_colors(&rgba, &tri);
-    let reliable = has_reliable_background(counts, n, &fg_colors, &bg_colors);
-
-    /* r79：**没有可靠背景时，不许把图抠光** —— 除非用户手动指定了前景。
-     *
-     * 为什么必须分开这两种情况（探针 5b 抓到的真问题）：
-     *   · 整张同色图**且用户没描任何东西**：算法其实无从知道主体在哪，
-     *     它算出来的"背景"等于"整张图"。硬抠的结果是把图整个抹掉，
-     *     而前端只显示一句"这张图看起来没有背景" —— 用户看到的是被毁掉的图。
-     *     正确做法：**什么都不动**，removed=0，由界面告诉用户"没东西可抠"。
-     *   · 整张同色图**但用户手动补描了**：那是他在明确说"这块是主体"。
-     *     这时就该按他说的做：描过的保住、其余按边缘连通性抠掉 ——
-     *     这正是旧算法（颜色泛洪）擅长的场景，此时它的结果可预期、也符合用户意图。
-     *
-     * 判据用 `keep_slice` 里有没有真的涂过东西，不是"传没传蒙版"
-     * （传了一个全零蒙版等于没描）。 */
-    let painted = keep_slice.map(|k| k.iter().any(|x| *x)).unwrap_or(false);
-    if !reliable && !painted {
-        // 保守出口：原图原样返回，一个像素都不动
-        let out = if trim { trim_transparent(&rgba) } else { rgba };
-        return Ok(Matting {
-            rgba: out,
-            removed: 0,
-            no_background: true,
-            tri_counts: counts,
-        });
-    }
-
-    /* r79 最终版：`solve_alpha` 用**颜色解混**模型，它自己负责边缘去色
-     * （把混合像素的 RGB 置为估算前景色，比反解 F 更稳、不留白边）。
-     * `iterations` 保留在签名里是为了兼容调用方与探针 —— 解混是闭式解、不迭代。 */
-    let alpha = solve_alpha(&mut rgba, &tri, keep_slice);
-    let removed = apply_alpha(&mut rgba, &alpha);
-    let out = if trim { trim_transparent(&rgba) } else { rgba };
-
-    Ok(Matting {
-        rgba: out,
-        removed,
-        no_background: !reliable,
-        tri_counts: counts,
-    })
-}
-
 /// PNG 编码（图标必须保 alpha，所以恒走 PNG）。
 pub fn encode_png(img: &image::RgbaImage) -> Result<Vec<u8>, String> {
     let mut buf = Vec::new();
@@ -1131,210 +958,121 @@ fn white_bg_with_circle(size: u32) -> image::RgbaImage {
 
 
 #[cfg(test)]
+#[cfg(test)]
 mod tests {
     use super::*;
 
-    fn alpha_at(img: &image::RgbaImage, x: u32, y: u32) -> u8 {
-        img.get_pixel(x, y)[3]
+    /* ══════════════════════════════════════════════════════════════════════
+     * r80：`matte()` 与本地抠图入口已删（用户要求「原来那个直接去掉」），
+     * 所以这一层不再测"抠完之后长什么样"。
+     *
+     * `matting.rs` 现在的角色是 **AI 的边缘处理器**：AI 给出低分辨率 alpha，
+     * 这里用 `build_trimap` + `solve_alpha` + `apply_alpha` 把边缘做干净。
+     * 所以单测钉的是这套边缘处理里的**纯逻辑**部分。
+     * ══════════════════════════════════════════════════════════════════════ */
+
+    fn png_of(img: &image::RgbaImage) -> Vec<u8> {
+        encode_png(img).expect("测试图编码不该失败")
     }
 
-    /// 最基本的一条：白底蓝圆，背景该被抠掉、主体该保住。
+    /// 白底 + 深色圆：trimap 应当分出前景与背景（这是 AI 蒙版进来的入口）。
     #[test]
-    fn 白底圆形主体能正确分离() {
+    fn trimap能分出前景与背景() {
         let img = white_bg_with_circle(96);
-        let m = matte(&png_of(&img), 48, None, 12, false).expect("应当成功");
-        assert!(!m.no_background, "这张图有明显背景");
-        assert_eq!(alpha_at(&m.rgba, 48, 48), 255, "圆心必须不透明");
-        assert_eq!(alpha_at(&m.rgba, 2, 2), 0, "四角必须透明");
-        assert!(m.removed > 2000, "背景应当被大量抠掉，实际 {}", m.removed);
-    }
-
-    /// **用户报的那个 bug**：浅色主体落在浅底上。
-    /// 旧算法（颜色泛洪）会把主体一起吃掉；新算法必须保住它。
-    #[test]
-    fn 浅色主体落在浅底上也能保住() {
-        // 底 #F8F8F8，主体 #E8E8E8 —— 只差 16，任何"只看颜色"的算法都会失败
-        let mut img = image::RgbaImage::new(96, 96);
-        for (x, y, p) in img.enumerate_pixels_mut() {
-            let inside = (24..72).contains(&x) && (24..72).contains(&y);
-            *p = if inside {
-                image::Rgba([0xE8, 0xE8, 0xE8, 255])
-            } else {
-                image::Rgba([0xF8, 0xF8, 0xF8, 255])
-            };
-        }
-        let m = matte(&png_of(&img), 48, None, 16, false).expect("应当成功");
-        // 关键：主体中心必须还在
-        assert_eq!(
-            alpha_at(&m.rgba, 48, 48),
-            255,
-            "浅色主体中心必须保住（这正是旧算法出错的地方）"
-        );
-        // 四角仍然该被抠掉
-        assert_eq!(alpha_at(&m.rgba, 1, 1), 0, "四角是背景，该透明");
-    }
-
-    /// 手动描边 = 硬约束：描过的区域哪怕颜色跟背景一模一样也必须保住。
-    #[test]
-    fn 手动描边是无条件保护() {
-        let mut img = image::RgbaImage::new(64, 64);
-        // 整张图同色 —— 没有任何算法能"看出"主体，只能靠描边
-        for p in img.pixels_mut() {
-            *p = image::Rgba([200, 200, 200, 255]);
-        }
-        let mut keep = vec![false; 64 * 64];
-        for y in 20..44u32 {
-            for x in 20..44u32 {
-                keep[(y * 64 + x) as usize] = true;
-            }
-        }
-        let m = matte(&png_of(&img), 48, Some(&keep), 8, false).expect("应当成功");
-        assert_eq!(alpha_at(&m.rgba, 32, 32), 255, "描过的中心必须保住");
-        assert_eq!(alpha_at(&m.rgba, 2, 2), 0, "没描的地方该被抠掉");
-    }
-
-    /// 全透明输入不该报错、也不该变样。
-    #[test]
-    fn 全透明图原样返回() {
-        let img = image::RgbaImage::new(32, 32);   // 全 0
-        let m = matte(&png_of(&img), 48, None, 4, false).expect("应当成功");
-        assert_eq!(m.removed, 0);
-        assert_eq!(alpha_at(&m.rgba, 16, 16), 0);
-    }
-
-    /// 主体顶满四边（没有背景）→ 标记 no_background，**且不动原图**。
-    ///
-    /// r79：这条测试的价值在于钉住后面那半句。探针 `r79-matting-probe` 的
-    /// 5b 曾抓到：判定"没有背景"之后仍然把图整个抠光了（16320/16384 像素），
-    /// 用户看到的是被毁掉的图 + 一句轻飘飘的提示。正确行为是**原样返回**。
-    #[test]
-    fn 主体顶满四边时标记无背景且不动图() {
-        let img = image::RgbaImage::from_pixel(64, 64, image::Rgba([10, 20, 30, 255]));
-        let m = matte(&png_of(&img), 48, None, 4, false).expect("应当成功");
-        assert!(m.no_background, "全同色图应当被判定为没有背景");
-        assert_eq!(m.removed, 0, "既然没背景可分，就不该抠掉任何像素");
-        assert_eq!(
-            alpha_at(&m.rgba, 32, 32),
-            255,
-            "原图必须原样保留（中心不该被抠透明）"
+        let samples = estimate_background(&img);
+        assert!(!samples.is_empty(), "白底图应当估出背景色");
+        let (tri, (fg, bg, _unk)) = build_trimap(&img, &samples, 48, None);
+        assert!(fg > 100, "圆内应当有确定前景，实际 {fg}");
+        assert!(bg > 500, "四周应当有确定背景，实际 {bg}");
+        // 圆心必是前景
+        assert_eq!(tri[(48 * 96 + 48) as usize], Tri::Fg, "圆心应当是前景");
+        /* 角落：⚠ **不能**断言它是 Bg。
+         * `build_trimap` 的形态学步骤会对背景做**腐蚀**（把背景向内收 r 圈），
+         * 而贴图像边框的那一圈在腐蚀后必然落到未知带 —— 这是**有意的**：
+         * 贴边像素本来就最可疑（可能是主体顶满，也可能是背景）。
+         * 它们交给解混时 I≈B，α 自然算成 0，不会误留。
+         * 所以要断言的是"角落**不是**确定前景"，而不是"角落是背景"。 */
+        assert_ne!(
+            tri[0],
+            Tri::Fg,
+            "左上角不该被判定为确定前景（它最多是未知/背景）"
         );
     }
 
-    /// 但**用户手动补描之后**，同一张同色图就该按他说的抠：
-    /// 描过的保住，其余按连通性抠掉。
+    /// **手动补描是硬约束**：描过的像素无论颜色如何都必须是前景。
+    /// 这条是用户明确要的行为（"描过的地方一定保留"）。
     #[test]
-    fn 同色图但手动补描后就按描的来() {
-        let img = image::RgbaImage::from_pixel(64, 64, image::Rgba([10, 20, 30, 255]));
+    fn 补描区域一定是前景() {
+        let img = white_bg_with_circle(64);
+        let samples = estimate_background(&img);
         let mut keep = vec![false; 64 * 64];
-        for y in 24..40u32 {
-            for x in 24..40u32 {
+        // 在角落（本来是背景）描一块
+        for y in 2..14u32 {
+            for x in 2..14u32 {
                 keep[(y * 64 + x) as usize] = true;
             }
         }
-        let m = matte(&png_of(&img), 48, Some(&keep), 8, false).expect("应当成功");
-        assert_eq!(alpha_at(&m.rgba, 32, 32), 255, "描过的中心必须保住");
-        assert_eq!(alpha_at(&m.rgba, 2, 2), 0, "没描的地方按连通性抠掉");
-        assert!(m.removed > 1000, "应当确实抠掉了外围，实际 {}", m.removed);
+        let (tri, _) = build_trimap(&img, &samples, 48, Some(&keep));
+        for y in 2..14u32 {
+            for x in 2..14u32 {
+                assert_eq!(tri[(y * 64 + x) as usize], Tri::Fg, "描过的 ({x},{y}) 必须是前景");
+            }
+        }
     }
 
-    /// 裁切：抠完后四周空白应当被裁掉。
+    /// 全透明的图不该被"补"上东西 —— 原 alpha 是上界。
     #[test]
-    fn 抠完会裁掉四周空白() {
-        let img = white_bg_with_circle(128);
-        let m = matte(&png_of(&img), 48, None, 12, true).expect("应当成功");
-        let (w, h) = m.rgba.dimensions();
-        assert!(w < 128 && h < 128, "应当被裁小，实际 {w}×{h}");
-        assert!(w > 40, "但不该裁到只剩一点，实际 {w}");
+    fn 全透明图保持透明() {
+        let img = image::RgbaImage::new(32, 32); // 全 0
+        let samples = estimate_background(&img);
+        let (tri, _) = build_trimap(&img, &samples, 48, None);
+        let alpha = solve_alpha(&mut img.clone(), &tri, None);
+        for (i, a) in alpha.iter().enumerate() {
+            assert_eq!(*a, 0.0, "第 {i} 个像素本该透明，却算成了 {a}");
+        }
     }
 
-    /// 坏输入要报错而不是 panic。
+    /// 背景像素的 alpha 必须是 0、前景必须是 1（定值不被求解改动）。
+    #[test]
+    fn 定值不会被改动() {
+        let img = white_bg_with_circle(64);
+        let samples = estimate_background(&img);
+        let (tri, _) = build_trimap(&img, &samples, 48, None);
+        let alpha = solve_alpha(&mut img.clone(), &tri, None);
+        for (i, t) in tri.iter().enumerate() {
+            match t {
+                Tri::Bg => assert_eq!(alpha[i], 0.0, "背景像素 alpha 应为 0"),
+                Tri::Fg => assert_eq!(alpha[i], 1.0, "前景像素 alpha 应为 1"),
+                Tri::Unknown => {}
+            }
+        }
+    }
+
+    /// 补描优先级最高：即使某个像素被 AI/解混判成背景，描过也要变回 1。
+    #[test]
+    fn 补描优先级高于求解结果() {
+        let img = white_bg_with_circle(64);
+        let samples = estimate_background(&img);
+        let (tri, _) = build_trimap(&img, &samples, 48, None);
+        let mut keep = vec![false; 64 * 64];
+        keep[0] = true; // 左上角（背景）
+        let alpha = solve_alpha(&mut img.clone(), &tri, Some(&keep));
+        assert_eq!(alpha[0], 1.0, "描过的背景像素必须被强制成前景");
+    }
+
+    /// 坏输入要报错（不是 panic）。
     #[test]
     fn 坏输入报错() {
-        assert!(matte(b"not an image", 48, None, 4, false).is_err());
-        assert!(matte(&[], 48, None, 4, false).is_err());
+        assert!(prepare(b"not an image").is_err());
+        assert!(prepare(&[]).is_err());
     }
 
-    /* ── r79 白边回归：边缘不该被背景色污染 ──
-     *
-     * 这条**替代**了原来那两条"直接测 decontaminate"的测试。
-     * 为什么换：`F = (I-(1-α)B)/α` 在 α 小时数值不可靠（除以很小的数放大误差），
-     * 实测在深色底上留下一圈白边（`tools/r79-zoom.js` 的 Excalidraw 那格）。
-     * 现在是"混合像素的 RGB 直接置为估算前景色"，不再反解。
-     *
-     * 所以测试改成**端到端**：白底 + 蓝色圆（带抗锯齿），抠完后检查所有
-     * 半透明像素的 RGB —— 必须是**偏蓝的前景色**，而不是"半透明白"（白边）。 */
+    /// 编码出的 PNG 必须能被解回来（AI 结果要经 IPC 传给界面）。
     #[test]
-    fn 边缘不留白边() {
-        let mut img = image::RgbaImage::new(96, 96);
-        let fg: [f64; 3] = [40.0, 60.0, 200.0];
-        let bg: [f64; 3] = [255.0, 255.0, 255.0];
-        for (x, y, p) in img.enumerate_pixels_mut() {
-            let dx = x as f64 - 47.5;
-            let dy = y as f64 - 47.5;
-            let d = (dx * dx + dy * dy).sqrt();
-            let a = ((30.0 + 2.0 - d) / 2.0).clamp(0.0, 1.0);
-            *p = image::Rgba([
-                (bg[0] + (fg[0] - bg[0]) * a) as u8,
-                (bg[1] + (fg[1] - bg[1]) * a) as u8,
-                (bg[2] + (fg[2] - bg[2]) * a) as u8,
-                255,
-            ]);
-        }
-        let m = matte(&encode_png(&img).unwrap(), 48, None, 12, false).expect("应当成功");
-        let mut edge_seen = 0;
-        for px in m.rgba.pixels() {
-            let a = px[3];
-            if !(40..215).contains(&a) {
-                continue;
-            }
-            edge_seen += 1;
-            assert!(
-                px[2] as i32 - px[0] as i32 > 60 && px[2] as i32 - px[1] as i32 > 60,
-                "边缘像素被背景色污染了（白边）：{:?}",
-                px
-            );
-        }
-        assert!(edge_seen > 30, "应当有不少半透明边缘像素，实际 {edge_seen}");
+    fn 编码可往返() {
+        let img = white_bg_with_circle(32);
+        let bytes = png_of(&img);
+        let back = image::load_from_memory(&bytes).unwrap().to_rgba8();
+        assert_eq!(back.dimensions(), (32, 32));
     }
-
-    /* ── r79 真实图标回归：拿项目里真实的图标跑一遍，钉住"别退化成把主体抠掉" ──
-     *
-     * 为什么要有这条：合成图太干净（纯色底 + 几何形状），测不出真实图标的
-     * 问题 —— 抗锯齿边缘、细条纹、渐变底、内部镂空。真实图标才是用户实际
-     * 会拖进来的东西（`tools/r79-real-icons.js` 与 `r79-metrics.js` 用的就是它们）。
-     *
-     * 这里钉**保守但关键**的判据：真实图标抠完之后，主体区域必须仍有
-     * 一部分是不透明的 —— 不许"整张图被抠光"。
-     * 不钉具体像素值：那种断言会随算法微调碎掉，反而变成维护负担。
-     */
-    #[test]
-    fn 真实图标不会被整张抠光() {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/data/icons");
-        let mut checked = 0;
-        for name in [
-            "IGN.png",
-            "GOG.png",
-            "Iconify.png",
-            "Mojeek.png",
-            "139_邮箱（首页）.png",
-        ] {
-            let p = dir.join(name);
-            let Ok(bytes) = std::fs::read(&p) else { continue };
-            let m = matte(&bytes, 48, None, 12, false).expect("应当成功");
-            let total = (m.rgba.width() * m.rgba.height()) as usize;
-            let kept = m.rgba.pixels().filter(|px| px[3] > 200).count();
-            assert!(
-                kept > total / 20,
-                "{name}: 抠完只剩 {kept}/{total} 个不透明像素 —— 主体被抠光了"
-            );
-            assert!(
-                m.removed < total,
-                "{name}: removed={} 等于整张图（{total}）",
-                m.removed
-            );
-            checked += 1;
-        }
-        assert!(checked >= 3, "至少要能读到 3 个真实图标（实际 {checked}）");
-    }
-
 }

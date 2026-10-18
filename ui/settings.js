@@ -161,12 +161,36 @@ function iconEditSrc(key, engineName, extraSrc) {
     return src.indexOf('data:') === 0 ? src : '';
 }
 
+/** 图标编辑器功能是否启用（r80）。
+ *
+ *  用户口径：「抠图的功能默认不打开。只有在设置通用里面打开之后，换图标才会有个
+ *  编辑的这个页面。没打开抠图功能的时候，点击换图标就直接选择文件替换」，
+ *  并且确认了「彻底禁用编辑器」—— 开关关着时：
+ *    · 「换图标」挑完直接替换（后端 `pick_icon` 按 `ai_matting_enable` 分支）
+ *    · 「编辑图标」按钮**不出现**
+ *
+ *  为什么 UI 里也判一次（后端已经判了）：按钮点下去才发现不能用的体验很差，
+ *  不如一开始就不给；后端那道判断是兜底（防前端旧版本/被改过）。
+ *
+ *  注意字段名是 `aiMattingEnable` —— 它的语义已从"AI 抠图"扩成"图标编辑器总开关"，
+ *  但字段名不动（改了老配置读不回来）。 */
+function iconEditorEnabled() {
+    return !!(CONF && CONF.aiMattingEnable);
+}
+
 /** 这个成员有没有一张「图片」图标可编辑。
  *
  *  字母徽标（从没挑过图的引擎 / 目录）没有像素可编辑，不亮按钮；
  *  真引擎还能吃内置 iconFile（fetch 成 data URL 递进编辑器），
- *  而 `@ocr` / `@app:` / `@fav:` 哨兵没有内置图，前两级空就是空。 */
+ *  而 `@ocr` / `@app:` / `@fav:` 哨兵没有内置图，前两级空就是空。
+ *
+ *  ⚠ r80：**编辑器功能没开时一律返回 false**。
+ *  所有「编辑图标」按钮都以这个函数为判据（6 处：OCR 行、识图/收藏哨兵行、
+ *  引擎行、外部软件行、收藏夹目录、软件行），所以在这里加一道判断就全都生效 ——
+ *  比在 6 个地方各写一遍可靠（漏一处就会出现"开关关着却还有编辑按钮"）。
+ *  （识图那行原本有个"始终显示"的特例，见调用处的注释，现在被这道总开关覆盖。） */
 function hasIconToEdit(key, engineName, extraSrc) {
+    if (!iconEditorEnabled()) return false;
     if (iconEditSrc(key, engineName, extraSrc)) return true;
     if (key.indexOf('@') === 0) return false;
     const eng = BY_NAME.get(engineName || key);
@@ -487,10 +511,13 @@ function renderBarList() {
              *
              * r72：识图（@img）这一行**始终**摆出「编辑图标」—— 用户明确要求
              * 「应该也要有一个编辑图标」。还没换过图标时它没有像素可编辑，
-             * 点了会提示先挑一张（比"按钮凭空消失"清楚）。 */
+             * 点了会提示先挑一张（比"按钮凭空消失"清楚）。
+             *
+             * r80：这个"始终"要**叠加总开关** —— 编辑器功能没开时，
+             * 任何行都不该出现编辑按钮（用户口径："彻底禁用编辑器"）。 */
             const ieName = isApp ? app.name : (isFav ? null : name);
             const ieExtra = isFav ? ((favGroup && favGroup.icon) || '') : '';
-            if (hasIconToEdit(name, ieName, ieExtra) || isImg) {
+            if (iconEditorEnabled() && (hasIconToEdit(name, ieName, ieExtra) || isImg)) {
                 mk('编辑图标', '编辑这颗图标：一键消除背景、前后对比', '', () => {
                     if (hasIconToEdit(name, ieName, ieExtra)) {
                         openIconEditor(name, ieName, ieExtra);
@@ -2422,6 +2449,16 @@ const SWITCHES = [
     ['s-webdavOnExit', 'webdavOnExit'],
     // 液态玻璃一组：实时折射（总开关已被「横条样式」三分段取代）
     ['s-barGlassLive', 'barGlassLive'],
+    /* r80：AI 抠图总开关（图标编辑器功能的开关）。
+     *
+     * ⚠ 它**必须**在这张表里，不能自己手写 change 监听 ——
+     *   这张表统一负责「回填初值 / 写配置 / 广播 / 同步 CONF」四件事。
+     *   第一版我漏了这一步，自己在 `aiBindSwitch` 里绑 change，
+     *   结果探针抓到「点了开关但 CONF.aiMattingEnable 仍是 false」——
+     *   命令确实写库了，但页面内的 CONF 没更新，
+     *   于是「编辑图标」按钮不出现（`iconEditorEnabled()` 读的是 CONF）。
+     *   教训：这张表就是这个页面的开关唯一入口，新开关一律加进来。 */
+    ['s-aiMatting', 'aiMattingEnable'],
 ];
 
 const SWITCH_DEFAULT = {
@@ -2962,7 +2999,27 @@ function bindSwitches() {
         }
         el.checked = CONF[key] === undefined ? !!SWITCH_DEFAULT[key] : !!CONF[key];
         if (bound) continue;
-        el.addEventListener('change', () => invoke('set_setting', { key, value: el.checked }));
+        el.addEventListener('change', () => {
+            invoke('set_setting', { key, value: el.checked });
+            /* ⚠ 本地 CONF 也要**立刻**更新，不能等后端广播。
+             *
+             * 为什么必须这样（r80 探针 2e 抓到的真 bug）：`iconEditorEnabled()`
+             * 读的是 `CONF.aiMattingEnable`。如果只 invoke 不更新本地 CONF，
+             * 那么在"广播回来之前"这段时间里，页面认为开关还是关的 ——
+             * 于是「编辑图标」按钮不出现，用户以为开关没生效。
+             * （广播最终会覆盖，但依赖"等一会儿"的 UI 就是 bug 温床。） */
+            if (window.CONF) window.CONF[key] = el.checked;
+            /* AI 抠图开关还要额外刷新一次**后端状态**（模型列表 / 运行时可用性），
+             * 那些不是纯配置项，拉不到就显示不出来。 */
+            if (key === 'aiMattingEnable' && typeof aiOnSwitchChanged === 'function') {
+                aiOnSwitchChanged();
+            }
+            /* 打开/关闭图标编辑器会改变所有行的按钮组合（「编辑图标」出现或消失），
+             * 所以要重绘列表 —— 否则用户得手动切分页才看到变化。 */
+            if (key === 'aiMattingEnable' && typeof renderAll === 'function') {
+                renderAll();
+            }
+        });
     }
 
     for (const [id, key, dflt] of SEGS) {
@@ -7129,32 +7186,22 @@ function aiBindProgress() {
     });
 }
 
-/** 开关：写配置后立刻刷新（"打开就验证本地有没有模型"）。 */
-async function aiBindSwitch() {
-    const sw = $('s-aiMatting');
-    if (!sw) return;
-    sw.addEventListener('change', async () => {
-        const on = sw.checked;
-        try {
-            AI_STATUS = await invoke('ai_matting_enable', { on });
-        } catch (e) {
-            sw.checked = !on;
-            toast('开关保存失败：' + ((e && e.message) || e));
-            return;
-        }
-        aiRender();
-    });
-}
-
-/* 初始化：把开关按配置摆好，然后拉状态。
- * 注意顺序 —— 开关状态从 CONF 里读（与其它设置项同一套回填机制），
- * 但"能不能用"必须问后端（要检查 dll 与模型文件），所以两者都要。 */
+/* 初始化：拉一次状态（模型列表 / 运行时 / 选中的模型）。
+ *
+ * ⚠ 开关的**回填**不在这里做 —— `s-aiMatting` 已经进了上面的 `SWITCHES` 表，
+ *   那张表统一负责回填初值与写配置。第一版我在这里又自己绑了 change 监听，
+ *   结果是双重绑定（探针 2e 抓到配置没同步到 CONF）。 */
 function aiInit() {
-    const sw = $('s-aiMatting');
-    if (sw) sw.checked = !!(CONF && CONF.aiMattingEnable);
-    aiBindSwitch();
     aiBindProgress();
     aiRefresh();
+}
+
+/** 开关变化后刷新模型列表 —— 由 `SWITCHES` 的绑定逻辑调用。
+ *
+ *  为什么需要：开关打开后才该显示模型选择区（`aiRender` 依赖 `AI_STATUS.enable`），
+ *  而 `AI_STATUS` 是后端状态、不随 `CONF` 自动更新，所以要主动拉一次。 */
+async function aiOnSwitchChanged() {
+    await aiRefresh();
 }
 
 

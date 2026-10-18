@@ -49,11 +49,113 @@ pub struct AiMatte {
     pub alpha: image::GrayImage,
 }
 
+/// **AI 抠图的参数**（r80b：用户要求「在编辑画面里面多添加一些与这些模型相关的参数」）。
+///
+/// # 设计原则：每个参数都对应代码里真实存在的一步处理
+///
+/// 参数面板最容易变成"摆几个滑块好看"。所以这里只放**真的会改变输出**的量，
+/// 每一项都在下面注明它作用在哪一步、调大调小分别会怎样：
+///
+/// | 参数 | 作用 | 调大的效果 | 调小的效果 |
+/// |---|---|---|---|
+/// | `mask_threshold` | 把 AI 的 alpha 二值化时的门槛 | 抠得更狠、边缘更干净，但可能咬掉主体 | 保留更多边缘，可能留残影 |
+/// | `feather` | 边缘羽化半径（像素） | 边缘更柔和（适合要放大的图） | 边缘更硬（适合像素级小图标） |
+/// | `fg_confidence` | 判"确定前景"的 alpha 下限 | 更信任 AI 的前景判断 | 更保守，更多像素交给连通性判 |
+/// | `bg_confidence` | 判"确定背景"的 alpha 上限 | 更信任 AI 的背景判断 | 更保守（**这是修"挖空"的关键**） |
+/// | `edge_decontaminate` | 边缘去色（消白边） | —（开关） | 关掉会有白边，一般不开 |
+/// | `drop_small_islands` | 丢掉孤立小块 | —（开关） | 关掉会留下噪点 |
+///
+/// # 默认值怎么来的
+///
+/// 是 `tools/r80-ai-visual.js` 在 10 个真实图标上试出来的一组稳妥值；
+/// 用户调坏了可以点「恢复默认」。
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(default)]
+pub struct Params {
+    /// 把 AI 的 alpha 二值化的门槛（0~255）。
+    ///
+    /// 注意：**不是**简单地把 alpha 变 0/1 —— AI 输出的中间值（边缘带）仍会
+    /// 交给颜色解混去算，这里只决定"多确信才算数"。默认 128。
+    pub mask_threshold: u8,
+    /// 边缘羽化半径（0~4 像素，0 = 不羽化）。
+    ///
+    /// 实现是对最终 alpha 做一次半径 `r` 的模糊后按权重混回原值 ——
+    /// 只作用于边缘带、不碰内部，避免把实心块糊成毛玻璃。默认 1。
+    pub feather: u8,
+    /// 判"确定前景"的 alpha 下限（0~255）。默认 240。
+    pub fg_confidence: u8,
+    /// 判"确定背景"的 alpha 上限（0~255）。默认 15。
+    ///
+    /// ⚠ 这个值是**与本地连通性配合**的关键：AI 说背景时，只有本地也认为
+    /// 像背景才算确定背景。调大它 = 更信 AI（更容易出现"主体内部被挖空"）。
+    pub bg_confidence: u8,
+    /// 是否做边缘去色（把混合像素的 RGB 换成纯前景色，消除白边）。默认开。
+    pub edge_decontaminate: bool,
+    /// 是否丢掉孤立的小碎块（面积 < 0.2% 的连通前景块）。默认开。
+    ///
+    /// 为什么需要：AI 偶尔会在背景里留下几十像素的"假前景"斑点，
+    /// 放到深色底上很显眼。
+    pub drop_small_islands: bool,
+    /// 这次实际用的模型名（**只读**，后端回填给界面显示；不接受前端传入）。
+    #[serde(skip_deserializing)]
+    pub model_name: String,
+}
+
+impl Default for Params {
+    fn default() -> Self {
+        Self {
+            mask_threshold: 128,
+            feather: 1,
+            fg_confidence: 240,
+            bg_confidence: 15,
+            edge_decontaminate: true,
+            drop_small_islands: true,
+            model_name: String::new(),
+        }
+    }
+}
+
+impl Params {
+    /// 把参数夹到合法范围。**必须做** —— 前端滑块可能被改、配置文件可能手写。
+    pub fn clamped(&self) -> Params {
+        Params {
+            mask_threshold: self.mask_threshold,
+            feather: self.feather.min(4),
+            // 前景门槛不能低于背景门槛，否则语义矛盾（同一个像素既确定前景
+            // 又确定背景）—— 那种输入会让 trimap 变成随机结果
+            fg_confidence: self.fg_confidence.max(self.bg_confidence.saturating_add(1)),
+            bg_confidence: self.bg_confidence.min(200),
+            edge_decontaminate: self.edge_decontaminate,
+            drop_small_islands: self.drop_small_islands,
+            model_name: self.model_name.clone(),
+        }
+    }
+
+    /// 给日志用的一行摘要（排查时要知道"这次是什么参数跑出来的"）。
+    pub fn summary(&self) -> String {
+        let p = self.clamped();
+        format!(
+            "thr={} feather={} fg>={} bg<={} 去色={} 去碎块={}",
+            p.mask_threshold,
+            p.feather,
+            p.fg_confidence,
+            p.bg_confidence,
+            p.edge_decontaminate as u8,
+            p.drop_small_islands as u8
+        )
+    }
+}
+
 /// 跑一次推理，输出与**输入图同尺寸**的 alpha 蒙版。
 ///
 /// `spec`：模型清单项（决定边长、归一化、取哪个输出）。
-/// `keep`：不算（AI 不认手动补描），由调用方在拿到 alpha 后自行处理。
-pub fn run(spec: &'static aimodels::ModelSpec, rgba: &image::RgbaImage) -> Result<AiMatte, String> {
+/// `params`：参数。这里用到 `mask_threshold`（后处理门槛）与 `feather`（羽化）；
+///   前景/背景置信度是 trimap 阶段的量，在 `iconedit_ai` 里用。
+pub fn run(
+    spec: &'static aimodels::ModelSpec,
+    rgba: &image::RgbaImage,
+    params: &Params,
+) -> Result<AiMatte, String> {
     use ort::session::Session;
     use ort::value::Value;
 
@@ -188,14 +290,92 @@ pub fn run(spec: &'static aimodels::ModelSpec, rgba: &image::RgbaImage) -> Resul
         gray = image::imageops::resize(&gray, w, h, image::imageops::FilterType::Triangle);
     }
 
+    /* ---- 参数后处理（r80b）----
+     *
+     * 顺序有讲究：**先羽化、再按门槛清理**。反过来的话，先清理会把边缘的
+     * 中间值抹掉，羽化就没有"中间值"可用了，等于白做。 */
+    let p = params.clamped();
+    if p.feather > 0 {
+        gray = feather_alpha(&gray, p.feather);
+    }
+    /* `mask_threshold`：只用来**削掉极弱的响应**，不是二值化。
+     *
+     * 为什么不做真二值化：AI 的中间值（边缘带）是有信息量的 —— 它表示
+     * "这里有多少是前景"，后面颜色解混要靠它决定过渡。全砍成 0/1 会让
+     * 边缘变成硬切、重新出现锯齿。
+     * 所以这里只在门槛之下的像素上做一次**软压**（线性衰减到 0），
+     * 门槛之上的保持原值。 */
+    if p.mask_threshold > 0 {
+        let thr = p.mask_threshold as f32;
+        for px in gray.pixels_mut() {
+            let a = px[0] as f32;
+            if a < thr {
+                // 在 [0, thr) 区间线性压到 0：越弱越接近 0
+                px[0] = ((a / thr) * (a / thr) * a).round() as u8;
+            }
+        }
+    }
+
     crate::win::log(&format!(
-        "ai_matte: {} 加载 {load_ms}ms 推理 {infer_ms}ms 输出 {n_out} 个(用第{used_idx}个) 尺寸 {side}x{side}",
-        spec.name
+        "ai_matte: {} 加载 {load_ms}ms 推理 {infer_ms}ms 输出 {n_out} 个(用第{used_idx}个) 尺寸 {side}x{side} 参数 {}",
+        spec.name,
+        p.summary()
     ));
-    // 耗时已经写进日志了（上面那行）；不再往返回值里塞，
-    // 免得调用方以为"这个字段没用到"是漏了（r80 实测确实没用到）。
     let _ = load_ms + infer_ms;
     Ok(AiMatte { alpha: gray })
+}
+
+/// 边缘羽化：只对**中间值像素**做半径 `r` 的盒式模糊，纯前景/纯背景保持原样。
+///
+/// 为什么只碰中间值：图标主体内部是大片实心色，一起糊会显得发虚；
+/// 而边缘本来就需要一点过渡，糊一下反而更自然（尤其是抠完要放大的图）。
+///
+/// 做法：先算模糊后的整张图，再按"离 0/255 的距离"做权重混回 ——
+/// 越靠中间（= 越是边缘）混入越多模糊值。
+fn feather_alpha(src: &image::GrayImage, r: u8) -> image::GrayImage {
+    // r = 0 就是"不羽化"：直接返回原图，别做一次半径 1 的（那是另一个参数值）
+    if r == 0 {
+        return src.clone();
+    }
+    let (w, h) = src.dimensions();
+    let rad = r as i32;
+    let mut out = src.clone();
+    for y in 0..h {
+        for x in 0..w {
+            let a = src.get_pixel(x, y)[0];
+            // 纯前景 / 纯背景不动
+            if a <= 2 || a >= 253 {
+                continue;
+            }
+            // 半径内取平均
+            let mut sum = 0u32;
+            let mut n = 0u32;
+            for dy in -rad..=rad {
+                let yy = y as i32 + dy;
+                if yy < 0 || yy >= h as i32 {
+                    continue;
+                }
+                for dx in -rad..=rad {
+                    let xx = x as i32 + dx;
+                    if xx < 0 || xx >= w as i32 {
+                        continue;
+                    }
+                    sum += src.get_pixel(xx as u32, yy as u32)[0] as u32;
+                    n += 1;
+                }
+            }
+            if n == 0 {
+                continue;
+            }
+            let avg = sum as f32 / n as f32;
+            /* 混合权重：α 越靠中间权重越大（1.0 在 128 处，0 在两端）。
+             * 这样纯边缘得到充分平滑，而靠近实心的部分几乎不受影响。 */
+            let mid = 1.0 - ((a as f32 - 128.0).abs() / 128.0);
+            let blended = a as f32 * (1.0 - mid) + avg * mid;
+            out.put_pixel(x, y, image::Luma([blended.round().clamp(0.0, 255.0) as u8]));
+        }
+    }
+    out
 }
 
 
@@ -219,7 +399,7 @@ mod tests {
         // u2netp 在测试机上未必存在；如果存在就跳过这条断言
         if !aimodels::is_ready(fake.id) {
             let img = image::RgbaImage::new(16, 16);
-            let e = run(fake, &img).unwrap_err();
+            let e = run(fake, &img, &Params::default()).unwrap_err();
             assert!(e.contains("还没下载"), "错误信息应当说明没下载，实际：{e}");
         }
     }
@@ -229,8 +409,46 @@ mod tests {
     fn 空图被挡住() {
         let spec = crate::aimodels::MODELS.first().unwrap();
         let img = image::RgbaImage::new(0, 0);
-        assert!(run(spec, &img).is_err());
+        assert!(run(spec, &img, &Params::default()).is_err());
     }
 
+    /* ── 参数纯逻辑（不需要模型/dll） ── */
 
+    /// 羽化只碰边缘带，**不该动纯前景/纯背景**（否则主体内部会发虚）。
+    #[test]
+    fn 羽化不碰实心区域() {
+        let mut img = image::GrayImage::new(32, 32);
+        for y in 0..32 {
+            for x in 0..32 {
+                // 左半边纯前景、右半边纯背景、中间一条过渡带
+                let v = if x < 12 { 255 } else if x > 19 { 0 } else { 128 };
+                img.put_pixel(x, y, image::Luma([v]));
+            }
+        }
+        let out = feather_alpha(&img, 2);
+        assert_eq!(out.get_pixel(2, 16)[0], 255, "纯前景不该被羽化改动");
+        assert_eq!(out.get_pixel(30, 16)[0], 0, "纯背景不该被羽化改动");
+    }
+
+    /// 羽化半径 0 时输出必须与输入完全一致（等于没做）。
+    #[test]
+    fn 羽化半径为0等于没做() {
+        let mut img = image::GrayImage::new(8, 8);
+        for y in 0..8 {
+            for x in 0..8 {
+                img.put_pixel(x, y, image::Luma([(x * 30) as u8]));
+            }
+        }
+        let out = feather_alpha(&img, 0);
+        assert_eq!(out.as_raw(), img.as_raw());
+    }
+
+    /// 参数摘要要能反映实际值（排查时要靠它知道"这次是什么配置"）。
+    #[test]
+    fn 参数摘要包含关键值() {
+        let p = Params { mask_threshold: 77, feather: 3, ..Default::default() };
+        let s = p.summary();
+        assert!(s.contains("77"), "摘要应含门槛值：{s}");
+        assert!(s.contains("3"), "摘要应含羽化值：{s}");
+    }
 }

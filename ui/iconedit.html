@@ -231,6 +231,32 @@ body { display: flex; flex-direction: column; overflow: hidden; }
 }
 @keyframes ie-spin { to { transform: rotate(360deg); } }
 
+/* r80b：AI 参数抽屉。与 .ctl 同一套视觉语言（同高、同字号），
+   但排成多行 —— 每行一个参数 + 说明 + 滑块 + 当前值。 */
+.params {
+    display: flex; flex-direction: column; gap: 2px;
+    padding: 10px 14px 12px; margin-top: 6px;
+    border-top: 1px solid var(--line);
+    background: var(--bg2, rgba(0,0,0,.02));
+}
+.params[hidden] { display: none; }
+.pm-row {
+    display: grid; grid-template-columns: 1fr 150px 42px;
+    align-items: center; gap: 10px;
+    padding: 6px 0;
+    border-bottom: 1px solid var(--line);
+}
+.pm-row:last-child { border-bottom: 0; }
+.pm-row input[type=range] { width: 100%; }
+.pm-t b { font-size: 12.5px; font-weight: 600; }
+.pm-t small { display: block; font-size: 11px; opacity: .62; line-height: 1.55; margin-top: 2px; }
+.pm-v { font-size: 12px; font-weight: 600; text-align: right; font-variant-numeric: tabular-nums; }
+.pm-sw { grid-template-columns: 1fr; gap: 8px; }
+.pm-check { display: flex; align-items: flex-start; gap: 7px; font-size: 12px; cursor: pointer; }
+.pm-check input { margin-top: 2px; flex-shrink: 0; }
+.pm-check span { font-weight: 600; }
+.pm-check small { display: block; font-weight: 400; font-size: 11px; opacity: .62; line-height: 1.5; margin-top: 1px; }
+
 .tol {
     display: flex;
     align-items: center;
@@ -333,20 +359,73 @@ body { display: flex; flex-direction: column; overflow: hidden; }
 </main>
 
 <div class="ctl">
-    <!-- r79：主按钮改成「自动抠图」—— 现在走的是**颜色解混**
-         （自动 trimap + I=αF+(1-α)B 逐像素反解 + 边缘去色），不再需要先描边。
-         「手动补描」降级成可选的补救手段：只有主体与背景几乎同色、
-         方程欠定、自动分不开时才需要。 -->
-    <button class="btn primary" id="btnRemove" title="自动识别主体并抠掉背景（颜色解混：边缘平滑、不留白边、主体内部细节保留）">自动抠图</button>
-    <button class="btn" id="btnMask" title="自动抠图已经很准；只有主体与背景几乎同色、自动分不开时才需要手动涂一下">
+    <!-- r80：走 **AI 抠图**（神经网络语义分割）。原来那个"颜色解混"本地算法
+         已按用户要求删除（「现在有了 ai 抠图，原来的抠图就直接不要去掉」）。
+         「手动补描」保留：描过的区域无条件保留，优先级高于 AI 的判断。 -->
+    <button class="btn primary" id="btnRemove"
+        title="用 AI 模型识别主体并抠掉背景（神经网络语义分割 + 边缘去色）">自动抠图</button>
+    <button class="btn" id="btnMask"
+        title="AI 判错时手动涂一下：涂过的区域一定会被保留（优先级高于 AI）">
         手动补描
     </button>
-    <label class="tol" title="背景判定的宽松度。抠不干净就调大；主体被吃掉了就调小">
-        容差
-        <input type="range" id="tol" min="10" max="120" step="2" value="48" disabled>
-        <b id="tolVal">48</b>
-    </label>
+    <!-- r80b：AI 参数面板。折叠着（默认不占地方），点「参数」展开。
+         用户要求「在编辑画面里面多添加一些与这些模型相关的参数」。 -->
+    <button class="btn" id="btnParams" title="调整 AI 抠图的参数（会影响模型后处理与边缘）">
+        参数 ▾
+    </button>
     <span class="hint" id="hint"></span>
+</div>
+
+<!-- r80b：AI 参数抽屉。放"真的会改变输出"的量 —— 每项都标注了作用与方向，
+     不摆没有实际效果的滑块（那种面板只会让用户白调）。 -->
+<div class="params" id="paramsBox" hidden>
+    <div class="pm-row">
+        <div class="pm-t">
+            <b>蒙版门槛</b>
+            <small>低于这个值的 AI 响应会被削弱。<b>调大</b>抠得更狠、边缘更干净，但可能咬掉主体；
+                <b>调小</b>保留更多边缘，可能留残影</small>
+        </div>
+        <input type="range" id="p-thr" min="0" max="250" step="5" value="128">
+        <b class="pm-v" id="p-thrV">128</b>
+    </div>
+    <div class="pm-row">
+        <div class="pm-t">
+            <b>边缘羽化</b>
+            <small>只作用于边缘过渡带（不碰主体内部）。<b>调大</b>边缘更柔和，适合抠完要放大的图；
+                <b>0</b> = 不羽化，边缘最硬，适合像素级小图标</small>
+        </div>
+        <input type="range" id="p-feather" min="0" max="4" step="1" value="1">
+        <b class="pm-v" id="p-featherV">1</b>
+    </div>
+    <div class="pm-row">
+        <div class="pm-t">
+            <b>前景确信度</b>
+            <small>AI 的 alpha 高于这个值才算"确定前景"。<b>调低</b>更少像素被当确定前景，
+                更多交给连通性判断（更保守）</small>
+        </div>
+        <input type="range" id="p-fg" min="100" max="255" step="5" value="240">
+        <b class="pm-v" id="p-fgV">240</b>
+    </div>
+    <div class="pm-row">
+        <div class="pm-t">
+            <b>背景确信度</b>
+            <small>AI 的 alpha 低于这个值才算"确定背景"（还要本地连通性也认同）。
+                <b>调大</b>更信任 AI —— 这是最容易导致<b>主体内部被挖空</b>的方向，默认给得很低</small>
+        </div>
+        <input type="range" id="p-bg" min="0" max="120" step="1" value="15">
+        <b class="pm-v" id="p-bgV">15</b>
+    </div>
+    <div class="pm-row pm-sw">
+        <label class="pm-check">
+            <input type="checkbox" id="p-decon" checked>
+            <span>边缘去色<small>把边缘混合像素的颜色换成纯前景色，消除白边。关掉会出现白边</small></span>
+        </label>
+        <label class="pm-check">
+            <input type="checkbox" id="p-island" checked>
+            <span>清理碎块<small>丢掉面积过小的孤立前景块（AI 偶尔留下的噪点）</small></span>
+        </label>
+        <button class="btn" id="btnParamsReset" title="把上面所有参数恢复成实测的推荐值">恢复默认</button>
+    </div>
 </div>
 
 <!-- r77：描边模式的工具条。只在描边模式里出现（平时 hidden，不占高度）。 -->
@@ -648,20 +727,114 @@ function maskPayload() {
     window.addEventListener('resize', () => { if (maskOn()) maskSync(); else maskCanvasPx = null; });
 })();
 
-/** 跑一次自动抠图。fromSlider=true 表示是拖容差滑块触发的重算。 */
+/* ══════════════════════════════════════════════════════════════════════════
+ * AI 抠图参数（r80b）
+ *
+ * 用户要求「在编辑画面里面多添加一些与这些模型相关的参数」。
+ *
+ * 这些参数**真的会改变输出**（每一项都对应后端 `aimatte::Params` 里的一步处理），
+ * 不是摆设滑块：
+ *   · 蒙版门槛 / 前景确信度 / 背景确信度 → 决定 trimap 怎么切
+ *   · 边缘羽化 → 推理后对 alpha 的边缘带做平滑
+ *   · 边缘去色 / 清理碎块 → 两个后处理开关
+ *
+ * 参数改动**不自动重算**（AI 推理 140~1000ms，每拖一下都跑一遍会卡手），
+ * 而是标记"参数已改，点自动抠图生效"——把控制权交给用户。
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+/** 实测出来的推荐值（与后端 `aimatte::Params::default` 保持一致）。
+ *  两边各写一份是有意的：后端那份是安全兜底（前端没传时用），
+ *  这份是界面的"恢复默认"目标值。改一处要同时改另一处 —— 有单测钉着。 */
+const PARAM_DEFAULTS = {
+    thr: 128, feather: 1, fg: 240, bg: 15, decon: true, island: true,
+};
+
+/** 把界面上的参数读成一个对象（发给后端）。 */
+function paramsPayload() {
+    return {
+        maskThreshold: Number($('p-thr').value),
+        feather: Number($('p-feather').value),
+        fgConfidence: Number($('p-fg').value),
+        bgConfidence: Number($('p-bg').value),
+        edgeDecontaminate: $('p-decon').checked,
+        dropSmallIslands: $('p-island').checked,
+    };
+}
+
+/** 参数是否与默认值不同（决定要不要提示用户"已改动"）。 */
+function paramsChanged() {
+    const p = paramsPayload();
+    const d = PARAM_DEFAULTS;
+    return p.maskThreshold !== d.thr || p.feather !== d.feather
+        || p.fgConfidence !== d.fg || p.bgConfidence !== d.bg
+        || p.edgeDecontaminate !== d.decon || p.dropSmallIslands !== d.island;
+}
+
+/** 把参数摆回界面（恢复默认 / 初始化时用）。 */
+function paramsRestore(v) {
+    $('p-thr').value = v.thr; $('p-thrV').textContent = v.thr;
+    $('p-feather').value = v.feather; $('p-featherV').textContent = v.feather;
+    $('p-fg').value = v.fg; $('p-fgV').textContent = v.fg;
+    $('p-bg').value = v.bg; $('p-bgV').textContent = v.bg;
+    $('p-decon').checked = v.decon;
+    $('p-island').checked = v.island;
+}
+
+/* 每个滑块：更新右上角数字 + 标记"参数已改"。
+ * 不自动重算的理由见上面大注释。 */
+function paramsBind() {
+    for (const [id, out] of [['p-thr', 'p-thrV'], ['p-feather', 'p-featherV'],
+                             ['p-fg', 'p-fgV'], ['p-bg', 'p-bgV']]) {
+        const el = $(id);
+        if (!el) continue;
+        el.addEventListener('input', () => {
+            $(out).textContent = el.value;
+            paramsMarkDirty();
+        });
+    }
+    for (const id of ['p-decon', 'p-island']) {
+        const el = $(id);
+        if (el) el.addEventListener('change', paramsMarkDirty);
+    }
+    const box = $('paramsBox');
+    const btn = $('btnParams');
+    if (btn && box) {
+        btn.addEventListener('click', () => {
+            box.hidden = !box.hidden;
+            btn.textContent = box.hidden ? '参数 ▾' : '参数 ▴';
+        });
+    }
+    const reset = $('btnParamsReset');
+    if (reset) {
+        reset.addEventListener('click', () => {
+            paramsRestore(PARAM_DEFAULTS);
+            paramsMarkDirty();
+            setHint('参数已恢复默认。点「自动抠图」重新计算。');
+        });
+    }
+    paramsRestore(PARAM_DEFAULTS);
+}
+
+/** 参数变了 → 提示用户"要重新点抠图才生效"。 */
+function paramsMarkDirty() {
+    if (!OUT) return;   // 还没抠过，没什么需要重算的
+    setHint('参数已修改 —— 点「自动抠图」重新计算才会生效。', 'warn');
+}
+
+/** 跑一次自动抠图（AI）。 */
 let removing = false;
-async function runRemove(fromSlider) {
+async function runRemove() {
     if (removing || VECTOR || !SRC) return;
     removing = true;
     const btn = $('btnRemove');
     btn.classList.add('busy');
     btn.innerHTML = '<span class="spinner"></span>抠图中';
     $('cvAfter').classList.add('busy');
-    const tol = Number($('tol').value) || 48;
     try {
-        /* r77/r79：带上手动补描蒙版（没描过就是 undefined）。 */
+        /* 带上手动补描蒙版（没描过就是 undefined）与 AI 参数。 */
         const keep = maskPayload();
-        const r = await invoke('icon_remove_bg', { src: SRC, tolerance: tol, keep });
+        const params = paramsPayload();
+        const r = await invoke('icon_remove_bg', { src: SRC, keep, params });
         OUT = r.src || '';
         if (!OUT) throw new Error('后端没返回处理结果');
         const img = $('imgAfter');
@@ -670,43 +843,36 @@ async function runRemove(fromSlider) {
         markDim(img, $('dimAfter'));
         $('btnSave').disabled = false;
         const n = Number(r.removed) || 0;
-        /* r79：后端现在会告诉我们"这张图有没有可靠背景"。
-         * 全同色图 / 主体顶满四边时，硬抠只会伤到主体 —— 这时给一句人话，
-         * 而不是让用户以为按钮坏了。 */
+        const ms = Number(r.elapsedMs) || 0;
+        const model = r.usedModel || '';
         if (r.noBackground) {
-            /* r79：这句提示**不能瞎给建议**。
-             *
-             * 我最初写的是"把容差调小试试"，然后写了
-             * `tools/r79-tolerance-sweep.js` 去验证那句话 —— 结论是**反的**：
-             * 白底白主体（对比度≈0）在任何容差下都分不开，而容差调到 36 以下
-             * 反而会把**主体内部也一起抠掉**（实测中心 alpha 从 255 掉到 0）。
-             * 也就是说那条建议会把用户的图弄得更糟。
-             *
-             * 改为给**真正可行**的两条路：手动补描、直接用原图。 */
+            /* AI 找不到主体。给**能操作**的建议，而且只给真正有用的：
+             * 调参数或手动补描。不再提"调容差"（那个滑块已经删了）。 */
             setHint(
-                '这张图主体与背景颜色太接近，自动分不开（比如白色图标落在白底上）—— '
-                + '为避免误删，这次**没有改动**图片。'
-                + '请用「手动补描」涂出图标主体再点一次「自动抠图」；'
-                + '或者直接点「保存」用原图。'
-                + '（注：调「容差」在这里帮不上忙，反而可能把主体一起抠掉。）',
+                'AI 没能从这张图里认出主体 —— 它可能已经很透明，或者主体太小/太不明显。'
+                + '可以试试用「手动补描」涂出主体再点一次；或者把「参数」里的'
+                + '「蒙版门槛」调小一些。',
                 'warn'
             );
         } else if (n === 0) {
             setHint('没有抠掉任何像素 —— 这张图可能已经是透明背景。', 'warn');
         } else {
             setHint(
-                '已抠掉 ' + n.toLocaleString() + ' 个背景像素（边缘平滑、已去白边）。'
-                + '拖动「容差」可以重新算。',
+                '已抠掉 ' + n.toLocaleString() + ' 个背景像素'
+                + (model ? '（' + model + '）' : '')
+                + (ms ? '，用时 ' + ms + ' ms' : '')
+                + '。改「参数」可以重新计算。',
                 'ok'
             );
         }
-        // 抠过一次之后容差滑块才启用：没抠过的时候拖着它没有意义
-        $('tol').disabled = false;
     } catch (e) {
+        /* ⚠ r80：这里不再静默回退本地算法（那个已经删了）。
+         * 后端返回的是**给人看的**错误（没开开关 / 模型没下载 / 推理失败），
+         * 直接显示给用户 —— 比"抠图失败"这种笼统说法有用得多。 */
         OUT = '';
         $('btnSave').disabled = true;
-        setHint('抠图失败：' + ((e && e.message) || e), 'warn');
-        toast('抠图失败');
+        setHint(((e && e.message) || e), 'warn');
+        toast('抠图未完成');
     } finally {
         removing = false;
         btn.classList.remove('busy');
@@ -715,17 +881,8 @@ async function runRemove(fromSlider) {
     }
 }
 
-$('btnRemove').addEventListener('click', () => runRemove(false));
-
-/* 容差滑块：消过一次之后拖动 = 按新容差从**原图**重算（防抖 180ms，
- * 拖动过程中每 2 步一次 invoke 就够跟手了，不至于把命令队列塞满）。 */
-let tolTimer = 0;
-$('tol').addEventListener('input', () => {
-    $('tolVal').textContent = $('tol').value;
-    if ($('tol').disabled || removing) return;
-    clearTimeout(tolTimer);
-    tolTimer = setTimeout(() => runRemove(true), 180);
-});
+$('btnRemove').addEventListener('click', () => runRemove());
+paramsBind();
 
 /* 保存 / 取消。
  * 保存的内容：处理过就存处理结果（OUT，恒 PNG）；SVG 原样应用时存 SRC。

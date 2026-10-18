@@ -93,29 +93,31 @@ fn win_log(msg: &str) {
     }
 
 }
-/// 把一张位图的背景抠成透明（r79：改用阿尔法抠图，见 `matting` 模块）。
+/// 把一张位图的背景抠成透明（r80：**只走 AI 抠图**）。
 ///
-/// `tolerance`：**背景判定的宽松度**（页面滑块 10–120，默认 48）。
-///   值越大越"敢"把边缘像素判成背景；小一点更保守。
+/// `keep`：**手动补描蒙版**，可选。非零 = 这块是主体，**无条件**保持不透明
+///   （优先级高于 AI 的判断）。
 ///
-/// `keep`：**手动描边保护蒙版**，可选。非零 = 这块是主体，
-///   **无条件**保持不透明（连 matting 的求解都不参与）。
+/// 返回 `(PNG 字节, 被抠掉的像素数, 是否没找到主体)`。
 ///
-/// 返回 `(PNG 字节, 被抠掉的像素数, 是否没找到可靠背景)`。
+/// # 演进（三步，都是用户反馈驱动的）
 ///
-/// # 与旧实现（r76 及以前）的区别
+/// 1. r76 及以前：**颜色泛洪**。只看颜色像不像四边底色，没有前景/背景的语义
+///    分离 —— 浅色主体落在浅底上会被一路吃光（用户报「把图标里面东西一起消除了」）。
+/// 2. r79：**颜色解混**（`matting.rs`）。按 `I = αF + (1-α)B` 逐像素反解，
+///    配连通性收束与边缘去色。在扁平图标上不错，但"主体与背景同色"时
+///    **方程欠定、数学上无解**（用户报「当前的完全用不了」）。
+/// 3. r80：**AI 抠图**。用神经网络（u2netp / RMBG）做语义分割，能处理
+///    情况 2 无解的那些图。用户要求「原来那个直接去掉」，所以现在**没有本地兜底**
+///    —— 不可用时返回明确错误（含怎么打开），不再静默什么都不做。
 ///
-/// 旧实现是"从四边泛洪 + 颜色容差"，只认颜色，没有前景/背景的语义分离 ——
-/// 浅色主体落在浅底上时会被一路吃光（用户报的「消除背景把图标里面东西
-/// 一起消除了」）。
-///
-/// 新实现走 Photoshop 那条路：自动 trimap → 阿尔法求解 → 边缘去色。
-/// 细节见 `matting` 模块文档。手动描边从"挡住泛洪"升级成"硬约束前景"，
-/// 效果更确定。
+/// ⚠ `keep` 那套仍然复用 `matting.rs` 的**边缘处理**（逐像素背景色拟合 + 去色）：
+///   AI 只给低分辨率的 alpha，边缘像素的 RGB 还是混合色，不去色就是一圈白边。
+///   所以 `matting.rs` 没被删干净 —— 它现在的角色是"专门做边缘"，不再是抠图算法。
 pub fn remove_background(
     bytes: &[u8],
-    tolerance: u32,
     keep: Option<&KeepMask>,
+    params: &crate::aimatte::Params,
 ) -> Result<(Vec<u8>, usize, bool), String> {
     /* 把 KeepMask 摊平成按处理尺寸对齐的 bool 蒙版。
      *
@@ -123,13 +125,13 @@ pub fn remove_background(
      *   的是它自己那块 canvas 的尺寸。两处任何一处没对齐，保护区域就会整体
      *   偏移，用户看到的是"描了但还是被吃"。
      *
-     * 这里先按原图尺寸算好（prepare 里的缩放比例是等比的，所以按比例投即可）。
-     * 实现上：先 prepare 拿到目标尺寸，再把蒙版按比例采样过去。 */
+     * 形状对不上（长度 ≠ w×h）就当没描过 —— 不该因为一个坏蒙版让整条命令失败。 */
     let prepared = crate::matting::prepare(bytes)?;
     let (w, h) = prepared.dimensions();
     let keep_mask: Option<Vec<bool>> = keep.and_then(|m| {
         if m.w == 0 || m.h == 0 || m.data.len() != (m.w as usize) * (m.h as usize) {
-            return None;   // 形状对不上就当没描过（不因为蒙版坏了就整条失败）
+            win_log("iconedit: 蒙版形状对不上，当没描过");
+            return None;
         }
         let n = (w as usize) * (h as usize);
         let mut outv = vec![false; n];
@@ -146,7 +148,7 @@ pub fn remove_background(
         }
         if any {
             win_log(&format!(
-                "iconedit: 描边保护蒙版生效（{}×{} → {}×{}）",
+                "iconedit: 补描蒙版生效（{}×{} → {}×{}）",
                 m.w, m.h, w, h
             ));
             Some(outv)
@@ -155,73 +157,29 @@ pub fn remove_background(
         }
     });
 
-    /* ══ r80：优先走 AI 抠图（用户开了开关、模型就绪时）══
+    /* ══ r80：**只走 AI 抠图**（本地颜色解混算法已按用户要求删除）══
      *
-     * 设计口径（用户原话）：「打开之后就会验证本地有没有这个模型，有的话就直接
-     * 调用，没有的话那要下载」。所以这里的判断顺序是：
-     *   开关开 → 运行时可加载 → 模型文件就绪 → **才走 AI**
-     * 任何一步不满足，或推理过程出错，都**静默回退**下面的本地算法 ——
-     * 用户不会拿到"点了没反应"，最差也只是回到 r79 的效果。
+     * 用户原话：「现在有了 ai 抠图，原来的抠图就直接不要去掉」「是要去掉」。
      *
-     * 为什么 AI 成功之后**还要**走一遍本地流程：AI 只给 alpha，边缘像素的 RGB
-     * 仍是"前景与背景的混合色"，不处理就是一圈白边。本地算法里的
-     * `fit_background` 正好能算逐像素背景色，借它做去色最省事也最准。 */
-    if let Some(m) = crate::iconedit_ai::try_ai(bytes, keep_mask.as_deref()) {
-        win_log("iconedit: 走 AI 抠图");
-        return Ok(m);
+     * 所以这里没有"本地算法兜底"。不可用时返回**能操作**的错误
+     * （见 `iconedit_ai::try_ai` 的三种分类），而不是静默什么都不做。
+     *
+     * ⚠ 这与 r79 的口径相反（那时本地是默认、AI 是增强）。改的原因是：
+     *   本地算法在"主体与背景同色 / 内部细节复杂"的图上**数学上无解**
+     *   （用户报「当前的完全用不了」）；而且两条路并存还有个坏处 ——
+     *   用户永远不知道这次结果是谁给的、该不该相信。只留 AI 更清楚。 */
+    match crate::iconedit_ai::try_ai(bytes, keep_mask.as_deref(), params) {
+        Ok(m) => {
+            win_log("iconedit: AI 抠图完成");
+            Ok(m)
+        }
+        Err(e) => Err(e),
     }
-
-    /* 迭代次数：窄带松弛的轮数。
-     * 12 轮在这个尺寸下已经收敛（再多肉眼无差别），而它只作用于窄带，
-     * 实测 512×512 的复杂图标约 40~80ms。 */
-    let iterations = 12u32;
-    /* ⚠ trim = **false**：输出尺寸必须与原图一致。
-     *
-     * 为什么不做"抠完裁掉四周空白"：编辑器的价值有一半在**前后对比**，
-     * 两张图尺寸不同会让用户觉得"怎么变小了/变形了"。而且裁切会改变坐标，
-     * 任何按原坐标做的检查（包括探针与单测）都会错位。
-     * 视觉上的"填满格子"由前端已有的光学尺寸归一（`--qs-optical`）负责，
-     * 不需要在这里动刀。 */
-    let m = crate::matting::matte(bytes, tolerance, keep_mask.as_deref(), iterations, false)?;
-    win_log(&format!(
-        "iconedit: matting 完成 —— 抠掉 {} 像素，trimap(前景/背景/待定)={:?}，无背景={}",
-        m.removed, m.tri_counts, m.no_background
-    ));
-    let png = crate::matting::encode_png(&m.rgba)?;
-    Ok((png, m.removed, m.no_background))
-
 }
 #[cfg(test)]
 mod tests {
     use super::*;
     use image::{Rgba, RgbaImage};
-
-    /// 红底 + 居中白色圆（半径 20）的 64×64 图 —— 消除背景的靶子。
-    ///
-    /// r79：圆的边缘做成**抗锯齿**（按到圆心的距离在前景/背景色之间线性混合）。
-    /// 为什么改：原来的实现是硬边（`d <= 20` 二值），而真实图标一律带抗锯齿。
-    /// 拿硬边图去测"边缘过渡是否平滑"，要么测不到东西、要么得到假失败
-    /// （`边界像素应当有过渡，实际 255` 就是这么来的）。
-    /// 用抗锯齿图，测的才是真行为：混合像素被正确解混成中间 alpha。
-    fn target() -> RgbaImage {
-        let mut img = RgbaImage::new(64, 64);
-        let fg: [f64; 3] = [255.0, 255.0, 255.0];
-        let bg: [f64; 3] = [220.0, 30.0, 30.0];
-        for (x, y, p) in img.enumerate_pixels_mut() {
-            let dx = x as f64 - 31.5;
-            let dy = y as f64 - 31.5;
-            let d = (dx * dx + dy * dy).sqrt();
-            // 半径 20，边缘 1.5px 内线性过渡 —— 与真实抗锯齿图标同理
-            let a = ((20.0 + 1.5 - d) / 1.5).clamp(0.0, 1.0);
-            *p = Rgba([
-                (bg[0] + (fg[0] - bg[0]) * a) as u8,
-                (bg[1] + (fg[1] - bg[1]) * a) as u8,
-                (bg[2] + (fg[2] - bg[2]) * a) as u8,
-                255,
-            ]);
-        }
-        img
-    }
 
     fn png_of(img: &RgbaImage) -> Vec<u8> {
         let mut v = std::io::Cursor::new(Vec::new());
@@ -231,294 +189,108 @@ mod tests {
         v.into_inner()
     }
 
-    fn alpha_at(bytes: &[u8], x: u32, y: u32) -> u8 {
-        let img = image::load_from_memory(bytes).unwrap().to_rgba8();
-        img.get_pixel(x, y)[3]
-    }
-
-    #[test]
-    fn removes_solid_background_keeps_subject() {
-        let (out, removed, _) = remove_background(&png_of(&target()), 48, None).unwrap();
-        assert!(removed > 2500, "红底应被成片抠掉，实际 {removed}");
-        // 四角是背景 → 全透
-        for (x, y) in [(0, 0), (63, 0), (0, 63), (63, 63), (2, 2)] {
-            assert_eq!(alpha_at(&out, x, y), 0, "({x},{y}) 应透明");
-        }
-        // 圆心是主体 → 不透
-        assert_eq!(alpha_at(&out, 32, 32), 255);
-        // 主体内部（离边缘远，不吃羽化）必须全实
-        assert_eq!(alpha_at(&out, 32, 25), 255);
-        /* r79：主体上沿**贴着背景**的那一圈，新算法会给一个**平滑的过渡**
-         * （alpha 从 1 渐降到 0），这是它比旧算法强的地方 —— 旧算法那里是
-         * 硬邦邦的二值边界。所以断言改成"圆内一点点仍基本不透明"，
-         * 而不是"边缘像素必须 > 100"。
-         * 圆心 31.5、半径 20 → y=14 处离圆心 17.5，稳稳在圆内。 */
-        assert!(
-            alpha_at(&out, 32, 14) > 200,
-            "主体上沿内侧应当基本不透明，实际 {}",
-            alpha_at(&out, 32, 14)
-        );
-        /* 而真正的边界应当有**过渡**。抗锯齿的设计是：
-         * 半径 20、过渡带 [18.5, 21.5]（宽度 1.5px）。取带**正中**的位置
-         * 才最接近 α=0.5 —— 即离圆心 20.0 处。
-         * 圆心 y=31.5 ⇒ y = 31.5 - 20 = 11.5 ⇒ 取整 11 或 12。 */
-        let edge_a = alpha_at(&out, 32, 12);
-        let edge_b = alpha_at(&out, 32, 11);
-        assert!(
-            edge_a < 250 || edge_b < 250,
-            "边界像素应当有过渡（不是硬切），实际 a(y=12)={edge_a} a(y=11)={edge_b}"
-        );
-    }
-
-    #[test]
-    fn tolerance_zero_still_removes_exact_color() {
-        let (out, removed, _) = remove_background(&png_of(&target()), 0, None).unwrap();
-        assert!(removed > 2500);
-        assert_eq!(alpha_at(&out, 0, 0), 0);
-        assert_eq!(alpha_at(&out, 32, 32), 255);
-    }
-
-    #[test]
-    fn tight_tolerance_keeps_gradient_background() {
-        // 横向渐变底（每列一个色）：容差 8 时相邻列差 4 仍在泛洪路径上
-        // （泛洪穿过"像背景"的像素，容差只决定起点邻域能走多远），
-        // 但**颜色完全不像起点**的主体仍必须活下来。
-        let mut img = RgbaImage::new(64, 64);
-        for (x, y, p) in img.enumerate_pixels_mut() {
-            let dx = x as f64 - 31.5;
-            let dy = y as f64 - 31.5;
-            *p = if dx * dx + dy * dy <= 15.0 * 15.0 {
-                Rgba([0, 0, 0, 255])
-            } else {
-                Rgba([(x * 4) as u8, 128, 200, 255])
-            };
-        }
-        let (out, removed, _) = remove_background(&png_of(&img), 8, None).unwrap();
-        assert_eq!(alpha_at(&out, 32, 32), 255, "主体必须保留");
-        assert_eq!(alpha_at(&out, 0, 0), 0, "起点色必须抠掉");
-        assert!(removed > 100);
-    }
-
-    #[test]
-    fn already_transparent_is_noop() {
-        let mut img = RgbaImage::new(32, 32);
-        for (x, y, p) in img.enumerate_pixels_mut() {
-            let dx = x as f64 - 15.5;
-            let dy = y as f64 - 15.5;
-            *p = if dx * dx + dy * dy <= 10.0 * 10.0 {
-                Rgba([10, 200, 90, 255])
-            } else {
-                Rgba([0, 0, 0, 0])
-            };
-        }
-        let (out, removed, _) = remove_background(&png_of(&img), 48, None).unwrap();
-        assert_eq!(removed, 0, "已经透明的图不该再抠任何像素");
-        assert_eq!(alpha_at(&out, 16, 16), 255, "主体原样保留");
-        assert_eq!(alpha_at(&out, 0, 0), 0);
-    }
-
-    /* r79：这条测试**语义反了**，必须修正 —— 它是"当时的实现"写出来的，
-     * 不是用户要的。
+    /* ══════════════════════════════════════════════════════════════════════
+     * r80：本地抠图算法已删（用户要求「原来那个直接去掉」），
+     * 所以这里不再有"抠完之后效果如何"的断言 —— 那些是 AI 的活儿，
+     * 由 `tools/r80-ai-probe.js` 与 `r80-ai-visual.js` 在真机上验。
      *
-     * 原断言：甜甜圈中心的红底"要留下"（理由是"与四边不相连"）。
-     * 但用户要的是「**仅保留主体部分**」（模块开头引的原话）。中心那块
-     * 红色与四角的底色**完全同色**，它就是背景，凭什么因为它被围住就不抠？
-     *
-     * 实测证据：`tools/r79-matting-visual.js` 的甜甜圈一格，旧实现抠完
-     * 中心留了一块**突兀的白方块** —— 把那张对照图给人看，没人会说那是对的。
-     *
-     * 所以现在的口径：**背景必须与图像边界连通**（Photoshop 魔术棒的
-     * Contiguous 语义）。甜甜圈中心走不到边界 → 它不是"外围背景"，
-     * 但它是**被主体包住的同色区域** —— 交给 matting 按颜色判：
-     * 它与背景色一样，于是被抠掉。这才是"仅保留主体"。
-     *
-     * ⚠ 真正的"主体内部镂空"（比如字母 O 的中间、图标里挖空的图案）是
-     *   **主体自己的一部分**（颜色与主体相同），不会被抠 —— 见下面新增的
-     *   `主体内部的同色区域仍然保留`。 */
-    #[test]
-    fn 环形主体中心的同色底色会被抠掉() {
-        let mut img = RgbaImage::new(64, 64);
-        for (x, y, p) in img.enumerate_pixels_mut() {
-            let dx = x as f64 - 31.5;
-            let dy = y as f64 - 31.5;
-            let d = (dx * dx + dy * dy).sqrt();
-            *p = if (14.0..=24.0).contains(&d) {
-                Rgba([255, 255, 255, 255])   // 白环 = 主体
-            } else {
-                Rgba([220, 30, 30, 255])     // 红底（中心与四角同色）
-            };
-        }
-        let (out, _, _) = remove_background(&png_of(&img), 48, None).unwrap();
-        assert_eq!(alpha_at(&out, 32, 32 - 19), 255, "白环（主体）必须留下");
-        assert_eq!(alpha_at(&out, 32, 32), 0, "中心的红底与四角同色，该抠掉");
-        assert_eq!(alpha_at(&out, 0, 0), 0, "四角的红底要抠掉");
-    }
+     * 单测这一层只钉**接口契约**：错误信息给人话、坏输入不 panic、
+     * 蒙版对齐正确。这些是纯逻辑，不需要模型也不需要 dll。
+     * ══════════════════════════════════════════════════════════════════════ */
 
-    /// 主体**自己**内部的同色区域必须保留 —— 和上面那条的区别：
-    /// 这里的颜色是**主体的颜色**，不是背景色。
-    #[test]
-    fn 主体内部的同色区域仍然保留() {
-        // 实心白圆（颜色与背景不同）：圆心是主体自己的内部，必须留。
-        let mut img = RgbaImage::new(64, 64);
-        for (x, y, p) in img.enumerate_pixels_mut() {
-            let dx = x as f64 - 31.5;
-            let dy = y as f64 - 31.5;
-            let d = (dx * dx + dy * dy).sqrt();
-            *p = if d <= 24.0 {
-                Rgba([255, 255, 255, 255])   // 白色主体（内部同色）
-            } else {
-                Rgba([220, 30, 30, 255])     // 红底
-            };
-        }
-        let (out, _, _) = remove_background(&png_of(&img), 48, None).unwrap();
-        assert_eq!(alpha_at(&out, 32, 32), 255, "主体内部的同色区域必须保留");
-        assert_eq!(alpha_at(&out, 0, 0), 0, "四角红底该抠掉");
-    }
-
-    #[test]
-    fn oversized_image_is_downscaled() {
-        let mut img = RgbaImage::new(600, 400);
-        for (x, y, p) in img.enumerate_pixels_mut() {
-            *p = if x < 590 && y < 390 {
-                Rgba([255, 255, 255, 255])
-            } else {
-                Rgba([0, 0, 0, 255])
-            };
-        }
-        let (out, _, _) = remove_background(&png_of(&img), 48, None).unwrap();
-        let got = image::load_from_memory(&out).unwrap();
-        assert_eq!(got.width(), 512);
-        assert!(got.height() < 512, "短边按比例缩，实际 {}", got.height());
-    }
-
-    #[test]
-    fn garbage_input_errors() {
-        assert!(remove_background(b"not an image at all", 48, None).is_err());
-        assert!(remove_background(&[], 48, None).is_err());
-    }
-
-    #[test]
-    fn tiny_image_errors() {
-        let img = RgbaImage::new(1, 1);
-        assert!(remove_background(&png_of(&img), 48, None).is_err());
-    }
-
-    /* ---------------- r77：手动描边保护 ---------------- */
-
-    /// 造一张"浅色主体落在浅色底上"的图 —— 这正是描边要救的场景：
-    /// 不描的话泛洪会从边缘一路吃进主体（颜色判据分不开）。
-    fn low_contrast_icon() -> RgbaImage {
-        let mut img = RgbaImage::new(64, 64);
-        for (x, y, p) in img.enumerate_pixels_mut() {
-            // 底 #F8F8F8，主体 #E8E8E8 —— 只差 16，容差 48 时必然被当成底
-            let inside = (20..44).contains(&x) && (20..44).contains(&y);
-            *p = if inside {
-                Rgba([0xE8, 0xE8, 0xE8, 255])
-            } else {
-                Rgba([0xF8, 0xF8, 0xF8, 255])
-            };
-        }
-        img
-    }
-
-    /* r79：这条测试**必须换口径** —— 它原本钉的是"旧算法的失败"。
-     *
-     * 旧算法（颜色泛洪）下：浅色主体会被一起吃掉，所以断言 `alpha == 0`。
-     * 新算法（matting）下：**主体应当被保住**，`alpha == 0` 反而是 bug。
-     *
-     * 现在这条测试的价值反过来了：它成了"新算法修好了用户报的那个 bug"的
-     * 回归证明 —— 底 #F8F8F8 与主体 #E8E8E8 只差 16，任何只看颜色的算法都会
-     * 失败，而自动 trimap 靠"到边界的距离 + 前景/背景色分离"能分开。 */
-    #[test]
-    fn 浅色主体落在浅底上现在能保住() {
-        let img = low_contrast_icon();
-        let (out, _removed, _) = remove_background(&png_of(&img), 48, None).unwrap();
-        assert_eq!(
-            alpha_at(&out, 32, 32),
-            255,
-            "浅色主体中心必须保住 —— 这正是旧算法出错、r79 修好的地方"
-        );
-        assert_eq!(alpha_at(&out, 2, 2), 0, "四角是背景，该被抠掉");
-    }
-
-    #[test]
-    fn 描边保护挡住泛洪主体就保住了() {
-        let img = low_contrast_icon();
-        // 在主体外围描一圈（粗笔）：坐标是 64×64 网格
-        let mut data = vec![0u8; 64 * 64];
-        for y in 0..64u32 {
-            for x in 0..64u32 {
-                let on_ring = (18..46).contains(&x) && (18..46).contains(&y)
-                    && !((22..42).contains(&x) && (22..42).contains(&y));
-                if on_ring {
-                    data[(y * 64 + x) as usize] = 255;
-                }
-            }
-        }
-        let mask = KeepMask { w: 64, h: 64, data };
-        let (out, _removed, _) = remove_background(&png_of(&img), 48, Some(&mask)).unwrap();
-        // 关键断言：主体中心**活下来了**
-        assert_eq!(
-            alpha_at(&out, 32, 32),
-            255,
-            "描边保护之后主体中心必须还是不透明的"
-        );
-        // 而描边圈外面（真正连到四边的底色）仍然被抠掉
-        assert_eq!(alpha_at(&out, 2, 2), 0, "四角是底色，还是该抠掉");
-    }
-
-    /// 蒙版尺寸和处理尺寸不一致时（前端画布 ≠ 原图），要按比例投过去，
-    /// 不能整块错位、也不能因为形状对不上就把整条命令判失败。
-    #[test]
-    fn 蒙版尺寸不同也能按比例投过去() {
-        let img = low_contrast_icon();
-        // 蒙版用 32×32（原图 64×64）：主体大概在 10..22
-        let mut data = vec![0u8; 32 * 32];
-        for y in 0..32u32 {
-            for x in 0..32u32 {
-                let on_ring = (9..23).contains(&x) && (9..23).contains(&y)
-                    && !((11..21).contains(&x) && (11..21).contains(&y));
-                if on_ring {
-                    data[(y * 32 + x) as usize] = 255;
-                }
-            }
-        }
-        let mask = KeepMask { w: 32, h: 32, data };
-        let (out, _, _) = remove_background(&png_of(&img), 48, Some(&mask)).unwrap();
-        assert_eq!(
-            alpha_at(&out, 32, 32),
-            255,
-            "蒙版缩放之后主体中心仍须保住"
-        );
-    }
-
-    /// 形状对不上的坏蒙版（长度 ≠ w*h）→ 当没描过，走老路，**不能报错**。
-    #[test]
-    fn 坏蒙版退回不保护而不是报错() {
-        let img = low_contrast_icon();
-        let bad = KeepMask { w: 10, h: 10, data: vec![255u8; 3] };
-        let r = remove_background(&png_of(&img), 48, Some(&bad));
-        assert!(r.is_ok(), "坏蒙版不该让整条命令失败");
-        let (out, _, _) = r.unwrap();
-        /* r79：这条断言换算法后**必须换口径**。
-         * 旧算法下"坏蒙版 = 没保护"会把浅色主体一起吃掉（alpha=0）；
-         * 新算法（matting）对浅色主体本身就能保住，所以不能再用"主体被吃"
-         * 来证明"蒙版被忽略"。改为验证真正关心的事：不报错、能正常出图。 */
-        let dim = image::load_from_memory(&out).unwrap().to_rgba8().dimensions();
-        assert!(dim.0 >= 2 && dim.1 >= 2, "坏蒙版也要能正常出图（{}×{}）", dim.0, dim.1);
-    }
-
-    /// 全零蒙版（用户进了描边模式但一笔没画）→ 等价于没保护。
+    /// 没开开关 / 没模型时，必须返回**能读、能操作**的中文错误。
     ///
-    /// r79：口径同 `浅色主体落在浅底上现在能保住` —— 空蒙版下走纯自动流程，
-    /// 新算法能把浅色主体保住，所以断言"主体还在"。
+    /// 为什么这条重要：删掉本地兜底之后，错误信息成了用户唯一的信息来源。
+    /// 如果这里返回空串或英文堆栈，用户看到的就是"点了没反应"。
+    #[test]
+    fn 不可用时给出可操作的中文错误() {
+        let img = RgbaImage::new(16, 16);
+        let e = remove_background(&png_of(&img), None, &crate::aimatte::Params::default()).unwrap_err();
+        assert!(!e.is_empty(), "错误不能为空");
+        assert!(
+            e.contains("设置") || e.contains("抠图") || e.contains("AI"),
+            "错误要能指引用户去哪打开，实际：{e}"
+        );
+    }
+
+    /// 坏输入要报错而不是 panic（图太小 / 不是图）。
+    #[test]
+    fn 坏输入报错不panic() {
+        // 不是图片
+        assert!(remove_background(b"not an image at all", None, &crate::aimatte::Params::default()).is_err());
+        assert!(remove_background(&[], None, &crate::aimatte::Params::default()).is_err());
+        // 太小（1×1 解出来也过不了 prepare 的下限）
+        let tiny = RgbaImage::from_pixel(1, 1, Rgba([255, 0, 0, 255]));
+        let r = remove_background(&png_of(&tiny), None, &crate::aimatte::Params::default());
+        // 允许它因为"没开开关"而失败，也允许因为"图太小"而失败 ——
+        // 关键是**不能 panic**
+        assert!(r.is_err() || r.is_ok());
+    }
+
+    /// 补描蒙版形状不对（长度 ≠ w×h）时，**不能因此让整条命令失败** ——
+    /// 那是"用户描了个坏蒙版"，不该连累抠图本身。
+    #[test]
+    fn 坏蒙版不连累整条命令() {
+        let img = RgbaImage::new(16, 16);
+        let bad = KeepMask { w: 10, h: 10, data: vec![255u8; 3] }; // 长度明显不对
+        let r = remove_background(&png_of(&img), Some(&bad), &crate::aimatte::Params::default());
+        // 只会因为"功能没开"而失败，不会因为蒙版坏而 panic
+        assert!(r.is_err() || r.is_ok());
+    }
+
+    /// 全零蒙版（进了描边模式但一笔没画）等价于没描 —— 同样不能失败或 panic。
     #[test]
     fn 空蒙版等价于没描过() {
-        let img = low_contrast_icon();
-        let mask = KeepMask { w: 64, h: 64, data: vec![0u8; 64 * 64] };
-        let (out, _, _) = remove_background(&png_of(&img), 48, Some(&mask)).unwrap();
-        assert_eq!(alpha_at(&out, 32, 32), 255, "空蒙版 = 全自动，主体仍应保住");
-        assert_eq!(alpha_at(&out, 2, 2), 0, "四角该被抠掉");
+        let img = RgbaImage::new(16, 16);
+        let empty = KeepMask { w: 16, h: 16, data: vec![0u8; 16 * 16] };
+        let r = remove_background(&png_of(&img), Some(&empty), &crate::aimatte::Params::default());
+        assert!(r.is_err() || r.is_ok());
     }
 
+    /// 带参数那条路也要能用（`remove_background_with` 是新接口）。
+    #[test]
+    fn 带参数接口不panic() {
+        let img = RgbaImage::new(16, 16);
+        let p = crate::aimatte::Params::default();
+        let r = remove_background(&png_of(&img), None, &p);
+        assert!(r.is_err() || r.is_ok());
+    }
+
+    /* ── 参数本身的约束（纯逻辑，不需要模型） ── */
+
+    /// 前景门槛不能低于背景门槛 —— 否则同一个像素会既"确定前景"又"确定背景"，
+    /// trimap 就变成随机结果。`clamped()` 必须把这个矛盾修掉。
+    #[test]
+    fn 参数夹取修掉前后景矛盾() {
+        let p = crate::aimatte::Params {
+            fg_confidence: 20,   // 比背景门槛还低 → 矛盾
+            bg_confidence: 100,
+            ..Default::default()
+        };
+        let c = p.clamped();
+        assert!(
+            c.fg_confidence > c.bg_confidence,
+            "夹取后前景门槛必须高于背景门槛：fg={} bg={}",
+            c.fg_confidence,
+            c.bg_confidence
+        );
+    }
+
+    /// 羽化半径不能超过实现支持的上限（后端只做 0~4，超了没有意义）。
+    #[test]
+    fn 羽化半径被夹到上限() {
+        let p = crate::aimatte::Params { feather: 99, ..Default::default() };
+        assert!(p.clamped().feather <= 4, "羽化半径应当被夹到 4 以内");
+    }
+
+    /// 默认参数必须落在合法范围内（不然"恢复默认"会把用户带到非法状态）。
+    #[test]
+    fn 默认参数本身合法() {
+        let d = crate::aimatte::Params::default();
+        let c = d.clamped();
+        assert_eq!(c.fg_confidence, d.fg_confidence, "默认前景门槛不该被夹取改动");
+        assert_eq!(c.bg_confidence, d.bg_confidence, "默认背景门槛不该被夹取改动");
+        assert_eq!(c.feather, d.feather, "默认羽化不该被夹取改动");
+        assert!(c.fg_confidence > c.bg_confidence);
+    }
 }

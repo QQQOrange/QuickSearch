@@ -8474,12 +8474,30 @@ fn ocr_region(x: f64, y: f64, w: f64, h: f64, dpr: f64) {
 /// 调起会把横条窗口一起拖死（DWM 会给它做 Ghost 替身，表现为整个横条没反应），
 /// 这是踩过的坑。
 ///
-/// #143 起：挑完图**不直接落库**，而是把图交给「图标编辑器」窗口 —— 用户可以在
-/// 那里一键消除背景、前后对比，点了「保存」才真正写到 overrideIcons；点「取消」
-/// 就当没挑过。以前是「挑完即落库」，想改只能推倒重挑。
+/// # 分两条路（r80 修的逻辑问题）
+///
+/// 用户原话：
+/// > 「我的意思是说抠图的功能默认不打开。就只有在设置通用里面打开之后，换图标
+/// >  才会有个编辑的这个页面。没打开抠图功能的时候，点击换图标就直接选择文件替换」
+///
+/// 所以：
+///   · **缺省（开关关）**：挑完图**直接落库**替换，不进编辑器 —— 绝大多数用户
+///     只是想把图标换成自己的图，不该被迫过一道编辑器。
+///   · **开关开**：挑完图进编辑器（前后对比、抠图、导出都在这儿）。
+///     编辑器建不起来时也退回直接落库，别让用户白挑一张。
+///
+/// 注意这里的开关是 `ai_matting_enable`，但语义已经不止"AI 抠图"了 ——
+/// 它是**图标编辑器功能的总开关**（用户口径："没打开抠图功能时换图标就直接替换"）。
+/// 字段名保留是为了兼容已有配置，别改（改了老配置读不回来）。
 #[tauri::command]
 fn pick_icon(engine: String, app: AppHandle) {
     win::log(&format!("pick_icon: {engine}"));
+    // 先读开关：关着就直接落库，那条路不该去建编辑器窗口
+    let editor_on = st()
+        .cfg
+        .lock()
+        .map(|c| c.ai_matting_enable)
+        .unwrap_or(false);
     // OCR 是哨兵名（@ocr），直接印在对话框标题里很奇怪，换成给人看的说法。
     let shown = icon_edit_name(&engine);
     let _ = app.run_on_main_thread(move || {
@@ -8513,27 +8531,46 @@ fn pick_icon(engine: String, app: AppHandle) {
                 .to_string();
             let src = config::data_url(&fname, &bytes);
             let vector = fname.to_ascii_lowercase().ends_with(".svg");
+
+            /* 开关关着 → 直接落库（**不进编辑器**）。
+             * 这是 r80 修的逻辑：以前不管开关如何都进编辑器。 */
+            if !editor_on {
+                win::log("pick_icon: 编辑器未启用，直接落库替换");
+                stash_picked_icon(&eng2, &path);
+                return;
+            }
+
             // 编辑器建不起来时退回旧行为（直接落库），别让用户白挑一张图
             if !open_icon_edit_win(&eng2, src, vector) {
                 win::log("pick_icon: 编辑器建窗失败，退回直接落库");
-                if let Some(file) = config::stash_icon(&eng2, &path) {
-                    let mut cfg = match st().cfg.lock() {
-                        Ok(c) => c,
-                        Err(_) => return,
-                    };
-                    if let Some(old) = cfg.overrides.insert(eng2.clone(), file) {
-                        if old != cfg.overrides[&eng2] {
-                            config::drop_icon(&old);
-                        }
-                    }
-                    config::save(&cfg);
-                    drop(cfg);
-                    broadcast();
-                    toast_settings("图标已更新");
-                }
+                stash_picked_icon(&eng2, &path);
             }
         });
     });
+}
+
+/// 把挑到的图标文件落库（写 icons 目录 + overrideIcons + 广播）。
+///
+/// 抽出来是因为两条路都要用：开关关着时的"直接替换"，以及编辑器建窗失败时的回退。
+/// 以前这段逻辑只存在于"建窗失败"分支里，现在它是**默认路径**的一部分。
+fn stash_picked_icon(engine: &str, path: &std::path::Path) {
+    let Some(file) = config::stash_icon(engine, path) else {
+        toast_settings("图标保存失败，换一张试试");
+        return;
+    };
+    let mut cfg = match st().cfg.lock() {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    if let Some(old) = cfg.overrides.insert(engine.to_string(), file) {
+        if old != cfg.overrides[engine] {
+            config::drop_icon(&old); // 旧文件没人引用了，别留着占地
+        }
+    }
+    config::save(&cfg);
+    drop(cfg);
+    broadcast();
+    toast_settings("图标已替换");
 }
 
 /// 给设置页弹一条提示（编辑器/挑图路径都在设置页操作，toast 只发它）。
@@ -8751,41 +8788,50 @@ fn icon_edit_ready() {
     show_after_ready("iconedit");
 }
 
-/// 「自动描边 + 消除背景」：把图标的背景抠成透明，返回处理后 PNG 的 data URL
-/// + 抠掉的像素数 + 是否没找到可靠背景。
+/// 「自动抠图」：把图标的背景抠成透明，返回处理后 PNG 的 data URL
+/// + 抠掉的像素数 + 是否没找到主体。
 ///
-/// 同步命令：≤512px 的图解码 + trimap + 窄带求解 + 编码，实测几十毫秒
-/// （512×512 复杂图标约 40~80ms），不值得为此铺线程。
+/// # 同步命令
 ///
-/// r77：`keep` —— 手动描边保护蒙版。
-/// r79：算法换成**阿尔法抠图**（自动 trimap + Closed-Form 风格求解 + 边缘去色，
-/// 见 `matting` 模块）。旧实现只看颜色，浅色主体会被吃掉；新实现按
-/// Photoshop 那条路做前景/背景分离，并把手动描边升级成"硬约束前景"。
-/// `noBackground` 让界面能在"这张图本来就没有背景"时说人话，而不是给个糟糕结果。
+/// AI 推理 140~1000ms（视模型），仍在可接受范围；铺线程反而要多传一遍大图字节，
+/// 这里保持同步 —— 前端已经用 `busy` 状态盖住了等待期。
+///
+/// # 演进
+///
+/// · r77：`keep` —— 手动补描保护蒙版。
+/// · r79：算法换成颜色解混。
+/// · r80：换成 **AI 抠图**，并删掉本地算法（用户要求「原来那个直接去掉」）。
+///   所以现在不可用时返回**明确错误**（含去哪打开/下载），不再静默回退。
+/// · r80b：新增 **AI 参数**（`params`）—— 用户要求「在编辑画面里面多添加一些
+///   与这些模型相关的参数」。见 `aimatte::Params` 的字段说明。
 #[tauri::command]
 fn icon_remove_bg(
     src: String,
-    tolerance: Option<u32>,
     keep: Option<iconedit::KeepMask>,
+    params: Option<aimatte::Params>,
 ) -> Result<Value, String> {
     let (mime, bytes) = read_icon_src(&src)?;
     if mime.contains("svg") {
         return Err("SVG 是矢量图，没有位图背景可以消除".to_string());
     }
-    let tol = tolerance.unwrap_or(48).clamp(0, 150);
+    let p = params.unwrap_or_default();
     let t0 = std::time::Instant::now();
-    let (png, removed, no_bg) = iconedit::remove_background(&bytes, tol, keep.as_ref())?;
+    let (png, removed, no_bg) = iconedit::remove_background(&bytes, keep.as_ref(), &p)?;
     win::log(&format!(
-        "icon_remove_bg: removed={removed} tol={tol} 描边={} 无背景={no_bg} 耗时={}ms",
+        "icon_remove_bg: removed={removed} 描边={} 无背景={no_bg} 参数={} 耗时={}ms",
         keep.is_some(),
+        p.summary(),
         t0.elapsed().as_millis()
     ));
     Ok(json!({
         "src": config::data_url("iconedit.png", &png),
         "removed": removed,
-        // r79：这张图可能压根没有背景（主体顶满四边 / 整张同色）——
-        // 界面据此提示"这张图看起来没有背景"，而不是让用户以为按钮坏了
+        // 这张图可能压根没有主体可分（AI 找不到前景）——
+        // 界面据此提示"这张图看不出主体"，而不是让用户以为按钮坏了
         "noBackground": no_bg,
+        // 回显这次实际用的参数与模型名：用户调参数时要知道"这次是什么配置的结果"
+        "usedModel": p.model_name.clone(),
+        "elapsedMs": t0.elapsed().as_millis() as u64,
     }))
 }
 

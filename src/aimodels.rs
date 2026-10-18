@@ -56,9 +56,13 @@ pub struct ModelSpec {
     pub note: &'static str,
     /// 下载体积（字节，来自官方 Content-Length）
     pub bytes: u64,
-    /// 下载地址
-    pub url: &'static str,
-    /// SHA256（下载完必校验）
+    /// **候选下载地址（按优先级）** —— 逐个试，第一个成功的就用。
+    ///
+    /// 为什么是一组：国内对 `huggingface.co` 存在 DNS 污染（实测解析到
+    /// `2a03:2880:...:face:b00c:...`，21 秒超时），只写一个源会让三个 RMBG
+    /// 模型全都下不了。见 `MODELS` 上方的实测表。
+    pub urls: &'static [&'static str],
+    /// SHA256（无论从哪个源下，下完都校验）
     pub sha256: &'static str,
     /// 推理时的输入边长（u2net 系 320，RMBG 系 1024）
     pub input_edge: u32,
@@ -96,13 +100,42 @@ impl Family {
 }
 
 /// 全部可选模型。**顺序即界面顺序**（推荐的在最前）。
+///
+/// # 关于 `urls`：为什么是一组而不是一个（r80 实测修出来的）
+///
+/// 第一版每个模型只写一个 URL，全部指向 `huggingface.co`。用户报
+/// 「除了轻量版的模型之外，其他的 3 个模型都下载不了」——实测根因是
+/// **DNS 污染**：`huggingface.co` 在这台机器上解析成
+/// `2a03:2880:f11c:8183:face:b00c:0:25de`（`face:b00c` 是典型的污染特征），
+/// 直连 21 秒后超时；而 GitHub（u2netp 的源）正常。所以只有 4.4MB 那个能下。
+///
+/// 修法：**每个模型给多个镜像源，按顺序逐个试**，任何一个成功就用。
+/// 实测（本机，各下 1MB 验证过真实数据、84MB 全量验证过 SHA256）：
+///
+/// | 源 | 连通 | 速度 | SHA256 |
+/// |---|---|---|---|
+/// | `modelscope.cn`（阿里魔搭） | ✅ | **700 ms/MB** | 与官方一致 |
+/// | `hf-mirror.com` | ✅ | 1800~3500 ms/MB | 与官方一致 |
+/// | `huggingface.co`（官方） | ❌ 被污染 | — | — |
+///
+/// 所以国内源排前面。**SHA256 校验仍然照做** —— 镜像只是传输通道，
+/// 内容对不对由哈希说了算（这也让"用镜像"这件事在安全上没有让步）。
 pub const MODELS: &[ModelSpec] = &[
     ModelSpec {
         id: "u2netp",
         name: "轻量版（推荐）",
         note: "4.4 MB，速度最快且在图标上实测最准。日常图标首选。",
         bytes: 4_574_861,
-        url: "https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2netp.onnx",
+        urls: &[
+            /* ⚠ 这里**没有 modelscope** —— u2netp 是 rembg 项目自己的模型，
+             * modelscope 上没有这个文件（实测几个候选路径全是 404，
+             * 返回的是 JSON 错误页而不是 ONNX）。所以它的可用源就是下面两个，
+             * 都实测 206 + ONNX 文件头（`08 06 12 07 70 79` = protobuf 的
+             * field1/field2 + "py"）验证过。
+             * RMBG 那三个才有 modelscope 源（那是 briaai 的模型，魔搭有镜像）。 */
+            "https://hf-mirror.com/tomjackson2023/rembg/resolve/main/u2netp.onnx",
+            "https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2netp.onnx",
+        ],
         sha256: "309C8469258DDA742793DCE0EBEA8E6DD393174F89934733ECC8B14C76F4DDD8",
         input_edge: 320,
         family: Family::U2net,
@@ -114,7 +147,11 @@ pub const MODELS: &[ModelSpec] = &[
         name: "RMBG 量化版",
         note: "42 MB，人像/产品照片效果好；图标上会把文字与底座当噪声删掉。",
         bytes: 44_403_226,
-        url: "https://huggingface.co/briaai/RMBG-1.4/resolve/main/onnx/model_quantized.onnx",
+        urls: &[
+            "https://www.modelscope.cn/models/AI-ModelScope/RMBG-1.4/resolve/master/onnx/model_quantized.onnx",
+            "https://hf-mirror.com/briaai/RMBG-1.4/resolve/main/onnx/model_quantized.onnx",
+            "https://huggingface.co/briaai/RMBG-1.4/resolve/main/onnx/model_quantized.onnx",
+        ],
         sha256: "A6648479275DFD0EDE0F3A8ABC20AA5C437B394681B05E5AF6D268250AAF40F3",
         input_edge: 1024,
         family: Family::Rmbg,
@@ -126,7 +163,11 @@ pub const MODELS: &[ModelSpec] = &[
         name: "RMBG 半精度",
         note: "84 MB，比量化版准一点、比全精度小一半。",
         bytes: 88_217_533,
-        url: "https://huggingface.co/briaai/RMBG-1.4/resolve/main/onnx/model_fp16.onnx",
+        urls: &[
+            "https://www.modelscope.cn/models/AI-ModelScope/RMBG-1.4/resolve/master/onnx/model_fp16.onnx",
+            "https://hf-mirror.com/briaai/RMBG-1.4/resolve/main/onnx/model_fp16.onnx",
+            "https://huggingface.co/briaai/RMBG-1.4/resolve/main/onnx/model_fp16.onnx",
+        ],
         sha256: "9FDFDB41866D872E0ACF4A010C35C1A8547BF0EEBE0D1544406BBF1C824CB59D",
         input_edge: 1024,
         family: Family::Rmbg,
@@ -138,7 +179,11 @@ pub const MODELS: &[ModelSpec] = &[
         name: "RMBG 全精度",
         note: "168 MB，官方原始精度。追求照片级效果时用，图标场景没必要。",
         bytes: 176_153_355,
-        url: "https://huggingface.co/briaai/RMBG-1.4/resolve/main/onnx/model.onnx",
+        urls: &[
+            "https://www.modelscope.cn/models/AI-ModelScope/RMBG-1.4/resolve/master/onnx/model.onnx",
+            "https://hf-mirror.com/briaai/RMBG-1.4/resolve/main/onnx/model.onnx",
+            "https://huggingface.co/briaai/RMBG-1.4/resolve/main/onnx/model.onnx",
+        ],
         sha256: "8CAFCF770B06757C4EACED21B1A88E57FD2B66DE01B8045F35F01535BA742E0F",
         input_edge: 1024,
         family: Family::Rmbg,
@@ -242,6 +287,20 @@ fn take_cancel() -> bool {
 ///
 /// `progress`：每读一块回调一次 `(已下字节, 总字节)`，由调用方决定怎么推给前端。
 ///
+/// # 多源回退（r80 实测修出来的）
+///
+/// 逐个试 `spec.urls` 里的源，**第一个成功的就用**。为什么必须这样：
+/// 用户报「除了轻量版的模型之外，其他 3 个都下载不了」，实测根因是
+/// `huggingface.co` 被 DNS 污染（解析到 `...:face:b00c:...`，21 秒超时），
+/// 而单源写法没有退路。见 `MODELS` 上方的实测表。
+///
+/// 回退时的几个细节：
+///   · 换源前**重置**哈希与已下字节（不能让上一个源的半截数据混进来）
+///   · 每次都重建 `.part` 临时文件（覆盖写，不追加）
+///   · 取消信号一旦触发，**立即停**，不再去试下一个源
+///   · 所有源都失败时，把每个源的失败原因**拼起来**返回 ——
+///     只说"下载失败"用户没法排查是网络还是源的问题
+///
 /// # 为什么自己写而不用现成的下载库
 ///
 /// 项目里 HTTP 走 `ureq`（同步、无 tokio，见 README 的设计取舍）。
@@ -262,79 +321,127 @@ pub fn download(
     let final_path = model_path(spec.id);
     let tmp_path = final_path.with_extension("onnx.part");
 
-    let resp = agent()
-        .get(spec.url)
-        .call()
-        .map_err(|e| format!("连不上模型服务器：{e}"))?;
-    // 优先用服务器报的总长度；没有就用清单里的体积（界面进度条要有个总数）
-    let total: u64 = resp
-        .header("Content-Length")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(spec.bytes);
+    // 每个源的失败原因，最后拼起来给用户看
+    let mut failures: Vec<String> = Vec::new();
 
-    let mut reader = resp.into_reader();
-    let mut file = std::fs::File::create(&tmp_path).map_err(|e| format!("建临时文件失败：{e}"))?;
-    let mut hasher = sha2::Sha256::new();
-    let mut done: u64 = 0;
-    let mut buf = vec![0u8; 64 * 1024];
-    let mut last_pct: i64 = -1;
-
-    loop {
+    for (idx, url) in spec.urls.iter().enumerate() {
+        // 换源前清一遍：上一个源的半截文件不能让下一个源续（内容可能不一样）
+        let _ = std::fs::remove_file(&tmp_path);
         if take_cancel() {
-            drop(file);
-            let _ = std::fs::remove_file(&tmp_path);
-            // 取消不算错误 —— 上层据此提示"已取消"而不是报红
             return Err("__CANCELED__".to_string());
         }
-        let n = match reader.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => n,
+        let host = url_host(url);
+        // 第 2 个源开始给用户一句提示（第一个源失败通常就是几百毫秒的事，
+        // 不值得闪一下；但回退到镜像时用户该知道"正在换源"）
+        if idx > 0 {
+            progress(0, spec.bytes);
+            crate::win::log(&format!("ai_matting_download: {} 回退到 {host}", spec.id));
+        }
+
+        let mut reader = match agent().get(url).call() {
+            Ok(r) => r.into_reader(),
             Err(e) => {
-                drop(file);
-                let _ = std::fs::remove_file(&tmp_path);
-                return Err(format!("下载中断：{e}"));
+                failures.push(format!("{host}: {e}"));
+                continue;
             }
         };
-        hasher.update(&buf[..n]);
-        file.write_all(&buf[..n])
-            .map_err(|e| format!("写模型文件失败（磁盘满？）：{e}"))?;
-        done += n as u64;
+        let mut file = match std::fs::File::create(&tmp_path) {
+            Ok(f) => f,
+            Err(e) => return Err(format!("建临时文件失败：{e}")),
+        };
+        let mut hasher = sha2::Sha256::new();
+        let mut done: u64 = 0;
+        let mut buf = vec![0u8; 64 * 1024];
+        let mut last_pct: i64 = -1;
+        let total: u64 = spec.bytes;
+        let mut broke = false;
 
-        /* 进度回调按**百分比变化**节流：64KB 一块、168MB 的文件切两千多块，
-         * 每块都往界面推一次事件是纯浪费（前端重绘也跟不上）。
-         * 每 1% 推一次足够顺滑。 */
-        let pct = (done.saturating_mul(100)).checked_div(total).unwrap_or(0) as i64;
-        if pct != last_pct {
-            last_pct = pct;
-            progress(done, total);
+        loop {
+            if take_cancel() {
+                drop(file);
+                let _ = std::fs::remove_file(&tmp_path);
+                // 取消不算错误 —— 上层据此提示"已取消"而不是报红
+                return Err("__CANCELED__".to_string());
+            }
+            let n = match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(e) => {
+                    failures.push(format!("{host}: 下载中断 {e}"));
+                    broke = true;
+                    break;
+                }
+            };
+            hasher.update(&buf[..n]);
+            if let Err(e) = file.write_all(&buf[..n]) {
+                return Err(format!("写模型文件失败（磁盘满？）：{e}"));
+            }
+            done += n as u64;
+
+            /* 进度回调按**百分比变化**节流：64KB 一块、168MB 的文件切两千多块，
+             * 每块都往界面推一次事件是纯浪费（前端重绘也跟不上）。
+             * 每 1% 推一次足够顺滑。 */
+            let pct = (done.saturating_mul(100)).checked_div(total).unwrap_or(0) as i64;
+            if pct != last_pct {
+                last_pct = pct;
+                progress(done, total);
+            }
         }
-    }
-    file.flush().map_err(|e| format!("落盘失败：{e}"))?;
-    drop(file);
+        let _ = file.flush();
+        drop(file);
+        if broke {
+            continue;
+        }
 
-    let actual = format!("{:x}", hasher.finalize());
+        /* 这个源下完了 → 校验。 */
+        let actual = format!("{:x}", hasher.finalize());
+        if done < 100_000 {
+            failures.push(format!("{host}: 只拿到 {done} 字节"));
+            continue;
+        }
+        /* SHA256 校验：无论从哪个源下都必须对上。
+         * 镜像只是传输通道，内容对不对由哈希说了算 —— 这也让"用镜像"
+         * 在安全上没有让步（实测 modelscope 下来的 84MB 文件哈希与官方一致）。 */
+        if !spec.sha256.is_empty() && !actual.eq_ignore_ascii_case(spec.sha256) {
+            failures.push(format!(
+                "{host}: 哈希不符（期望 {}，实际 {}）",
+                &spec.sha256[..8.min(spec.sha256.len())],
+                &actual[..8.min(actual.len())]
+            ));
+            continue;
+        }
 
-    /* SHA256 校验：清单里填了就必须对上。
-     * 为什么必须有：断网重连、公司代理、镜像站，都可能给回一个"看起来下完了"
-     * 的损坏文件；坏模型让推理直接崩，而且崩在用户手里很难查。 */
-    if !spec.sha256.is_empty() && !actual.eq_ignore_ascii_case(spec.sha256) {
-        let _ = std::fs::remove_file(&tmp_path);
-        return Err(format!(
-            "模型校验失败（可能被代理改写或下坏了）：期望 {}，实际 {actual}",
-            &spec.sha256[..8.min(spec.sha256.len())]
+        // 校验通过 → 原子落盘（Windows 上 rename 不覆盖已存在文件，先删旧的）
+        let _ = std::fs::remove_file(&final_path);
+        std::fs::rename(&tmp_path, &final_path).map_err(|e| format!("落盘失败：{e}"))?;
+        progress(done, done);
+        crate::win::log(&format!(
+            "ai_matting_download: {} 从 {host} 下完 {done} 字节",
+            spec.id
         ));
-    }
-    // 体积也要对得上（清单没填 sha256 时这是唯一的兜底）
-    if done < 100_000 {
-        let _ = std::fs::remove_file(&tmp_path);
-        return Err(format!("下载内容异常（只有 {done} 字节）"));
+        return Ok((done, actual));
     }
 
-    // 原子落盘：先删旧的（Windows 上 rename 不覆盖已存在文件），再改名
-    let _ = std::fs::remove_file(&final_path);
-    std::fs::rename(&tmp_path, &final_path).map_err(|e| format!("落盘失败：{e}"))?;
-    progress(done, total.max(done));
-    Ok((done, actual))
+    // 所有源都失败：把原因拼出来（不然用户没法判断是网络还是源的问题）
+    let _ = std::fs::remove_file(&tmp_path);
+    let tried = failures.len();
+    if tried == 0 {
+        return Err("没有可用的下载源".to_string());
+    }
+    Err(format!(
+        "{} 个下载源都失败了：\n{}",
+        tried,
+        failures.join("\n")
+    ))
+}
+
+/// 从 URL 里取 host（只用于日志与错误信息，取不到就回退成整条 URL）。
+fn url_host(url: &str) -> String {
+    url.split("//")
+        .nth(1)
+        .and_then(|s| s.split('/').next())
+        .unwrap_or(url)
+        .to_string()
 }
 
 /// 删掉已下载的模型（用户点"删除"）。
@@ -369,7 +476,10 @@ mod tests {
         assert!(!MODELS.is_empty());
         for m in MODELS {
             assert!(!m.id.is_empty(), "id 不能空");
-            assert!(m.url.starts_with("https://"), "{} 必须走 https", m.id);
+            assert!(!m.urls.is_empty(), "{} 必须至少有一个下载源", m.id);
+            for u in m.urls {
+                assert!(u.starts_with("https://"), "{} 的源必须走 https：{u}", m.id);
+            }
             assert!(m.bytes > 0, "{} 体积必须为正", m.id);
             assert!(m.input_edge == 320 || m.input_edge == 1024, "{} 边长异常", m.id);
             assert!(m.score <= 8);
