@@ -139,8 +139,9 @@ QuickSearch**（它通常是管理员权限、脚本杀不掉）。
 
 ## 许可与致谢
 
-个人项目。引擎表（`ui/data/engines.json`）的 URL 与图标版权归各站点所有，
-此处仅作跳转索引使用。
+本项目采用 [MIT License](LICENSE) —— 可自由使用、修改、分发与商用，只需保留版权声明。
+
+引擎表（`ui/data/engines.json`）的 URL 与图标版权归各站点所有，此处仅作跳转索引使用。
 
 图标来源：各站点 favicon / [Iconify](https://iconify.design/)。
 液态玻璃折射的数学移植自开源项目 [liquidGL](https://github.com/naver/liquidGL) 的思路。
