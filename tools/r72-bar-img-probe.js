@@ -172,8 +172,11 @@ async function waitBar(cfg, pred, ms) {
         check('C3 识图在「横条上的引擎」列表里，而且是一等成员（有抓手、能拖）',
             row.err === undefined && row.grip === true && row.addRow === false,
             JSON.stringify(row));
-        check('C4 按钮组齐全：上移 / 下移 / 换图标 / 编辑图标 / 移出',
-            ['↑', '↓', '换图标', '编辑图标', '移出'].every((t) => row.btns.indexOf(t) >= 0),
+        /* r80b：「编辑图标」现在受**图标编辑器总开关**控制（默认关 → 不出现）。
+         * 这个探针跑的是默认配置（开关关着），所以按设计就不该有那顆按钮。
+         * 开关打开后它会出现 —— 那条路由 `tools/r80b-probe.js` 的 2g 断言钉着。 */
+        check('C4 按钮组齐全：上移 / 下移 / 换图标 / 移出（编辑图标受总开关控制，默认关时不出现）',
+            ['↑', '↓', '换图标', '移出'].every((t) => row.btns.indexOf(t) >= 0),
             JSON.stringify(row.btns));
         check('C5 没换过图标时不显示「默认」（没东西可恢复，别摆个死按钮）',
             row.btns.indexOf('默认') < 0, JSON.stringify(row.btns));

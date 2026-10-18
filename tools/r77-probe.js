@@ -211,8 +211,11 @@ async function freePort() {
          * 现在自动抠图已经够准，不需要先描边，所以顺序反过来才对。 */
         check('C3 「自动抠图」按钮在前、「手动补描」在后（自动为主、补描为辅）',
             html.indexOf('id="btnRemove"') < html.indexOf('id="btnMask"') && html.indexOf('id="btnMask"') >= 0);
-        check('C4 消除背景时把 keep 蒙版一起发出去',
-            /invoke\('icon_remove_bg',\s*\{\s*src:\s*SRC,\s*tolerance:\s*tol,\s*keep\s*\}/.test(html));
+        /* r80b：命令签名变了 —— `tolerance`（容差）已随本地算法一起删除，
+         * 换成了 `params`（AI 参数对象）。keep 蒙版仍然照发。
+         * 旧断言钉的是"tolerance 与 keep 一起发"，那个参数已经不存在了。 */
+        check('C4 消除背景时把 keep 蒙版与 AI 参数一起发出去',
+            /invoke\('icon_remove_bg',\s*\{\s*src:\s*SRC,\s*keep,\s*params\s*\}/.test(html));
         check('C5 换图时会清掉旧描边（maskReset 在 loadSession 里）',
             /loadSession[\s\S]{0,2000}maskReset\(\)/.test(html));
         /* r79：算法整个换成了**阿尔法抠图**，不再有"泛洪的种子/扩散"这套。

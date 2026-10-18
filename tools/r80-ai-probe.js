@@ -238,7 +238,12 @@ const METRIC = (src, orig) => `(function(){
         check('6b AI 结果满足基本质量（主体没被大量删除 + 边界基本干净）',
             improved >= 2, '达标 ' + improved + ' 个');
 
-        /* ---------- 7. 关掉开关 → 回退本地，且仍能出图 ---------- */
+        /* ---------- 7. 关掉开关 → **明确报错**（本地算法已删，不再回退） ----------
+         *
+         * ⚠ 这条断言在 r80b 换了口径。原来写的是"关掉开关后仍能抠图（走本地算法）"，
+         * 但用户要求「现在有了 ai 抠图，原来的抠图就直接不要去掉」——
+         * 本地算法已经删了，关掉开关就**应该**失败，而且要给一句能操作的话。
+         * 所以现在钉的是"报错 + 错误信息可读"，而不是"仍能出图"。 */
         await ev(sw, "document.getElementById('s-aiMatting').click()");
         await until(sw, "document.getElementById('s-aiMatting').checked === false", 8000);
         await sleep(800);
@@ -246,10 +251,11 @@ const METRIC = (src, orig) => `(function(){
         if (fs.existsSync(p2)) {
             const dataUrl2 = 'data:image/png;base64,' + fs.readFileSync(p2).toString('base64');
             const r2 = await ev(sw, `window.__TAURI__.core.invoke('icon_remove_bg', {
-                src: ${JSON.stringify(dataUrl2)}, tolerance: 48, keep: null
-            }).then(r=>JSON.stringify({n:r.removed})).catch(e=>'ERR '+e)`);
-            check('7a 关掉开关后仍能抠图（走本地算法）',
-                typeof r2 === 'string' && !r2.startsWith('ERR') && JSON.parse(r2).n > 0, String(r2).slice(0, 60));
+                src: ${JSON.stringify(dataUrl2)}, keep: null
+            }).then(r=>'OK').catch(e=>String(e))`);
+            check('7a 关掉开关后抠图**明确报错**（本地算法已删）',
+                typeof r2 === 'string' && r2 !== 'OK' && r2.indexOf('设置') >= 0,
+                String(r2).slice(0, 70));
         }
 
         /* ---------- 8. 模型选择切换 ---------- */
