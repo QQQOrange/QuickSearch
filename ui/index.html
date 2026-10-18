@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="color-scheme" content="light dark">
+<title>Quick Search 横条</title>
+<link rel="stylesheet" href="bar.css">
+</head>
+<body>
+
+<div class="stage" id="stage">
+
+    <!-- 液态玻璃画布：铺满**整个窗口**（不是只铺横条），pointer-events:none。
+         ⚠ 2026-10-16（需求 6）从 .bar 里搬到了 stage 上：面板（#panel）是 .bar 的
+         **兄弟**节点，画布留在 .bar 里就只能覆盖横条胶囊 —— 面板那块区域压根没有
+         玻璃，用户看到的就是"更多引擎页 / 收藏夹页还是纯色卡片"。
+         现在画布铺满窗口，glass.js 给每一块玻璃（横条、面板）各画一遍：每遍只改
+         viewport / u_resolution / u_boxSize / u_bounds —— v_uv 来自顶点属性而不是
+         gl_FragCoord，viewport 一变它自动就是"块内 0..1"，shader 一行都不用动。
+         背景仍由 Rust 抓屏（src/glass.rs），渲染数学见 glass.js（liquidGL 移植版）。
+         玻璃关掉或 WebGL2 不可用时不挂 qs-glass 类，此画布完全不出现。 -->
+    <canvas id="qsGlass" aria-hidden="true"></canvas>
+
+    <!-- ---------------- 横条本体 ---------------- -->
+    <div class="bar" id="bar">
+        <span class="tip" id="tip" hidden>没有可用的引擎</span>
+        <!-- 引擎区。用户自己加的分隔线也由 bar.js 渲染在这里 -->
+        <div class="engines" id="engines"></div>
+        <!--
+            ⚠ 这里原来有一根「引擎区与右侧功能按钮之间的自动分界线」（#sepTail），
+            已按用户要求删掉：它只要引擎区非空就自动出现，可用户根本没加过分隔线，
+            于是"最后一个引擎后面凭空多一根竖线"。
+            现在引擎区里的每一根竖线都严格对应用户在设置里加的那一条。
+        -->
+        <button class="ico qs-link" id="btnLink" title="打开这个网址" hidden>🔗</button>
+        <!-- r54：识图搜索。默认 hidden，和 btnLink 一样由 js 决定显不显示；
+             总开关在设置里（imgEnable + imgAddToBar），关掉就永远不出现。 -->
+        <!-- r60：识图图标换成用户给的这张（四角取景框 + 放大镜）。
+             语义正好：**框选屏幕的一块区域**（四角）→ **按图去搜**（放大镜）。
+             之前用 🔍 只有"搜"没有"框"，用 🖼 又只有"图"没有"搜"，都不够贴切。
+             ⚠ 原图 path 上带 `fill="#707070"`，这里**去掉**了 —— 留着会盖掉
+               主题色，悬停变蓝和深色模式都会失效；改由 CSS 的 `fill: currentColor` 控制。 -->
+        <button class="ico qs-img" id="btnImg" title="识图搜索：框选屏幕上的一块区域，拿它去按图搜索" hidden><svg viewBox="0 0 1024 1024" aria-hidden="true" focusable="false"><path d="M97.28 350.72c17.92 0 32.256-15.872 32.256-33.792V187.904c0-32.256 26.112-57.856 57.856-57.856H317.44c15.36 0 29.184-9.728 32.768-24.576 5.12-21.504-11.264-40.96-31.744-40.96h-138.24c-64 0-116.224 52.224-116.224 116.224v138.24c0 17.408 14.336 31.744 33.28 31.744zM317.952 894.464H187.392c-32.256 0-57.856-26.112-57.856-57.856V706.56c0-15.36-9.728-29.184-24.576-32.768-21.504-5.12-40.96 11.264-40.96 31.744v138.24c0 64 52.224 116.224 116.224 116.224h136.704c16.384 0 31.744-11.776 33.792-28.16 3.072-19.968-12.8-37.376-32.768-37.376zM772.096 791.04c8.192 0 15.872-3.072 22.016-8.704 6.656-6.144 10.24-13.824 10.752-23.04 0.512-8.704-2.56-16.896-8.704-23.552l-115.712-115.712c67.072-89.6 57.856-216.064-21.504-295.424-80.384-80.384-208.896-88.576-299.008-18.432-98.816 76.8-116.736 219.648-39.936 317.952 75.776 97.28 216.064 116.224 314.368 42.496l115.712 115.712c6.144 6.144 14.336 8.704 22.016 8.704zM385.024 599.04c-30.72-30.72-47.104-71.168-47.104-114.176s16.896-83.456 47.104-113.664l2.048-2.048c62.976-60.416 163.328-59.904 225.792 2.048 62.976 62.976 62.976 164.864 0 227.84-62.976 62.464-164.864 62.464-227.84 0zM926.72 673.28c-17.92 0-32.256 15.872-32.256 33.792v129.536c0 32.256-26.112 57.856-57.856 57.856H706.56c-15.36 0-29.184 9.728-32.768 24.576-5.12 21.504 11.264 40.96 31.744 40.96h138.24c64 0 116.224-52.224 116.224-116.224v-138.24c0-17.92-14.336-32.256-33.28-32.256zM843.776 64H706.56c-15.36 0-29.184 9.728-32.768 24.576-5.12 21.504 11.264 40.96 31.744 40.96h131.072c32.256 0 57.856 26.112 57.856 57.856V317.44c0 15.36 9.728 29.184 24.576 32.768 21.504 5.12 40.96-11.264 40.96-31.744v-138.24c0-64-52.224-116.224-116.224-116.224z"/></svg></button>
+        <!-- r54 需求 2：划词是一条本地路径时自动出现，点了调用系统资源管理器定位 -->
+        <button class="ico qs-path" id="btnPath" title="在文件管理器中打开这个路径" hidden>📁</button>
+        <button class="ico qs-ocr" id="btnOcr" title="识别图片里的文字（Ctrl+Alt+O）">OCR</button>
+        <button class="ico qs-more" id="btnMore" title="更多引擎">⋯</button>
+    </div>
+
+    <!-- ---------------- 展开面板 ---------------- -->
+    <div class="panel" id="panel" hidden>
+        <div class="panel-head">
+            <!-- ⚠ autocomplete="off" 不是可选项：WebView2 默认会给文本框记表单历史，
+                 聚焦/打字时弹一个"以前输过的词"的下拉（用户报的「这输入框带记忆功能」）。
+                 再配合 bar.js 里"搜完清空 + 收起清空"，输入框才是纯一次性的。 -->
+            <input id="q" type="text" placeholder="输入关键词，回车搜索…" spellcheck="false"
+                   autocomplete="off" autocapitalize="off" autocorrect="off">
+            <!-- 引擎搜索框（用户要求：引擎太多，要能搜）。
+                 筛的是面板里的**引擎列表**，跟左边那个「关键词」框不是一回事：
+                 左边填的是要搜的内容，这个框填的是用哪个引擎搜。
+                 和 #q 一样必须关掉输入记忆（见上一条注释）。 -->
+            <input id="engFilter" type="text" placeholder="🔍 搜索引擎…" spellcheck="false"
+                   autocomplete="off" autocapitalize="off" autocorrect="off"
+                   aria-label="搜索引擎" title="输入引擎名或它的别称，立刻筛出想要的那个">
+            <button class="panel-x" id="btnPanelClose" title="收起">收起</button>
+        </div>
+        <div class="panel-body" id="panelBody"></div>
+        <div class="panel-foot">
+            <!-- 这里原本有一条「在横条上右键某个图标 → 可以换图标、移出横条」的提示。
+                 用户明确说相关功能他不打算做，让把提示关掉 —— 已删除。 -->
+            <button class="pf-btn" id="btnSettings">设置…</button>
+        </div>
+    </div>
+
+    <!-- ---------------- 右键菜单 ----------------
+         ⚠ 必须在 .stage **里面**：主题变量（--qs-bg / --qs-fg / --qs-shadow / --qs-border…）
+           全部定义在 .stage 上，自定义属性只向下继承 —— 摆在外面它一条都取不到，
+           background-color / color / box-shadow 这几条声明会被整条丢弃
+           （菜单于是"没有底色、黑字"，跟收藏面板那个 bug 是同一个根因）。
+           它是 position:absolute、不参与 .stage 的 max-content 尺寸计算，
+           放进来不会改变布局；.stage 的 padding box 原点就是 (0,0)，
+           openMenu 用视口坐标设 left/top 也不会因此偏移。 -->
+    <div class="menu" id="menu" hidden></div>
+
+</div>
+
+<script src="shared.js"></script>
+<script src="bar.js"></script>
+<script src="glass.js"></script>
+</body>
+</html>

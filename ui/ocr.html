@@ -1,0 +1,1964 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="color-scheme" content="light dark">
+<title>识别结果</title>
+<style>
+/* 同样内联：这个窗口只有「引擎条 + 文本框」两块，独立成文件反而更难维护。 */
+* { box-sizing: border-box; }
+
+:root {
+    --bg: #F5F6F8;
+    --card: #FFFFFF;
+    --fg: #1B1D23;
+    --fg-dim: #6B6F7A;
+    --line: #E4E6EB;
+    --hover: rgba(15, 20, 40, .06);
+    --accent: #3B7DFF;
+}
+
+@media (prefers-color-scheme: dark) {
+    :root {
+        --bg: #17181C;
+        --card: #1E1F24;
+        --fg: #ECEDF1;
+        --fg-dim: #A0A4AF;
+        --line: rgba(255, 255, 255, .12);
+        --hover: rgba(255, 255, 255, .09);
+        --accent: #6FA1FF;
+    }
+}
+
+html, body {
+    margin: 0;
+    height: 100%;
+    background: var(--bg);
+    color: var(--fg);
+    font: 13px/1.55 "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+body { display: flex; flex-direction: column; overflow: hidden; }
+
+/* ------------------------------ 顶部对照工具栏 ------------------------------ */
+/* 用户要求「彻底移除 OCR 结果页里所有与搜索引擎相关的功能及入口」：
+ * 这里原来是一条「用这段文字搜索」的引擎条（横条上的搜索/打开/快捷键引擎
+ * 逐个排成图标按钮）。搜索引擎相关的一切已整条删除，顶部这条只保留
+ * 「对照 / 排列方向」两颗与识别结果本身相关的按钮，且只在有截图时出现。 */
+.engines {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 8px 12px;
+    background: var(--card);
+    border-bottom: 1px solid var(--line);
+    overflow-x: auto;
+    scrollbar-width: thin;
+}
+.engines::-webkit-scrollbar { height: 6px; }
+.engines::-webkit-scrollbar-thumb {
+    background: color-mix(in srgb, var(--fg-dim) 40%, transparent);
+    border-radius: 3px;
+}
+
+.eng {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    height: 30px;
+    padding: 0 11px;
+    border: 1px solid var(--line);
+    border-radius: 15px;
+    background: transparent;
+    color: var(--fg);
+    font: inherit;
+    font-size: 12.5px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background-color .12s ease, border-color .12s ease;
+}
+.eng:hover { background: var(--hover); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+/* ⚠⚠ 这条是「对照默认关」的真正修复，别删。
+ * 用户报了三次"对照默认是开的"，前两次都当成状态问题去修，没修到点上：
+ *   .shot { display:flex } 是**作者样式**，会盖过浏览器对 hidden 属性的
+ *   默认处理（UA 样式再怎么写也敌不过作者样式）—— 于是 JS 里把
+ *   shot.hidden 设成 true 也没用，截图区照样显示，看起来就是"默认开着对照"。
+ * 加上这条带 !important 的规则，hidden 属性才算真的管用。 */
+[hidden] { display: none !important; }
+
+/* 对照开关打开时的选中态：让用户一眼看出「现在对照是开着的」。 */
+.eng.on {
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+    color: var(--accent);
+}
+
+/* 没有截图时整条工具栏隐藏（hidden 属性配合下面这条 !important 兜底）。 */
+.engines[hidden] { display: none !important; }
+
+/* ------------------------------ 截图对照 ------------------------------ */
+/* 用户要的版式是「上面图片、下面文字，一眼能对上」：
+   框了哪块、认出了什么，并排摆着最直观。图片区做成可折叠，
+   识别出来的就是纯文字、或者用户只想看字的时候，收起来能多留点空间给文本框。 */
+.shot {
+    flex: none;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--card);
+    overflow: hidden;
+}
+
+.shot-head {
+    /* 在竖向版式里 .shot 是列 flex 容器，标题栏不参与伸缩，剩余高度全给图片区 */
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 11px;
+    border-bottom: 1px solid var(--line);
+    font-size: 11.5px;
+    color: var(--fg-dim);
+    cursor: pointer;
+    user-select: none;
+    -webkit-user-select: none;
+}
+.shot-head:hover { background: var(--hover); }
+.shot-head .cap { font-weight: 600; color: var(--fg); }
+.shot-head .dim { flex: 1; text-align: right; }
+.shot-head .chev { flex: none; transition: transform .15s ease; }
+.shot.folded .chev { transform: rotate(-90deg); }
+
+.shot-body {
+    /* 高度给个上限：截图可能很宽很高，不能让它把下面的文本框挤没。
+       超出就按比例缩进这个框里，点开大图能看原尺寸。 */
+    max-height: 260px;
+    padding: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background:
+        repeating-conic-gradient(rgba(128, 128, 128, .12) 0% 25%, transparent 0% 50%)
+        0 0 / 18px 18px;
+}
+.shot.folded .shot-body { display: none; }
+
+.shot-body img {
+    max-width: 100%;
+    max-height: 240px;
+    object-fit: contain;
+    border-radius: 5px;
+    box-shadow: 0 4px 14px -6px rgba(0, 0, 0, .45);
+    cursor: zoom-in;
+}
+
+/* 点图放大：铺满整个窗口，看原尺寸。再点一下收回。 */
+.zoom {
+    position: fixed;
+    inset: 0;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    background: rgba(8, 9, 12, .86);
+    z-index: 40;
+    cursor: zoom-out;
+}
+.zoom.show { display: flex; }
+.zoom img { max-width: 100%; max-height: 100%; border-radius: 6px; }
+
+/* 对照打开时：截图 / 结果 **两块等分高度**（用户要求：体积保持一致）。
+ * ⚠ r47：这里原来是「截图 / 本地 / 百度 三块等分」，因为并行模式用了两个结果框。
+ *   r47 把双框合成**一个**结果框（多引擎时用底部的「显示」段控只看某一家，
+ *   见 renderResultText），所以只剩两块等分。
+ * 同时把截图区原来的「最多占一半」上限放开 —— 两块等分时它只占 1/2，
+ * 仍然不会挤掉文字。 */
+/* ⚠ 两块「宽高完全一致」：宽度本来就都是撑满 .panes（列方向），高度这里等分。
+ *   textarea 上那条 min-height: 90px 在等分场景下必须让位 —— 否则窗口一矮，
+ *   结果框就比截图框高，又变成「大小不统一」。 */
+.panes.with-shot > .shot { flex: 1 1 0; min-height: 0; max-height: none; }
+.panes.with-shot > #text { flex: 1 1 0; min-height: 0; }
+.panes.with-shot > #text { height: auto; }
+.panes.with-shot .shot-body { flex: 1; min-height: 0; }
+.panes.with-shot #shotImg { max-height: 100%; }
+
+/* --------------------- 对照区 / 文本区（两种版式） --------------------- */
+/* 默认「对照」：图在上，字在下。
+   切到「对照(垂直)」不改变结构，只是让截图区更高、文本区更窄，
+   两栏并排看图文对照更直观。两种版式共用同一套 DOM，切个 class 而已，
+   不会出现「切来切去 DOM 乱了」的问题。 */
+.panes {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 12px;
+}
+
+/* 竖向（默认）：截图在上、文本在下。
+ *
+ * ⚠ 用户明确要求：**不管窗口缩到多小，点开「对照」之后截图区最多只能占一半高度**。
+ *   否则窗口一矮，那张原图就会把下面的文本框整个挤没 —— 而文本框才是主角。
+ *
+ * 做法：把 .shot 的 max-height 钉在 .panes 内容高度的 50%（flex 容器高度是确定的，
+ * 百分比能正确解析），并让它内部改成"头部固定 + 图片区吃剩余高度"的列布局，
+ * 图片再按 max-height:100% 缩进去。这样窗口再小，图文也始终是 1:1 分。
+ *
+ * 只作用于**竖向**版式：并排版式（.side）本来就是左右各半，再限制高度反而会把
+ * 图片那一栏压扁。 */
+.panes:not(.side) .shot {
+    flex: 0 1 auto;
+    max-height: 50%;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+}
+.panes:not(.side) .shot-body {
+    /* 两个上限**同时**生效，取更严的那个：
+     *   · 基础规则里的 max-height:260px —— 窗口很大时图片不至于无限长高（保持原观感）；
+     *   · 上面 .shot 的 max-height:50% —— 窗口变矮时把整块对照区压到一半以内。
+     * min-height:0 是关键：flex 子项默认 min-height:auto 会拒绝缩到内容以下，
+     * 那样 50% 的上限就落不到实处（图片仍会把文本框挤没）。 */
+    flex: 1 1 auto;
+    min-height: 0;
+}
+.panes:not(.side) .shot-body img { max-height: 100%; }
+.panes textarea { flex: 1 1 0; }
+
+/* r50：「都看」时一家一个文本框（用户要求）。两三家并排，再多就换行，
+   每个框上面挂一个引擎名的小标题 —— 谁的识别结果一眼就对得上。 */
+.panes-multi {
+    flex: 1 1 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+.panes-multi .pm {
+    flex: 1 1 240px;
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+.panes-multi .pm-cap {
+    font-size: 12px;
+    line-height: 16px;
+    color: var(--fg-dim);
+    padding-left: 2px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.panes-multi .pm textarea { flex: 1 1 0; min-height: 0; }
+.panes-multi .pm.pm-active .pm-cap { color: var(--accent); }
+
+/* 并排「对照」：左右两栏，截图在左、文字在右。
+   宽屏下这么摆最省高度，同一行就能对上图与字。 */
+.panes.side {
+    flex-direction: row;
+    align-items: stretch;
+}
+.panes.side .shot {
+    flex: 1 1 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+}
+.panes.side .shot-body {
+    flex: 1;
+    min-height: 0;
+    max-height: none;
+}
+.panes.side .shot-body img { max-height: 100%; }
+.panes.side textarea { flex: 1 1 0; }
+
+/* 说明条：**独立的全宽横条**，不是 .panes 的子元素。
+   之前把它塞在 .panes 里、靠 `flex-wrap + basis:100%` 换行逼下去，看似能用，
+   实际是错的：.panes 一旦 wrap 就变成「两行 flex 容器」，而 flex 容器默认
+   align-content:stretch 会把**两行都平分整个高度** —— 于是并排版式下
+   截图和文本框各只剩半高，看着像「截图被压扁了 / 文本框只能输出一屏」。
+   移出来之后它根本不参与图文区的布局，两种版式都不会被它影响。 */
+.note {
+    flex: none;
+    /* .panes 自身有 12px 内边距，这里用同样的左右缩进保持视觉对齐 */
+    margin: 0 12px 10px;
+    font-size: 11.5px;
+    line-height: 1.5;
+    color: var(--fg-dim);
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent) 26%, transparent);
+    border-radius: 8px;
+    padding: 7px 10px;
+}
+/* hidden 属性要真的生效：.note 没设 display，但要显式兜住，
+   防止以后有人给它加 display:flex 之类时把 hidden 变成「加了但仍然显示」。 */
+.note[hidden] { display: none; }
+
+/* 底部按钮栏：永远在窗口最下面，横跨整个宽度。
+   不管上面是竖向还是并排版式，它都在最底下，符合用户「按钮放最下面」的要求。
+
+   ★ 窄窗口防文字外溢（用户报过：下面位置不够时按钮字体溢出到按钮外面）：
+     · flex-wrap: wrap —— 一行摆不下就换行，按钮永远完整可点；
+     · .foot 里的按钮/段控/开关一律 flex:none ——  flex 默认会按比例压缩
+       子元素，按钮被压到比文字内容还窄时文字就溢出按钮框了（height 固定
+       30px、文字不折行时尤其明显）。宁可换行也绝不压缩按钮本身。 */
+.foot {
+    flex: none;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+    border-top: 1px solid var(--line);
+    background: var(--card);
+}
+.foot .btn,
+.foot .seg,
+.foot .switch { flex: none; }
+.tip { flex: 1; font-size: 11.5px; color: var(--fg-dim); }
+
+textarea {
+    min-height: 0;
+    width: 100%;
+    padding: 11px 13px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--card);
+    color: var(--fg);
+    font: 13.5px/1.7 "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+    outline: none;
+    resize: none;
+    user-select: text;
+    -webkit-user-select: text;
+}
+textarea:focus { border-color: var(--accent); }
+/* 识别中/失败时给文本框一个柔和的占位感，别让人以为窗口坏了 */
+textarea.ghost { color: var(--fg-dim); }
+
+.btn {
+    height: 30px;
+    padding: 0 13px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: transparent;
+    color: var(--fg);
+    font: inherit;
+    white-space: nowrap;   /* 文字绝不折行 —— 折行会溢出固定高度的按钮框 */
+    cursor: pointer;
+    transition: background-color .12s ease;
+}
+.btn:hover { background: var(--hover); }
+/* 重新识别进行中：按钮禁用 + 显示小转圈，避免用户连点导致并发请求 */
+.btn:disabled,
+.btn.busy { opacity: .55; cursor: progress; }
+/* 文本整理按钮的「已生效」态（需求 5）：亮着 = 这一项当前开着。
+ * 用和 .seg button.on 同一套 accent 配色，亮/灭在明暗两套主题下都能看清。 */
+.btn.on {
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    color: var(--accent);
+    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+    font-weight: 600;
+}
+.btn .spinner {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    margin-right: 5px;
+    border: 2px solid color-mix(in srgb, var(--accent) 30%, transparent);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: ocr-spin .8s linear infinite;
+    vertical-align: -2px;
+}
+@keyframes ocr-spin {
+    to { transform: rotate(360deg); }
+}
+
+/* 「打开链接」按钮：给一点主色，和其它两颗中性按钮区分开，
+   让用户一眼看到「识别到链接了，这里能直接开」 */
+.btn-link {
+    border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+    color: var(--accent);
+    font-weight: 600;
+}
+.btn-link:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+
+/* 「逐条打开链接」开关：默认隐藏 —— 只有识别出的文字里真的含链接时，
+   才由 JS 把它显示出来（用户要求：没链接就没有这颗开关）。 */
+.switch {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    height: 30px;
+    padding: 0 10px 0 6px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    cursor: pointer;
+    user-select: none;
+    -webkit-user-select: none;
+    font-size: 12px;
+    color: var(--fg-dim);
+    transition: background-color .12s ease, border-color .12s ease, color .12s ease;
+}
+.switch:hover { background: var(--hover); }
+/* hidden 属性在 flex 布局里可能被 display 覆盖，这里强制一下 */
+.switch[hidden] { display: none; }
+.switch input { position: absolute; opacity: 0; pointer-events: none; }
+.switch .track {
+    position: relative;
+    width: 32px;
+    height: 18px;
+    border-radius: 9px;
+    background: color-mix(in srgb, var(--fg-dim) 40%, transparent);
+    transition: background-color .15s ease;
+    flex: none;
+}
+.switch .knob {
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: #fff;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, .35);
+    transition: transform .15s ease;
+}
+.switch input:checked ~ .track { background: var(--accent); }
+.switch input:checked ~ .track .knob { transform: translateX(14px); }
+.switch input:checked ~ .label { color: var(--fg); }
+.switch input:focus-visible ~ .track { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.toast {
+    position: fixed;
+    left: 50%;
+    bottom: 18px;
+    transform: translateX(-50%) translateY(8px);
+    padding: 7px 15px;
+    border-radius: 9px;
+    background: rgba(20, 22, 28, .93);
+    color: #fff;
+    font-size: 12.5px;
+    opacity: 0;
+    transition: opacity .18s ease, transform .18s ease;
+    pointer-events: none;
+}
+.toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+/* 结果页底部段控的通用视觉（设置页同一套语言，只是更小巧）。
+ * ⚠ r47：这里原来只服务「点一下换引擎并立刻重识别」那颗段控；
+ *   现在只剩「显示」段控 —— 列**这一轮真正参与**识别的引擎（默认引擎 +
+ *   设置里勾的同时识别），点一下只换**看哪一段**，纯前端、不重识别
+ *   （结果早在手上，见 renderResultText / setShowMode）。 */
+.seg {
+    display: inline-flex;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    overflow: hidden;
+    flex: none;
+}
+.seg button {
+    border: 0;
+    background: transparent;
+    color: var(--fg-dim);
+    font: inherit;
+    font-size: 12px;
+    height: 30px;
+    padding: 0 11px;
+    cursor: pointer;
+    transition: background-color .12s ease, color .12s ease;
+}
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button.on {
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    color: var(--accent);
+    font-weight: 600;
+}
+.seg button:disabled { opacity: .5; cursor: progress; }
+.seg-cap { flex: none; font-size: 11.5px; color: var(--fg-dim); }
+
+/* 重新识别 / 切换引擎时，截图区盖一层「扫描中」动画，提示正在识别。
+ * 只在「对照是开着的、有图」时才看得到；没有图时退化为文本框占位 + 段控转圈。 */
+.shot-body.scanning { position: relative; }
+.shot-body.scanning::before {
+    content: '识别中…';
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 13px;
+    color: #fff;
+    background: rgba(10, 12, 18, .45);
+    z-index: 2;
+}
+.shot-body.scanning::after {
+    content: '';
+    position: absolute;
+    left: 0; right: 0;
+    top: -45%;
+    height: 45%;
+    background: linear-gradient(to bottom,
+        rgba(255, 255, 255, 0) 0%,
+        rgba(255, 255, 255, .38) 50%,
+        rgba(255, 255, 255, 0) 100%);
+    z-index: 3;
+    animation: ocr-scan 1.1s linear infinite;
+}
+@keyframes ocr-scan {
+    from { top: -45%; }
+    to { top: 100%; }
+}
+/* ⚠ r47：这里原来有「并行模式的两个结果框」那组样式（.dual / .dual-box /
+ * .dual-cap）。双框已按用户要求去掉 —— 多引擎的结果现在是**一个**文本区里的
+ * 若干段（每段顶上带【引擎名】，后端 combined_text 拼好的），底部「显示」段控
+ * 只切换"看哪一段"。所以这一组样式整个删掉，不留死代码。 */
+</style>
+</head>
+<body>
+
+<div class="engines" id="engines"></div>
+
+<div class="panes" id="panes">
+    <!-- 截图对照区：Rust 把那一次框选的图推过来就显示，没有就整块藏起来 -->
+    <div class="shot" id="shot" hidden>
+        <div class="shot-head" id="shotHead" title="点击展开 / 收起截图">
+            <span class="cap">截取的原图</span>
+            <span class="dim" id="shotDim"></span>
+            <span class="chev">▾</span>
+        </div>
+        <div class="shot-body" id="shotBody">
+            <img id="shotImg" alt="框选截取的原图" title="点击查看原尺寸">
+        </div>
+    </div>
+
+    <textarea id="text" spellcheck="false" placeholder="识别结果会出现在这里…"></textarea>
+
+    <!-- r50（用户要求）：「都看」时**一家一个文本框**，不要合并成一个框。
+         这里就是那几个框的容器；只显示一家（默认引擎那一档）时仍然用上面那个 #text。
+         r47 曾经把双框合成一个，用户看到多引擎时全挤在一个框里，要求改回分开显示。 -->
+    <div class="panes-multi" id="panesMulti" hidden></div>
+
+    <!-- ⚠ r47 曾把「并行模式的两个框」合成**一个**文本区（多引擎时里面是若干段、
+         每段顶上带【引擎名】，底部「显示」段控切换看哪一段）。
+         r50 按用户要求改回来：点「都看」时是**一家一个文本框**（见 #panesMulti），
+         只显示一家时才用上面这一个框。 -->
+</div>
+
+<!-- 说明条：比如「已自动改用标准版识别」。默认藏起来，Rust 那边有话说才推过来。
+     放在**文字区下面、按钮栏上面**，作为独立横条 —— 既不挤占图文对照区的高度，
+     又不会把识别出的第一行顶出视野。 -->
+<div class="note" id="note" hidden></div>
+
+<div class="foot">
+    <!-- 「显示」段控：**只列这一轮真正参与识别的引擎**（默认引擎 + 设置里勾的
+         「同时识别」），点一下只看某一家 / 都看。
+         ⚠ 纯前端切换 —— 每段结果早在推来的 parts 里，不重新识别、不用等。
+         ⚠ 只参与一家时整块不出现（没得切）；没参与的引擎**一个都不列**
+           —— 这正是用户 r47 报的 bug：关掉并行后底部还挂着一颗「本地」可点。
+         按钮由 JS 按参与名单生成（buildShowSeg），不写死在 HTML 里。 -->
+    <span class="seg-cap" id="showCap" hidden>显示</span>
+    <div class="seg" id="ocrShowSeg" hidden title="只看哪一段（已有结果，不会重新识别）"></div>
+
+    <!-- 「打开链接」按钮：识别出的文字里含链接时才出现（用户要求：没链接就不显示）。
+         点它 = 直接打开链接，**忽略**其它非链接文字，不是拿链接当搜索词去搜。 -->
+    <button class="btn btn-link" id="btnOpenLinks" hidden title="打开识别到的链接">
+        <span id="btnOpenLinksText">打开链接</span>
+    </button>
+
+    <!-- 「一条链接一个标签页」开关：默认关，同样只有识别到链接时才出现。
+         打开后，点引擎按钮 / 打开链接都会把这些链接逐条开成新标签页。 -->
+    <label class="switch" id="linkSwitch" hidden
+           title="一条链接开一个标签页（默认关）">
+        <input type="checkbox" id="autoOpenLinks">
+        <span class="track"><span class="knob"></span></span>
+        <span class="label">逐条开标签页</span>
+    </label>
+
+    <button class="btn" id="btnCopy" title="划了一段就复制那一段，没划就复制全部">复制</button>
+    <!-- 去空格按钮：不重新识别，只对识别原文再清一遍空格。
+         智能 = 只留「单词↔单词」「单词↔中文」的空格（默认管线的口径）；
+         强力 = 除换行外删掉一切空格。选过的模式后端会记住，
+         之后切引擎回放缓存结果时也按这个模式出文本。 -->
+    <button class="btn" id="btnSmartSpace" title="只保留单词与单词、单词与中文之间的空格，其余全部去掉（并把多余空格折叠成一个）">智能去空格</button>
+    <button class="btn" id="btnForceSpace" title="删掉识别文本里的所有空格（换行保留）">强力去空格</button>
+    <!-- 需求 5：文本整理。三颗按钮各管一件事、**可叠加**（后端是一套位掩码），
+         再点一下就是关掉；亮着 = 这一项当前生效。
+         它们都只拿后端存着的识别**原文**重整理一遍，不重新识别、不重新框选。 -->
+    <button class="btn" id="btnGarbage" title="去掉识别噪声：乱码占位符、控制字符、零宽字符、私用区字符。正常标点、emoji、生僻字不动">去乱码</button>
+    <button class="btn" id="btnWidth" title="全角字母数字与标点收成半角（Ａ→A、１２３→123、（→(、，→,）；中文标点。、《》保持原样">全角→半角</button>
+    <button class="btn" id="btnUnwrap" title="把因为排版被断开的行接回一段（PDF、窄栏复制最常见）；句末标点结尾、列表、编号、表格的换行不动">合并换行</button>
+    <button class="btn" id="btnRerun" title="用同一张图重新识别一次">重新识别</button>
+    <button class="btn" id="btnClose">关闭</button>
+</div>
+
+<div class="toast" id="toast"></div>
+<div class="zoom" id="zoom"><img id="zoomImg" alt="原尺寸截图"></div>
+
+<script src="shared.js"></script>
+<script>
+const invoke = window.__TAURI__.core.invoke;
+const listen = window.__TAURI__.event.listen;
+const $ = (id) => document.getElementById(id);
+
+/* 打开链接的统一出口。
+ *  单独抽一层是为了给页内自检留一个观察点：自检要断言「开关关着只递 1 条、
+ *  开着递全部」，但它不能真的去开浏览器（那会打扰桌面）。
+ *  自检临时把 `openLinksSink` 换成收集器，数一数递过去几条即可。
+ *  生产路径下它就是个直通。 */
+let openLinksSink = (links) => invoke('open_links', { links });
+
+/* 复制走的统一出口。同样是给自检留观察点：自检要断言"递出去的是全文、
+ * 而且选中了也还是全文"，但它不能真去写系统剪贴板（会覆盖用户正在用的内容）。
+ * 生产路径下它就是个直通。 */
+let copySink = (text) => invoke('copy_text', { text });
+
+let CONF = null;
+/** 图文对照开关。**默认关** —— 用户明确要求：
+ *  「对照功能默认不启动，点一下对照开关之后才启用」。
+ *  关着的时候结果窗口只显示识别出的文字，文本框占满整块地方；
+ *  点开之后才把框选的原图摆出来做图文对照。 */
+let compareOn = false;
+/// 对照打开时的版式：false = 图在上、字在下；true = 图左、字右。
+let sideBySide = false;
+
+/** 这一次有没有截图可对照（跟「对照开关开没开」是两件事）。 */
+function hasShot() {
+    const img = $('shotImg');
+    return !!(img && img.getAttribute('src'));
+}
+
+function toast(msg) {
+    const t = $('toast');
+    t.textContent = msg;
+    t.classList.add('show');
+    clearTimeout(toast._t);
+    toast._t = setTimeout(() => t.classList.remove('show'), 1500);
+}
+
+/** 当前要拿哪段文字：
+ *  文本框里划了选区就用选区，没划就用全文 —— 「复制」按钮走的就是这段口径。 */
+function textToSearch(ta) {
+    ta = ta || curTa();
+    const a = ta.selectionStart, b = ta.selectionEnd;
+    if (typeof a === 'number' && b > a) {
+        const picked = ta.value.slice(a, b).trim();
+        if (picked) return picked;
+    }
+    return ta.value.trim();
+}
+
+/* ------------------------------------------------------------------ */
+/* 链接：识别 → 决定要不要显示那颗按钮/开关 → 逐条打开                  */
+/* ------------------------------------------------------------------ */
+
+/** 从文本里抠链接。和 Rust 侧 `extract_links` 保持一致的口径：
+ *  认 http(s):// 和 www. 开头的；中文/全角标点会自然切断 URL。
+ *  这里在前端也算一份，是为了**立刻**决定按钮显不显示，
+ *  不用等一次 IPC 往返（那会让按钮"一闪才出来"）。 */
+function linksIn(text) {
+    const out = [];
+    const re = /https?:\/\/[^\s"'<>【】（）()「」《》，。；：！？、]+|www\.[^\s"'<>【】（）()「」《》，。；：！？、]+/gi;
+    let m;
+    while ((m = re.exec(text)) !== null) {
+        let u = m[0].replace(/[.,;:!?)\]}'"]+$/, '');
+        if (!/^https?:\/\//i.test(u)) u = 'https://' + u;
+        if (!out.includes(u)) out.push(u);
+    }
+    return out;
+}
+
+/** 「当前要处理的文字」= 那个文本区里的内容（r47 起只有一个框）。
+ *
+ *  ⚠ 这段取词逻辑以前在 `syncLinkControls` 和 `openDetectedLinks` 里**各抄了一份**，
+ *    改一处漏一处就会出现「按钮亮了、点下去却说这段文字里没有链接」这种自相矛盾，
+ *    所以统一走这里。 */
+function currentText() {
+    return (curTa() || {}).value || '';
+}
+
+/** 同步「按钮/开关显不显示」。
+ *  用户的硬要求：识别文字里**没有链接**时，这颗按钮不能出现。
+ *  另外一旦文字里出现链接，就把按钮亮出来（有链接才谈得上打开）。 */
+function syncLinkControls() {
+    // 取词走 currentText()（r47 起就是那一个文本区，多引擎时按"都看"拼好的那段）
+    const links = linksIn(currentText());
+    const has = links.length > 0;
+    $('btnOpenLinks').hidden = !has;
+    $('linkSwitch').hidden = !has;
+    if (has) {
+        // 按钮上标明「按现在的开关设置会开几条」，用户点之前心里有数
+        const n = $('autoOpenLinks').checked ? links.length : 1;
+        $('btnOpenLinksText').textContent =
+            n > 1 ? `打开 ${n} 条链接` : '打开链接';
+    }
+}
+
+/** 打开识别到的链接。
+ *
+ *  用户定的规则（很明确）：
+ *    · 文案里中文和网址混在一起时，**只开链接、忽略其它文字** —— 不拿它去搜；
+ *    · 旁边的开关**关**着 → 只开**第一条**；
+ *    · 开关**开**着   → 全部打开，**一条链接一个标签页**。 */
+async function openDetectedLinks() {
+    const all = linksIn(currentText());
+    if (!all.length) { toast('这段文字里没有链接'); return; }
+    const batch = $('autoOpenLinks').checked;
+    const links = batch ? all : all.slice(0, 1);
+    await openLinksSink(links).catch(() => {});
+}
+
+/** 顶部工具栏。
+ *
+ *  用户要求「彻底移除 OCR 结果页里所有与搜索引擎相关的功能及入口」——
+ *  原来这里是一条「用这段文字搜索」的引擎图标条，现已整条删除。
+ *  这条只剩**图文对照**相关控件：「对照」开关 + 「左右/上下」排布方向，
+ *  而且**没有截图时整条收起**（没图就没什么可对照的）。 */
+function renderTopBar() {
+    const box = $('engines');
+    box.textContent = '';
+    if (!hasShot()) {
+        box.hidden = true;   // 没截图：对照工具栏不该出现
+        return;
+    }
+    box.hidden = false;
+    box.appendChild(makeCompareButton());
+    if (compareOn) box.appendChild(makeLayoutButton());
+    syncCompareUI();     // 文案/选中态/显隐统一由它刷，避免两处各写一份
+}
+
+/** 「对照」开关按钮。 */
+function makeCompareButton() {
+    const tog = document.createElement('button');
+    tog.className = 'eng';
+    tog.type = 'button';
+    tog.id = 'btnCompare';
+    tog.addEventListener('click', () => {
+        compareOn = !compareOn;
+        applyLayout();
+        syncCompareUI();
+    });
+    return tog;
+}
+
+/** 「左右排列 / 上下排列」按钮。只在对照开着时存在。 */
+function makeLayoutButton() {
+    const dir = document.createElement('button');
+    dir.className = 'eng';
+    dir.type = 'button';
+    dir.id = 'btnLayout';
+    dir.addEventListener('click', () => {
+        sideBySide = !sideBySide;
+        applyLayout();
+        syncCompareUI();
+    });
+    return dir;
+}
+
+/** 把对照那两颗按钮刷成当前状态。
+ *
+ *  ⚠ 刻意**就地更新**，不调 renderTopBar() 重建。
+ *    重建会把用户刚点过的那颗按钮换成新节点：界面闪一下、焦点丢掉，
+ *    而且外部（比如页内自检）手里那份引用会变成游离节点、读到旧文案。 */
+function syncCompareUI() {
+    const tog = $('btnCompare');
+    if (tog) {
+        tog.classList.toggle('on', compareOn);
+        tog.textContent = compareOn ? '收起对照' : '对照';
+        tog.title = compareOn
+            ? '收起原图，只看识别出的文字'
+            : '把框选的原图摆出来，和识别文字对照着看（默认关）';
+    }
+    let dir = $('btnLayout');
+    if (!compareOn) {
+        if (dir) dir.remove();       // 收起对照了，方向按钮也没意义
+        return;
+    }
+    if (!dir) {
+        dir = makeLayoutButton();
+        $('engines').appendChild(dir);
+    }
+    dir.textContent = sideBySide ? '上下排列' : '左右排列';
+    dir.title = sideBySide
+        ? '现在是图左字右，点一下换成图在上字在下'
+        : '现在是图在上字在下，点一下换成图左字右';
+}
+
+/** 版式应用：把「对照开关 / 排布方向 / 有没有图」三件事落成 class。
+ *  只往 #panes 和 #shot 上切 class，DOM 结构不动 —— 切来切去也不会乱。 */
+function applyLayout() {
+    const panes = $('panes');
+    const shot = $('shot');
+    const show = compareOn && hasShot();
+    shot.hidden = !show;
+    panes.classList.toggle('side', show && sideBySide);
+    // 三块（截图 / 本地 / 百度）等分高度 —— 见 CSS 里 .panes.with-shot 那组规则
+    panes.classList.toggle('with-shot', !!show);
+    invoke('log_msg', {
+        msg: '[ocr] compare=' + compareOn + ' side=' + sideBySide + ' show=' + show,
+    }).catch(() => {});
+}
+
+/* ⚠ 页面一打开就强制应用一次「对照 = 关」。
+ *  用户报过"对照默认是开着的"—— 代码里 compareOn 明明是 false，多半是
+ *  WebView 复用了上一轮的 DOM 状态（#shot 的 hidden 被残留）。这里在启动时
+ *  就把版式落到「关」上，不管之前发生过什么，默认一定是收起的。 */
+applyLayout();
+
+/* 「复制」：**划了选区就只复制那一段**，没划就复制全文。用户要的就是这个直觉：
+ *    · 想把整段拿走 → 别选，直接点「复制」；
+ *    · 只想拿走其中一句 → 先划出来，再点「复制」。
+ *
+ *  （早期版本这里叫「复制全部」、刻意无视选区。用户后来明确要求改成
+ *    「有选中就只复制选中的」，所以口径统一到 textToSearch() 上了。 */
+$('btnCopy').addEventListener('click', async () => {
+    // r47：只有一个结果框，复制它当前的内容（划了选区就只复制那截）
+    const ta = curTa();
+    const a = ta.selectionStart, b = ta.selectionEnd;
+    const hasSel = typeof a === 'number' && b > a;
+    // textToSearch() 已经处理了「选区只有空白就退回全文」，直接复用。
+    const picked = textToSearch(ta);
+    if (!picked) {
+        toast('没有可复制的文字');
+        return;
+    }
+    // 和 openLinksSink 一样留个观察点：自检要断言"递出去的是哪一段"，
+    // 但不能真去动系统剪贴板（会污染用户正在用的剪贴板）。
+    copySink(picked);
+    toast(hasSel && picked.length < ta.value.trim().length
+        ? `已复制选中的 ${picked.length} 个字`
+        : `已复制全部 ${picked.length} 个字`);
+});
+
+// 「打开链接」：直接把识别出的链接打开，忽略其它文字（中文照旧留在原地）
+$('btnOpenLinks').addEventListener('click', openDetectedLinks);
+
+// 「逐条开标签页」开关（默认关）。关=只开第一条，开=全部逐条开。
+// 切换之后要顺手刷新按钮文案（「打开链接」↔「打开 N 条链接」）。
+$('autoOpenLinks').addEventListener('change', () => {
+    const on = $('autoOpenLinks').checked;
+    toast(on ? '已开启：一条链接开一个标签页' : '已关闭：只打开第一条链接');
+    syncLinkControls();
+    invoke('log_msg', { msg: '[ocr] autoOpenLinks=' + on }).catch(() => {});
+});
+
+$('btnClose').addEventListener('click', () => invoke('close_ocr_window'));
+
+/* 文本整理按钮（需求 5）：都只拿后端存着的识别**原文**重整理一遍，
+ * 不重新识别、不重新框选。后端返回整理后的开关状态，这里据此点亮按钮 ——
+ * 亮着 = 这一项当前生效；布尔项再点一下就是关掉。
+ *
+ * mode：
+ *   · 'smart' / 'force' / 'spaceoff' —— 空格那项的三态（互斥，所以它们不是
+ *     "亮/灭"关系，而是"哪个档位亮"）；
+ *   · 'garbage' / 'width' / 'unwrap' —— 布尔项。`on` 传**期望状态**，不让后端
+ *     猜"取反"：按钮的亮灭是这里渲染的，让后端按取反猜，两边一旦岔开就会
+ *     出现"点了没反应"或"亮着但没生效"，那种 bug 最难查。 */
+async function recleanWith(mode, btn, on) {
+    // scanning 期间不许再起一次（见 setScanning 的注释：会并发跑两次 OCR）
+    if (btn.disabled || scanning) return;
+    const ta = $('text');
+    const saved = ta.value;
+    btn.disabled = true;
+    const origText = btn.innerHTML;
+    btn.innerHTML = '<span class="spinner"></span>处理中';
+    try {
+        const st = await invoke('ocr_reclean', {
+            mode,
+            on: (typeof on === 'boolean' ? on : null),
+        });
+        syncCleanBtns(st);
+        toast(cleanToast(mode, st));
+    } catch (e) {
+        ta.value = saved;
+        toast('文本整理失败：' + ((e && e.message) || e));
+    } finally {
+        // ⚠ 还原成**当前**该有的禁用态，而不是无条件 false：这一趟进行中可能
+        //   有另一路（段控）开了扫描，那时这些按钮必须保持禁用。
+        btn.disabled = scanning;
+        btn.innerHTML = origText;
+    }
+}
+
+/** 后端返回的整理开关 → 按钮的亮/灭。 */
+function syncCleanBtns(st) {
+    if (!st) return;
+    for (const [id, key] of [['btnGarbage', 'garbage'], ['btnWidth', 'width'], ['btnUnwrap', 'unwrap']]) {
+        const b = $(id);
+        if (b) b.classList.toggle('on', !!st[key]);
+    }
+    for (const [id, v] of [['btnSmartSpace', 'smart'], ['btnForceSpace', 'force']]) {
+        const b = $(id);
+        if (b) b.classList.toggle('on', st.space === v);
+    }
+}
+
+/** 整理完成后的提示语。布尔项按**结果状态**说"已开启/已关闭"，别写死。 */
+function cleanToast(mode, st) {
+    switch (mode) {
+        case 'smart': return '已智能去除多余空格（保留单词间空格）';
+        case 'force': return '已强力清除全部空格';
+        case 'spaceoff': return '已关闭空格处理';
+        case 'all': return '已应用全部整理';
+        case 'none': return '已关闭全部整理';
+        default: {
+            const name = { garbage: '去乱码', width: '全角→半角', unwrap: '合并换行' }[mode] || mode;
+            return (st && st[mode] ? '已开启' : '已关闭') + '「' + name + '」';
+        }
+    }
+}
+
+$('btnSmartSpace').addEventListener('click', (e) => recleanWith('smart', e.currentTarget));
+$('btnForceSpace').addEventListener('click', (e) => recleanWith('force', e.currentTarget));
+// 布尔项：期望状态 = 当前按钮亮着取反（按钮的亮灭就是这里渲染的，
+// 拿它当"当前状态"最不容易和后端岔开）
+for (const [id, mode] of [['btnGarbage', 'garbage'], ['btnWidth', 'width'], ['btnUnwrap', 'unwrap']]) {
+    $(id).addEventListener('click', (e) => {
+        const b = e.currentTarget;
+        recleanWith(mode, b, !b.classList.contains('on'));
+    });
+}
+
+/* 「重新识别」：用 OCR 窗口里现存的那张图重跑一次（不重新框选）。
+ *  重新识别进行中：按钮 busy + 文本框显示「正在重新识别…」。失败时把原因写回
+ *  文本框，按钮恢复，可继续点。成功时按既有通道替换识别结果。 */
+$('btnRerun').addEventListener('click', async () => {
+    const btn = $('btnRerun');
+    const ta = $('text');
+    // scanning 期间不许再起一次（见 setScanning 的注释：会并发跑两次 OCR）
+    if (btn.disabled || scanning) return;
+    const origText = btn.innerHTML;
+    btn.disabled = true;
+    btn.classList.add('busy');
+    btn.innerHTML = '<span class="spinner"></span>识别中';
+    const saved = ta.value;
+    ta.value = '正在重新识别…';
+    ta.classList.add('ghost');
+    try {
+        const out = await invoke('ocr_rerun');
+        // 后端把结果推过来后会自动填到文本框；这里只兜底：万一没推，至少把
+        // 「正在重新识别…」这句话清掉，别一直挂着。
+        if (ta.value === '正在重新识别…') {
+            ta.value = saved;
+            ta.classList.remove('ghost');
+        }
+        toast(typeof out === 'string' && out ? out : '已重新识别');
+    } catch (e) {
+        ta.value = saved;
+        ta.classList.remove('ghost');
+        toast('重新识别失败：' + (e && e.message || e));
+    } finally {
+        // ⚠ 同 recleanWith：还原成当前该有的禁用态（扫描中要保持禁用）
+        btn.disabled = scanning;
+        btn.classList.remove('busy');
+        btn.innerHTML = origText;
+    }
+});
+
+/* -------------------- 结果页：这一轮跑了哪几家（r47） --------------------
+ *
+ * ⚠ r47 改口径（用户原话）：「把双引擎并行识别，改为选择 OCR 引擎同时识别……
+ *   同时也只会显示自己选择的那一个」。于是结果页不再有「点一下换引擎并重识别」
+ *   那颗段控 —— 它会把**没参与**的引擎也列出来（关掉并行后底部还挂着一颗
+ *   「本地」可点，正是用户报的 bug）。改成：
+ *     · 参与一家 → 一个文本区，底部什么段控都没有；
+ *     · 参与多家 → 一个文本区里若干段（各带【引擎名】标注），底部「显示」段控
+ *                  只列**参与名单**，点一下只看某一家 / 都看（纯前端切换）。
+ *   参与名单 = 默认引擎 + 设置里「同时识别」勾的那几家，与后端
+ *   `main.rs::ocr_engine_plan()` 同一个口径 —— 跑哪几家永远由后端说了算，
+ *   前端只拿它来决定"显示什么"。
+ *   想换引擎请去设置页（默认引擎的唯一出处）：用户报过"在结果页点一下就改了
+ *   默认引擎"的 bug，这里索性不再提供这个入口。 */
+let scanning = false;
+
+/** id → 引擎显示名。名单从**后端注册表**来（前端不维护引擎名单，否则加一家
+ *  引擎就要改两处）；没拉到时先用 id 顶着，段控照样能用，只是名字丑一点。 */
+const OCR_NAMES = {};
+let OCR_NAMES_TRIED = false;
+
+function engLabel(id) {
+    if (id === 'windows') return '本地识别';
+    return OCR_NAMES[id] || id;
+}
+
+function pullEngineNames() {
+    if (OCR_NAMES_TRIED) return;
+    OCR_NAMES_TRIED = true;
+    invoke('ocr_engines_list')
+        .then((l) => {
+            for (const e of (l || [])) OCR_NAMES[e.id] = e.name;
+            renderResultText(true);   // 名字到了，重画段控（一个字都不动）
+        })
+        .catch(() => {});
+}
+
+/** 这一轮真正参与识别的引擎名单（默认引擎在前，其余跟设置里勾的那份顺序）。 */
+function runPlan() {
+    const cur = (CONF && CONF.ocrEngine) || 'baidu';
+    const extra = CONF && Array.isArray(CONF.ocrMulti) ? CONF.ocrMulti : [];
+    const plan = [cur];
+    for (const e of extra) {
+        if (e && plan.indexOf(e) < 0) plan.push(e);
+    }
+    return plan;
+}
+
+/** 按**参与名单**重建底部「显示」段控：每家一颗 + 「都看」。
+ *
+ *  只参与一家时整块藏起来（连左边「显示」两个字）—— 没得切，摆一排单按钮
+ *  只会让人以为还能点出别的东西。
+ *  ⚠ 名单不一样才重建（比对现有按钮的 `data-m` 序列）：每来一次推送就重建一次
+ *    innerHTML 会把用户正按着的那颗按钮抽掉，观感是"闪一下、点了个寂寞"。 */
+function buildShowSeg(plan) {
+    const seg = $('ocrShowSeg');
+    const cap = $('showCap');
+    if (!seg) return;
+    const many = plan.length > 1;
+    if (cap) cap.hidden = !many;
+    seg.hidden = !many;
+    if (!many) {
+        seg.innerHTML = '';
+        return;
+    }
+    const want = plan.concat(['all']);
+    const have = Array.from(seg.querySelectorAll('button')).map((b) => b.dataset.m);
+    if (have.length !== want.length || !have.every((v, i) => v === want[i])) {
+        seg.innerHTML = '';
+        for (const id of plan) {
+            const b = document.createElement('button');
+            b.type = 'button';
+            b.dataset.m = id;
+            b.textContent = engLabel(id);
+            b.title = '只看「' + engLabel(id) + '」这一段（已有结果，不会重新识别）';
+            seg.appendChild(b);
+        }
+        const all = document.createElement('button');
+        all.type = 'button';
+        all.dataset.m = 'all';
+        all.textContent = '都看';
+        all.title = '所有参与识别的结果一起看';
+        seg.appendChild(all);
+    }
+    // 名单里出现了还没拿到名字的引擎 → 去把名字拉回来（只拉一次）
+    if (plan.some((id) => id !== 'windows' && !OCR_NAMES[id])) pullEngineNames();
+    syncShowSeg();
+}
+
+function syncShowSeg() {
+    const seg = $('ocrShowSeg');
+    if (!seg) return;
+    for (const b of seg.querySelectorAll('button')) {
+        b.classList.toggle('on', b.dataset.m === ocrShowMode);
+    }
+}
+
+/* -------------------- 「显示」段控：只看某一家 / 都看（r47） --------------------
+ *
+ * 用户要求（r47）：「同时也只会显示自己选择的那一个」。
+ *
+ * 这一档切换是**纯前端**的：每段结果（parts）早在推送里就到手了，点一下只是
+ * 换个渲染方式 —— 不 invoke、不重新识别、不用等。
+ * 某一段还没出来（另一个引擎走网络、还没回来）就先给一句明确的话，
+ * 等它到了自动补上（`renderResultText` 会按 parts 重画）。
+ * 参与的只有一家时，`ocrShowMode` 恒为 'all'（没有可切的）。 */
+let ocrParts = [];        // [{eng,label,text}]，顺序 = 参与名单顺序
+/** 每个引擎最后一次拿到的**非空**结果 —— 防止某一帧空数据把已有结果冲掉。
+ *  以前是写死的 `{windows, baidu}` 两个键（双框时代的遗留），现在按引擎 id 存。 */
+const lastPart = {};
+let ocrCombined = '';     // 后端拼好的完整文本（各段带【引擎名】标注）
+let ocrShowMode = 'all';  // 'all' 或某个引擎 id
+let ocrShowTouched = false;   // 用户手动选过显示档之后就不再自动改
+
+function partText(eng) {
+    const p = ocrParts.find((x) => x && x.eng === eng);
+    return p ? String(p.text || '') : '';
+}
+
+/** 一轮识别结束后，结果框默认显示哪一档。
+ *
+ *  用户口径（r49 定稿，2026-10-16 原话）：
+ *    「如果我先选硅基流动，然后在里面选同时显示本地 ocr，那这时候硅基流动没跑出来，
+ *      ocr 窗口会先跳到本地 ocr，照理来说就算没跑出来也应该还是硅基流动的窗口，
+ *      只是说我可以可选的点本地 ocr，而不能你自作主张自动给我跳到本地 ocr」。
+ *
+ *  所以默认（`ocrStayDefault` 开，r49 起默认就是开）**永远停在默认引擎那一档**：
+ *    · 它还没回来 → 就地显示它的等待文案（placeholder「<引擎名> 的结果还没出来…」），
+ *      回来了原地填上 —— 绝不替用户跳到别家，也绝不"先显示别家、等它回来再切回去"；
+ *    · 想看他家，自己点底部段控那颗胶囊（那是用户主动的动作，见 setShowMode）。
+ *
+ *  把开关关掉 = 旧行为（谁先出字先显示谁；默认引擎出字后再自动切回它）——
+ *  留给"我就是想先看到点东西"的人。
+ */
+function pickDefaultMode(plan) {
+    /* r78：用户原话「如果在设置文字识别当中，我打开了多引擎的同时识别，
+     * 那么识别出来的文字就应该同时以多个文本框来呈现不同识别引擎的结果」。
+     *
+     * 所以**同时识别（参与 ≥ 2 家）时一律进「都看」多框并排**，
+     * 不再按"固定在默认引擎"只显示一家 —— 那条口径（r49）是为"一家在跑时
+     * 别自作主张跳到别家"定的，和"多引擎要并排看"不冲突：
+     *   · 多框并排里，默认引擎那一格仍然是它自己的位置（plan 第一位），
+     *     谁都不会被别家的字顶掉；
+     *   · 用户想放大看某一家，底部段控那颗胶囊照样能切（那是主动动作）。
+     *
+     * `ocrStayDefault` 开关在这里**不再改变"多框还是单框"**，它仍然管
+     * "单框时停在谁"（见下面关掉开关的那条旧口径）——语义没丢，只是不再
+     * 用单框去承载多引擎结果。 */
+    if (plan.length >= 2) return 'all';
+    const cur = (CONF && CONF.ocrEngine) || 'baidu';
+    // 缺省当"开"：设置里没广播这个键时也走新口径（用户要的默认）
+    const stay = !CONF || CONF.ocrStayDefault !== false;
+    if (stay) {
+        /* 只剩一家参与时，就显示它（plan 第一位就是默认引擎）。
+         * 万一它被配置清洗掉了，退回名单第一位 —— 仍然是"只显示一家、不来回跳"。 */
+        return plan.indexOf(cur) >= 0 ? cur : (plan[0] || 'all');
+    }
+    // —— 关掉开关：旧口径 ——
+    if (plan.indexOf(cur) >= 0 && partText(cur).trim()) return cur;
+    for (const e of plan) {
+        if (partText(e).trim()) return e;
+    }
+    return 'all';
+}
+
+/** 当前「活动」的结果框。r47 只剩一个文本区，恒为 `#text`
+ *  （r50：「都看」改成一家一个框，于是又需要它了）。 */
+let activeTa = null;
+function curTa() {
+    // 活动框 = 用户刚点/聚焦过的那个；它被藏起来或已经不在 DOM 里就退回 #text
+    if (activeTa && activeTa.isConnected && !activeTa.hidden
+        && activeTa.offsetParent !== null) return activeTa;
+    return $('text');
+}
+function markActiveTa(el) { if (el) activeTa = el; }
+
+// 点/聚焦文本框，它就成为「活动框」（复制等按钮作用于它）
+{
+    const el = $('text');
+    if (el) {
+        el.addEventListener('focus', () => markActiveTa(el));
+        el.addEventListener('pointerdown', () => markActiveTa(el));
+    }
+}
+
+/** 按当前显示档把结果写进文本框。
+ *
+ *  `keepText = true` 时**只摆版式**（段控选中态 / 链接按钮），一个字都不动。
+ *  配置广播（`qs://config`）走这条 —— 用户在设置页拖个滑块、勾一家「同时识别」，
+ *  广播随时会来；这时若把结果框按 parts 重写一遍，会把用户正在框里改的文字
+ *  冲掉（`setText` 把空串当合法结果写进去，`ocrCombined` 为空时更是一下清空）。 */
+/* ============================================================================
+ *  「都看」= 一家一个文本框（r50，用户要求）
+ *
+ *  用户原话：「识别结果页面，如果点击都看就会把多个引擎内容直接用一个文本框来
+ *  展示，应该用多个文本框展示多个引擎的搜索结果。」
+ *
+ *  · 只在「都看」且本轮参与 ≥ 2 家时启用；只显示一家（默认引擎那一档、
+ *    或用户点了某一家的胶囊）时仍然是 #text 那一个框。
+ *  · 每个框顶上挂引擎名（.pm-cap），下面是那个引擎自己的结果；
+ *    还没回来的显示它自己的等待文案，不会拿别家的字填进去。
+ *  · 复制 / 打开链接 / 文本整理都作用于「活动框」（curTa()）——就是用户刚点过的
+ *    那个，所以这些按钮在哪个框上用，就是哪个框的结果。
+ * ========================================================================== */
+let multiOn = false;
+
+function setMultiLayout(on, plan, keepValues) {
+    multiOn = !!on;
+    const box = $('text');
+    const wrap = $('panesMulti');
+    if (!box || !wrap) return;
+    box.hidden = multiOn;
+    wrap.hidden = !multiOn;
+    if (!multiOn) { wrap.innerHTML = ''; wrap.dataset.sig = ''; return; }
+    const sig = plan.join('|');
+    if (wrap.dataset.sig !== sig) {
+        wrap.dataset.sig = sig;
+        wrap.innerHTML = '';
+        for (const e of plan) {
+            const d = document.createElement('div');
+            d.className = 'pm';
+            d.dataset.eng = e;
+            const cap = document.createElement('div');
+            cap.className = 'pm-cap';
+            cap.textContent = engLabel(e);
+            const ta = document.createElement('textarea');
+            ta.setAttribute('spellcheck', 'false');
+            ta.placeholder = engLabel(e) + ' 的结果还没出来…';
+            ta.addEventListener('focus', () => markActiveTa(ta));
+            ta.addEventListener('pointerdown', () => {
+                markActiveTa(ta);
+                for (const o of wrap.querySelectorAll('.pm')) o.classList.remove('pm-active');
+                d.classList.add('pm-active');
+            });
+            d.appendChild(cap);
+            d.appendChild(ta);
+            wrap.appendChild(d);
+        }
+    }
+    for (const d of wrap.querySelectorAll('.pm')) {
+        const e = d.dataset.eng;
+        const ta = d.querySelector('textarea');
+        if (!ta) continue;
+        if (keepValues) { ta.classList.toggle('ghost', !ta.value); continue; }
+        const v = partText(e) || lastPart[e] || '';
+        if (ta.value !== v) ta.value = v;
+        ta.classList.toggle('ghost', !v);
+    }
+}
+
+function renderResultText(keepText) {
+    const plan = runPlan();
+    const many = plan.length > 1;
+    buildShowSeg(plan);
+    if (!many) {
+        // 只参与一家：没有"看哪一段"这回事
+        ocrShowMode = 'all';
+        ocrShowTouched = false;
+        syncShowSeg();
+    } else if (!ocrShowTouched) {
+        const d = pickDefaultMode(plan);
+        if (d !== ocrShowMode) {
+            ocrShowMode = d;
+            syncShowSeg();
+        }
+    }
+    /* 每段的**非空**结果记进 lastPart。
+     *
+     * ⚠ 关键：**已经拿到过的结果不许被空数据冲掉**。
+     *   以前每次推送/拉取都直接按 parts 重写 —— 万一某一帧 parts 里少了某一家
+     *   （推送时序、缓存代次切换等），那一段会被写成"还没出来…"，用户看到的就是
+     *   「切一下档位，这家又被重新识别了一遍」。
+     *   现在只有拿到新结果才更新；从来没拿到过才显示等待文案（placeholder）。 */
+    for (const e of plan) {
+        const t = partText(e);
+        if (t) lastPart[e] = t;
+    }
+    const ta = $('text');
+    // r50：「都看」+ 参与 ≥ 2 家 → 一家一个文本框（见 setMultiLayout 的注释）
+    const multiBox = ocrShowMode === 'all' && many;
+    setMultiLayout(multiBox, plan, keepText);
+    if (ta && !keepText && !multiBox) {
+        // 「都看」= 后端拼好的完整文本；只看某一家 = 那一段（拿不到就用上一帧的非空值）
+        const v = ocrShowMode === 'all' || !many
+            ? ocrCombined
+            : (partText(ocrShowMode) || lastPart[ocrShowMode] || '');
+        setText(v);
+        ta.placeholder = ocrShowMode === 'all' || !many
+            ? '识别结果会出现在这里…'
+            : engLabel(ocrShowMode) + ' 的结果还没出来…';
+    }
+    syncLinkControls();
+}
+
+function setShowMode(m) {
+    const plan = runPlan();
+    if (plan.length < 2) return;   // 只参与一家：没有可切的
+    ocrShowTouched = true;
+    ocrShowMode = m === 'all' || plan.indexOf(m) >= 0 ? m : 'all';
+    syncShowSeg();
+    renderResultText();
+    /* ⚠ 安全网：切过去要看的这一家此刻还没结果，主动**拉一次**最新 parts。
+     *   这只是读后端已经算好的结果（ocr_take_parts），**不会重新识别** ——
+     *   用户要求「切换档位不重复调用 OCR」，这条不违反。
+     *   好处：万一切档时正好漏了一次推送，也能立刻把结果补上，不会卡在「还没出来」。 */
+    if (ocrShowMode !== 'all' && !partText(ocrShowMode)) {
+        invoke('ocr_take_parts').then((parts) => {
+            if (Array.isArray(parts) && parts.length) {
+                ocrParts = parts;
+                renderResultText();
+            }
+        }).catch(() => {});
+    }
+    // 提示语要如实反映「这是已有结果、没有重跑」（用户点名过这句文案）
+    if (ocrShowMode === 'all') toast('所有参与识别的结果一起看');
+    else if (partText(ocrShowMode)) toast('正在使用' + engLabel(ocrShowMode) + '（已有结果）');
+    else toast(engLabel(ocrShowMode) + '的结果还没出来…');
+}
+
+const showSegEl = $('ocrShowSeg');
+if (showSegEl) {
+    showSegEl.addEventListener('click', (e) => {
+        const b = e.target.closest('button');
+        if (!b) return;
+        e.stopPropagation();
+        setShowMode(b.dataset.m);
+    });
+}
+
+/** 开 / 关「识别进行中」的视觉：段控按钮禁用 + 截图区扫描动画。
+ *
+ * ⚠ 还要把「重新识别」「去空格 ×2」一起禁掉：它们各自只检查**自己**的
+ *   `disabled`，不看 `scanning` —— 于是「点了这家开始重识别，又顺手点一下
+ *   重新识别」会让同一张图**并发跑两次 OCR**（多打一次网络请求 / 多跑一次
+ *   本地识别，白烧流量和 CPU），最后留在框里的是后返回的那一次。 */
+function setScanning(on) {
+    scanning = on;
+    const seg = $('ocrShowSeg');
+    if (seg) for (const b of seg.querySelectorAll('button')) b.disabled = on;
+    for (const id of ['btnRerun', 'btnSmartSpace', 'btnForceSpace', 'btnGarbage', 'btnWidth', 'btnUnwrap']) {
+        const b = $(id);
+        if (b) b.disabled = on;
+    }
+    const body = $('shotBody');
+    if (body) body.classList.toggle('scanning', on);
+}
+
+/* ⚠ r47 删掉了「结果页内切引擎 → 立刻重识别」那一整块（`rescanWith` + 段控）。
+ *   原因：它必须列出**没参与**的引擎才有意义 —— 用户关掉并行后底部还挂着一颗
+ *   「本地」可点，正是他报的 bug；而且引擎有十几家，两颗按钮的段控本来也装不下。
+ *   想换引擎：去设置页点一家（默认引擎），或者在那里勾「同时识别」让它一起跑。
+ *   后端 `ocr_rescan(engine)` 命令保留（不删接口），只是结果页不再调用它。 */
+
+document.addEventListener('keydown', (e) => {
+    // Esc 先收放大图；没有放大图时才关窗口（见上面 zoom 的那段）
+    if (e.key === 'Escape' && !$('zoom').classList.contains('show')
+        && document.activeElement !== $('text')) {
+        invoke('close_ocr_window');
+    }
+});
+
+document.addEventListener('contextmenu', (e) => e.preventDefault());
+
+/** 只有内容真的变了才写回去。
+ *  Rust 那边怕 WebView 还没起来会推好几次同一个值，无脑写会把用户
+ *  正在划的选区一遍遍清掉。 */
+function setText(t) {
+    const ta = curTa();
+    /* ⚠ 空串是**合法结果**：框到一块没字的区域时 OCR 会正常返回 0 字
+     *   （后端日志 `ocr: got 0 chars via …` 就是这种），必须真的把框清掉。
+     *   只有 `undefined` / `null`（这一帧压根没带文字数据）才不动。
+     *   原来写成 `if (!t || …) return`，把「空结果」和「没数据」混成了一件事 ——
+     *   第二次框到空白区域时文本框里还留着**上一张图**的文字，
+     *   看起来就是「没重新识别 / 认错图」。 */
+    if (t === undefined || t === null || t === ta.value) return;
+    ta.value = t;
+    ta.classList.remove('ghost');
+    syncLinkControls();      // 新文字进来了：有链接就把「打开链接」亮出来
+    // ⚠ 不要无条件抢焦点 + 清选区：切引擎 / 去空格都会走这条通道，用户正在
+    //   划选一段准备复制、或焦点在底部按钮上时，会被硬抢回文本框、选区归零。
+    //   只在没有别处获得焦点时顺便把光标送进来。
+    const ae = document.activeElement;
+    const busy = ae && ae !== document.body && ae.tagName === 'INPUT'
+        || ae === ta;
+    if (!busy) {
+        ta.focus();
+        ta.setSelectionRange(0, 0);
+    }
+}
+
+/* 手工编辑文本框时，链接的个数会变 —— 「打开链接」按钮 / 「逐条开标签页」
+ * 开关必须跟着刷新，否则停在旧状态（有链接不显示 / 没链接却显示）。 */
+$('text').addEventListener('input', () => syncLinkControls());
+
+/* 未处理的 Promise 拒绝兜底：二十来处 invoke 没有 .catch，后端 Err/panic 会被
+ * Tauri 转成 reject，没人接就是「点了没反应」。 */
+window.addEventListener('unhandledrejection', (e) => {
+    const r = e && e.reason;
+    const msg = (r && r.message) || String(r || '');
+    try {
+        console.warn('[ocr] unhandled rejection:', r);
+        if (msg) toast('操作失败：' + msg);
+        invoke('log_msg', { msg: '[ocr] unhandledrejection: ' + msg }).catch(() => { });
+    } catch (_) { }
+});
+
+/** 把截图放上去（或清掉）。
+ *
+ *  src 是 `data:image/png;base64,...`；空串表示这次没有图，整块藏掉。
+ *
+ *  ⚠ 有图**也不自动显示**。用户要求「对照默认不启用」，所以这里只把图存起来，
+ *     显不显示交给 `applyLayout()` 按 `compareOn` 决定 —— 用户点了「对照」
+ *     才摆出来。每来一张**新**图就把对照开关复位成关（推多次同一张图时
+ *     会在下面提前 return，不会反复复位）。 */
+function setImage(src) {
+    const img = $('shotImg');
+    if (!src) {
+        img.removeAttribute('src');
+        applyLayout();
+        renderTopBar();   // 没图了，「对照」按钮也就不该出现
+        return;
+    }
+    if (img.getAttribute('src') === src) return;   // 推多次，值一样就不动
+    img.src = src;
+    compareOn = false;     // 新的一张图：对照回到默认的「关」
+    /* ⚠ 换图必须把上一张图的分段结果**全部忘掉**。
+     *
+     * `lastPart` 的用途是「同一张图内，某一帧 parts 里少了某一家那一段时，
+     * 别把它冲成等待文案」（见 renderResultText 的注释）；但它是**跨图**活着的
+     * —— 结果窗是复用的（Rust 侧 open_ocr_window 只 show/unminimize，不重建），
+     * 而多引擎模式**谁先回来就先开窗**，开窗那一推里 parts 只有先完成的那个引擎
+     * （见 main.rs 的 ocr_run_engines 回调），另一家那一段必然缺失
+     * → 回退到 lastPart = **上一张图的文字**。
+     *
+     * 用户可见：第二张截图先显示上一张的文字（要等慢的那个引擎回来才被覆盖；
+     * 要是它这次压根失败了，就永远留着）；更糟的是 `syncLinkControls` /
+     * `openDetectedLinks` 会连隐藏段一起扫，于是"打开链接"打开的是
+     * **上一张图里的网址**。 */
+    for (const k in lastPart) delete lastPart[k];
+    /* r49：新的一张图 = 新的一轮 —— 把"用户手动选过档位"这件事也一并清掉，
+     * 于是这一轮仍然从**默认引擎**那一档开始（用户口径：每次先看我配的那家）。
+     * ⚠ 不清的话：上一次点了「本地」，之后每张图都会停在本地，默认引擎反而不露面。 */
+    ocrShowTouched = false;
+    // 顺手标一下像素尺寸，用户一眼知道框了多大一块
+    img.onload = () => {
+        $('shotDim').textContent = img.naturalWidth + ' × ' + img.naturalHeight;
+    };
+    applyLayout();
+    renderTopBar();       // 有图了，「对照」按钮才挂出来
+}
+
+/** 提示条：目前只有「高精度自动降级成标准版」这一种会用上。
+ *
+ *  非空时把结果区往下顶一点，别遮住第一行文字 —— 用户第一眼要看到的是
+ *  「识别出了什么」，这条只是解释为什么精度可能不如预期。 */
+function setNote(msg) {
+    const el = $('note');
+    if (!el) return;
+    const t = String(msg || '').trim();
+    if (!t) {
+        el.hidden = true;
+        el.textContent = '';
+        applyLayout();
+        return;
+    }
+    el.textContent = t;
+    el.hidden = false;
+    applyLayout();
+}
+
+// 截图区的「展开 / 收起」
+$('shotHead').addEventListener('click', () => $('shot').classList.toggle('folded'));
+
+// 点图看原尺寸，再点一下收回
+$('shotImg').addEventListener('click', () => {
+    $('zoomImg').src = $('shotImg').src;
+    $('zoom').classList.add('show');
+});
+$('zoom').addEventListener('click', () => $('zoom').classList.remove('show'));
+
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && $('zoom').classList.contains('show')) {
+        $('zoom').classList.remove('show');
+    }
+});
+
+// 前端就绪后主动拉一次，避免错过 Rust 建窗口时发的那几次 push
+async function pull() {
+    const [t, img, note, parts] = await Promise.all([
+        invoke('ocr_take_text').catch(() => ''),
+        invoke('ocr_take_image').catch(() => ''),
+        invoke('ocr_take_note').catch(() => ''),
+        invoke('ocr_take_parts').catch(() => null),
+    ]);
+    if (Array.isArray(parts) && parts.length) ocrParts = parts;
+    ocrCombined = String(t || '');
+    setImage(img);
+    renderResultText();
+    // ⚠ 只有拉到内容才动提示条：拉和推是两条并行通道，这里如果无条件 setNote('')，
+    //    会把刚刚推到的提示条擦掉（pull 是异步的，推可能先到）。
+    if (note) setNote(note);
+}
+
+// 文字与图片一起到（新通道）
+listen('qs://ocr-result', (ev) => {
+    const p = (ev && ev.payload) || {};
+    if (Array.isArray(p.parts)) ocrParts = p.parts;
+    ocrCombined = String(p.text || '');
+    setImage(String(p.image || ''));
+    renderResultText();
+    setNote(String(p.note || ''));
+    // 新结果 = 后端把按钮的临时覆盖清回了**设置里的默认**（见 ocr_region 里
+    // 重置 OCR_CLEAN_OVERRIDE 那一行），按钮的亮灭要跟着回到默认态，
+    // 否则会出现"亮着但其实没生效"的假象。
+    syncCleanBtnsFromConf();
+});
+
+/** 按设置里的默认值点亮整理按钮（新结果到达时用）。 */
+function syncCleanBtnsFromConf() {
+    syncCleanBtns({
+        garbage: !!(CONF && CONF.ocrCleanGarbage),
+        width: !!(CONF && CONF.ocrCleanWidth),
+        unwrap: !!(CONF && CONF.ocrCleanUnwrap),
+        space: (CONF && CONF.ocrCleanSpace) || 'smart',
+    });
+}
+
+// 老通道：只有文字（没有分段数据，走合并文本）
+listen('qs://ocr-text', (ev) => {
+    ocrCombined = String(ev.payload || '');
+    renderResultText();
+});
+
+/* 「正在识别…」「识别失败：xxx」这类消息也往这个窗口发一份。
+ * 以前只发给设置面板，而设置面板常常是关着的 —— 结果就是用户点了识别、
+ * 等半天什么都没发生，也不知道是成功了还是失败了。 */
+listen('qs://ocr', (ev) => {
+    const m = String((ev && ev.payload) || '');
+    if (!m) return;
+    toast(m);
+    // 识别失败时，文本框还是空的 —— 光弹一条会消失的提示，用户回头一看
+    // 又是空的，很容易以为窗口坏了。把原因写进文本框里，留着能看、能复制。
+    if (/失败|没|错误|不对|超时/.test(m) && !$('text').value) {
+        $('text').value = m;
+        $('text').classList.add('ghost');
+        syncLinkControls();   // 失败提示里一般没链接，顺手把按钮收掉
+    }
+});
+
+/** 页面自检：真 WebView 起来之后，直接检查几条用户看得见的事实。
+ *
+ *  为什么要放在页面里而不是外面点坐标：这个窗口的版式（引擎条 / 截图 / 文本 / 按钮）
+ *  就是这次要交付的东西，DOM 才是唯一权威。外面截屏比颜色、比像素都很脆，
+ *  而这里直接量 DOM 顺序和取值，一次就能说清「截图在不在、文字填没填」。
+ *
+ *  结果用 `[ocrselftest] PASS/FAIL xxx` 打进日志，测试脚本捞日志来判断。 */
+async function ocrSelfTest() {
+    const lines = [];
+    const check = (name, cond) => lines.push((cond ? 'PASS  ' : 'FAIL  ') + name);
+
+    const eng = document.getElementById('engines');
+    const shot = document.getElementById('shot');
+    const img = document.getElementById('shotImg');
+    // ⚠ 用「当前可见的结果框」：并行模式下 #text 是藏起来的，自检要跟着走
+    const ta = curTa();
+    const panes = document.getElementById('panes');
+    const foot = document.querySelector('.foot');
+
+    // 顺序：顶部工具栏（最上）-> 对照区（图+字）-> 底部按钮栏（最下）
+    const order = [...document.body.children]
+        .filter((n) => n.classList && (n.classList.contains('engines')
+            || n.classList.contains('panes') || n.classList.contains('foot')))
+        .map((n) => n.className.split(' ')[0]);
+    check('版式自上而下是 顶部工具栏→图文对照区→按钮栏，实际=' + JSON.stringify(order),
+        order[0] === 'engines' && order[1] === 'panes' && order[2] === 'foot');
+    // 按钮栏是「可见内容」的最下面一块。
+    // body 末尾还挂着 .toast / .zoom 两个覆盖层（fixed、平时 display:none），
+    // 以及 <script> 标签（className 是空串）—— 这些都不算版式的一部分，
+    // 一并滤掉，只留下真正参与排版的那几块。
+    const visible = [...document.body.children].filter((n) => n.classList
+        && n.className && n.tagName === 'DIV'
+        && !n.classList.contains('toast') && !n.classList.contains('zoom'));
+    check('按钮栏是页面上可见内容的最后一块（最下面）；实际可见块='
+        + visible.map((n) => n.className.split(' ')[0]).join(','),
+        visible[visible.length - 1] === foot);
+    // 用户要求「彻底移除 OCR 结果页里所有与搜索引擎相关的功能及入口」：
+    // 顶部工具栏里不该再有任何搜索引擎按钮（.eng-icon），也不该有
+    // 「用这段文字搜索」之类的引导语。这条断言就是守这个口径的。
+    check('顶部工具栏里没有任何搜索引擎按钮（已彻底移除）',
+        eng.querySelectorAll('button.eng.eng-icon').length === 0
+        && !eng.textContent.includes('搜索'));
+
+    // 截图区 + 对照开关。
+    // 用户要求「对照默认不启用」，所以有图时也要先断言**图是藏着的**，
+    // 点开「对照」之后才显示，再点「收起对照」又收回去。
+    if (img.getAttribute('src')) {
+        // ⚠ 别只认 PNG：截图链路早改成一次编 JPEG（q85，省掉 PNG 编码那几百毫秒，
+        //    见 src/main.rs ocr_region 里那段注释），这里再断言 PNG 会一直误报 FAIL。
+        check('截图 src 是内嵌图片 data URL（PNG/JPEG 都行）',
+            /^data:image\/(png|jpeg);base64,/.test(img.getAttribute('src')));
+        check('截图确实解码成功（naturalWidth>0）', img.naturalWidth > 0);
+        check('对照默认关着：有图也不显示截图（默认不启动对照）', shot.hidden === true);
+
+        const bc = document.getElementById('btnCompare');
+        check('有图时出现「对照」开关', !!bc);
+        if (bc) {
+            check('对照关着时按钮文案是「对照」（当前：' + bc.textContent + '）',
+                bc.textContent === '对照');
+            bc.click();     // 打开对照
+            check('点「对照」后截图显示出来了', shot.hidden === false);
+            check('对照打开后按钮文案变成「收起对照」（当前：' + bc.textContent + '）',
+                bc.textContent === '收起对照');
+
+            // 对照打开后才有排布方向按钮
+            const btn = document.getElementById('btnLayout');
+            check('对照打开后出现排布方向按钮', !!btn);
+            if (btn) {
+                const wasSide = panes.classList.contains('side');
+                btn.click();
+                check('点一下方向按钮版式真的切换了（' + wasSide + '→'
+                    + panes.classList.contains('side') + '）',
+                    panes.classList.contains('side') !== wasSide);
+                btn.click();  // 切回去
+                check('再点一下切回原方向',
+                    panes.classList.contains('side') === wasSide);
+            }
+
+            bc.click();     // 收起对照
+            check('再点「收起对照」截图又藏起来了（默认不启用对照）', shot.hidden === true);
+        }
+    } else {
+        check('这次没有截图（src 为空，图片区应隐藏）', shot.hidden === true);
+        check('没有截图时不出现「对照」开关',
+            document.getElementById('btnCompare') === null);
+    }
+
+    // 文字：把识别结果填进来了没有。
+    //
+    // ⚠ 只在「本来就该有文字」时才断言。失败路径上 Rust 是先把空文本开窗、
+    //   再异步把失败原因用 qs://ocr 推过来（见 ocr_tell），自检在 900ms 跑时
+    //   那条推送可能还没到 —— 这时文本框为空是**正确的中间状态**，不该判失败。
+    //   有没有真的填进去，由「内容与传入的一致」那条在成功路径上把关。
+    const expect = window.__qsExpectOcrText || '';
+    if (expect) {
+        check('文本框已填入识别文字（当前长度 ' + (ta.value || '').length + '）',
+            (ta.value || '').length > 0);
+        check('文字内容与传入的一致', ta.value === expect);
+    } else {
+        check('这次是失败/空结果路径：不强求文本框已填（由失败提示负责说明）', true);
+    }
+
+    // 取词：「复制」按钮拿的就是这一段（选区优先、没选区全文）。
+    // 同样只在有文字时才谈得上「能取到内容」。
+    if (expect) {
+        check('取词函数能取到内容', textToSearch().length > 0);
+    }
+
+    // ---- 链接相关（用户新增的三条要求）----
+    // ① 文字里没有链接 → 「打开链接」按钮和开关都不能出现
+    // ② 文字里有链接 → 按钮出现、开关出现且默认关
+    // ③ 中文+网址混排时，抠出来的链接必须只有网址本身，中文不能被带进去
+    const btnL = document.getElementById('btnOpenLinks');
+    const sw = document.getElementById('linkSwitch');
+    const auto = document.getElementById('autoOpenLinks');
+
+    // 先测"没有链接"的情形：直接把文本框换成纯中文
+    const saved = ta.value;
+    ta.value = '这是一段没有链接的中文识别结果';
+    syncLinkControls();
+    check('没链接时「打开链接」按钮藏着', btnL.hidden === true);
+    check('没链接时「逐条开标签页」开关也藏着', sw.hidden === true);
+
+    // 再测"有链接"的情形
+    //
+    // 注意写法：这里**不能**把 `auto.checked` 直接改掉再 syncLinkControls()，
+    // 因为 syncLinkControls() 会按开关状态重算按钮文案 —— 那样就测不出
+    // "默认关着时按钮该显示什么"。先把开关复位成默认（关），再 sync。
+    auto.checked = false;
+    // r47：取词/写词都在那**一个**文本区里（多引擎时它就是当前显示的那一段），
+    // 所以自检直接往 #text 里写测试文本即可。
+    const probeTa = curTa();
+    probeTa.value = '请访问 https://example.com/a 和 www.test.org/b 查看详情，谢谢';
+    if (probeTa !== ta) ta.value = probeTa.value;
+    syncLinkControls();
+    check('有链接时「打开链接」按钮出现', btnL.hidden === false);
+    check('有链接时开关出现', sw.hidden === false);
+    check('开关默认是关的', auto.checked === false);
+    const got = linksIn(ta.value);
+    check('从中英混排里抠出 2 条链接（实际 ' + got.length + '）', got.length === 2);
+    check('抠出的链接只含网址、不带中文（' + got.join(' | ') + '）',
+        got.every((u) => /^https:\/\/[a-z0-9.\-/]+$/i.test(u)));
+    check('开关关着时按钮文案是「打开链接」、不提条数（当前：'
+        + btnL.textContent.trim() + '）',
+        btnL.textContent.trim() === '打开链接');
+
+    // ④ 开关语义（用户确认过的口径）：
+    //    关 = 只开第一条；开 = 全部打开、一条一个标签页。
+    //    这里不去真的开浏览器（那会打扰桌面），而是把 openLinksSink 换成
+    //    收集器，看它到底把几条链接递了出去。
+    const realSink = openLinksSink;
+    const sent = [];
+    openLinksSink = (links) => { sent.push(links.slice()); return Promise.resolve(); };
+
+    await openDetectedLinks();
+    check('开关关着：只递了 1 条链接（实际 ' +
+        (sent.length ? sent[sent.length - 1].length : -1) + '）',
+        sent.length === 1 && sent[0].length === 1);
+    check('开关关着：递过去的就是第一条（' + (sent[0] && sent[0][0]) + '）',
+        sent.length === 1 && sent[0][0] === got[0]);
+
+    auto.checked = true;
+    syncLinkControls();
+    check('开关打开后按钮文案变成「打开 2 条链接」（当前：' + btnL.textContent.trim() + '）',
+        btnL.textContent.trim() === '打开 2 条链接');
+    await openDetectedLinks();
+    check('开关打开：把全部 2 条都递出去了（实际 ' +
+        (sent.length ? sent[sent.length - 1].length : -1) + '）',
+        sent.length === 2 && sent[1].length === 2);
+
+    // ⑤（原「点引擎图标走链接分支」用例已随搜索引擎入口一并删除 —— 顶部
+    //    工具栏里不再有引擎按钮可点；链接打开走的是底部「打开链接」按钮，
+    //    上面 ④ 已经覆盖。）
+    auto.checked = false;
+    syncLinkControls();
+
+    // ⑥ 「复制」按钮：划了选区就只复制选中的那截，没选中复制全文。
+    //    这里把 copySink 换成收集器（不动用户真实的剪贴板）。
+    const realCopy = copySink;
+    const copied = [];
+    copySink = (t) => { copied.push(t); return Promise.resolve(); };
+
+    ta.value = expect || '示例识别结果 QuickSearch 12345';
+    ta.setSelectionRange(0, 0);              // 先确保「没有选中」
+    $('btnCopy').click();
+    check('没选中时点「复制」递的是全文（' + (copied[0] || '').length + ' 字）',
+        copied.length === 1 && copied[0] === ta.value.trim());
+
+    // 故意只选中前三分之一，再点一次：这次递的应该**只有选中的那截**
+    const cut = Math.max(1, Math.floor(ta.value.length / 3));
+    ta.setSelectionRange(0, cut);
+    const wantSel = ta.value.slice(0, cut).trim();
+    $('btnCopy').click();
+    check('选中了一段时点「复制」只递选中那截（期望 ' + wantSel.length + ' 字，实际 '
+        + (copied[1] || '').length + ' 字）',
+        copied.length === 2 && copied[1] === wantSel && wantSel !== ta.value.trim());
+    copySink = realCopy;
+
+    /* ⑦ r47/r50：结果区形态 —— 只显示一家时是**一个**文本框（#text）；
+     *    「都看」且参与 ≥2 家时是**一家一个**文本框（r50 用户要求，
+     *     见 setMultiLayout 顶上的注释）。
+     *    编辑活动框必须刷新「打开链接」按钮 —— 老 bug 的回归位：监听没挂上时，
+     *    粘一段带网址的文字按钮不出现（用户只会以为"不支持"），把链接删光还亮着。 */
+    const taEd = $('text');
+    check('r47：双框时代的残留元素确实没有了（没有 dual / textLocal / textBaidu）',
+        !$('dual') && !$('textLocal') && !$('textBaidu'));
+    check('r50：「都看」+ 两家 → 一家一个文本框（#text 让位；再切回一家时复原）',
+        (function () {
+            setMultiLayout(true, ['siliconflow', 'windows']);
+            const ws = $('panesMulti');
+            const tas = ws ? ws.querySelectorAll('.pm textarea') : [];
+            const caps = ws ? ws.querySelectorAll('.pm-cap').length : 0;
+            const ok = !!(ws && !ws.hidden) && $('text').hidden === true
+                && tas.length === 2 && caps === 2;
+            setMultiLayout(false, []);
+            const back = $('text').hidden === false && (!ws || ws.hidden === true);
+            return ok && back;
+        })());
+    taEd.value = '';
+    syncLinkControls();
+    check('文本区空着时「打开链接」按钮藏着', $('btnOpenLinks').hidden === true);
+    taEd.value = '看这个 https://example.com/single';
+    taEd.dispatchEvent(new Event('input', { bubbles: true }));
+    check('文本区里敲进一个网址后按钮出现（input 监听到位）',
+        $('btnOpenLinks').hidden === false);
+    taEd.value = '';
+    taEd.dispatchEvent(new Event('input', { bubbles: true }));
+    check('把网址删掉后按钮又藏回去', $('btnOpenLinks').hidden === true);
+
+    /* ⑧ 换新图必须忘掉上一张图的分段结果。
+     *    修之前 lastPart 是**跨图**活着的：多引擎模式「谁先回来就先开窗」，
+     *    开窗那一推里只有一个引擎的结果，另一段就回退成**上一张图的文字**
+     *    （更糟：链接按钮会连隐藏段一起扫，于是"打开链接"打开的是
+     *    上一张图里的网址）。 */
+    const savedSrc = img.getAttribute('src') || '';
+    const savedLastPart = Object.assign({}, lastPart);
+    const savedParts = ocrParts;
+    for (const k in lastPart) delete lastPart[k];
+    lastPart.siliconflow = 'PREV-IMAGE-TEXT https://prev.example.com/';
+    ocrParts = [];
+    setImage('data:image/png;base64,iVBORw0KGgo=');
+    renderResultText();
+    check('换新图后不再残留上一张图的分段结果（实际="'
+        + $('text').value.slice(0, 24) + '"）', !$('text').value.includes('PREV-IMAGE-TEXT'));
+    /* 链接按钮必须和**框里现在这段文字**对得上：不能因为上一张图的网址亮着，
+     * 也不能明明有链接却藏着。r47 之前这条是钉"百度框里没有上一张图的网址"，
+     * 现在只有一个框，口径统一成"按钮状态 = 当前文字里有没有链接"。 */
+    check('换新图后「打开链接」按钮与框里的文字一致（不会因上一张图的网址亮着）',
+        $('btnOpenLinks').hidden === (linksIn($('text').value).length === 0));
+    setImage(savedSrc);
+    for (const k in lastPart) delete lastPart[k];
+    Object.assign(lastPart, savedLastPart);
+    ocrParts = savedParts;
+    renderResultText();
+
+    /* ⑨ 空结果是**合法结果**：框到一块空白区域时 OCR 正常返回 0 字，
+     *    必须真的把文本框清掉，不能留着上一张图的文字
+     *    （用户看到的是"没重新识别 / 认错图"）。 */
+    const keepVal = $('text').value;
+    $('text').value = 'OLD-TEXT';
+    setText('');
+    check('setText("") 会把文本框清空（空结果 ≠ 没数据）', $('text').value === '');
+    $('text').value = keepVal;
+
+    /* ⑩ 扫描中三颗「重跑」按钮必须一起禁用：它们各自只看自己的 disabled，
+     *    不看 scanning —— 「点了百度云开始重识别，又顺手点一下重新识别」
+     *    会让同一张图**并发跑两次 OCR**（多打一次百度网络请求）。 */
+    setScanning(true);
+    check('扫描中：「重新识别」和五颗文本整理按钮都禁用',
+        ['btnRerun', 'btnSmartSpace', 'btnForceSpace', 'btnGarbage', 'btnWidth', 'btnUnwrap']
+            .every((id) => $(id) && $(id).disabled));
+    setScanning(false);
+    check('扫描结束：这些按钮恢复可点',
+        ['btnRerun', 'btnSmartSpace', 'btnForceSpace', 'btnGarbage', 'btnWidth', 'btnUnwrap']
+            .every((id) => $(id) && !$(id).disabled));
+
+    /* ⑩b 文本整理的按钮组（需求 5）：三颗布尔项 + 两档空格都要在，
+     *     且 syncCleanBtns 能把后端返回的开关状态**如实**映射成按钮亮灭。 */
+    check('文本整理按钮齐全（去乱码 / 全角半角 / 合并换行 + 智能·强力去空格）',
+        ['btnGarbage', 'btnWidth', 'btnUnwrap', 'btnSmartSpace', 'btnForceSpace'].every((id) => $(id)));
+    syncCleanBtns({ garbage: true, width: false, unwrap: true, space: 'force' });
+    check('syncCleanBtns：开关状态 → 按钮亮灭一致',
+        $('btnGarbage').classList.contains('on') && !$('btnWidth').classList.contains('on')
+        && $('btnUnwrap').classList.contains('on')
+        && $('btnForceSpace').classList.contains('on') && !$('btnSmartSpace').classList.contains('on'));
+    syncCleanBtns({ garbage: false, width: false, unwrap: false, space: 'smart' });
+    check('syncCleanBtns：智能档只亮「智能去空格」',
+        $('btnSmartSpace').classList.contains('on')
+        && !$('btnForceSpace').classList.contains('on')
+        && !$('btnGarbage').classList.contains('on'));
+
+    /* ⑪ r47：段控只列**参与名单**，默认档先给默认引擎那一段。
+     *
+     *    两个 bug 都在这一块：
+     *      · 关掉并行后底部还挂着一颗「本地」可点 → 现在没参与就一个都不列；
+     *      · 默认档写死"本地优先"（配了在线引擎的用户每次都要手点一下）。 */
+    const savedEngine = CONF && CONF.ocrEngine;
+    const savedMulti = CONF && CONF.ocrMulti;
+    const savedParts2 = ocrParts;
+    const savedTouched = ocrShowTouched;
+    const mkParts = (a) => a.map(([eng, text]) => ({ eng: eng, text: text }));
+
+    // 只参与一家 → 整块段控藏起来（没得切）
+    CONF.ocrEngine = 'siliconflow';
+    CONF.ocrMulti = [];
+    ocrParts = mkParts([['siliconflow', '硅基流动认出来的字']]);
+    ocrShowTouched = false;
+    renderResultText(true);
+    check('r47：只参与一家时段控整块藏起来',
+        $('ocrShowSeg').hidden === true && $('showCap').hidden === true);
+    check('r47：没参与的引擎一个都不出现在段控里',
+        $('ocrShowSeg').querySelectorAll('button').length === 0);
+
+    // 参与两家 → 段控只列这两家（+ 都看），默认引擎那颗排第一
+    CONF.ocrMulti = ['windows'];
+    ocrParts = mkParts([['siliconflow', '硅基流动认出来的字'], ['windows', '本地认出来的字']]);
+    renderResultText(true);
+    const segBtns = Array.from($('ocrShowSeg').querySelectorAll('button')).map((b) => b.dataset.m);
+    check('r47：段控只列参与的两家 + 都看（实际 ' + JSON.stringify(segBtns) + '）',
+        segBtns.length === 3 && segBtns[0] === 'siliconflow' && segBtns[1] === 'windows'
+        && segBtns[2] === 'all');
+    check('r47：段控按钮上写的是引擎名，不是空串（前端只用它显示，跑哪几家由后端定）',
+        segBtns.every((m, i) => {
+            const b = $('ocrShowSeg').querySelectorAll('button')[i];
+            return !!b && b.textContent.trim().length > 0;
+        }));
+
+    /* r49 默认档 —— r78 口径变更：
+     *
+     * 用户原话（r78）：「如果在设置文字识别当中，我打开了多引擎的同时识别，
+     * 那么识别出来的文字就应该同时以多个文本框来呈现不同识别引擎的结果」。
+     *
+     * 所以 **参与 ≥ 2 家时 `pickDefaultMode` 一律返回 `'all'`**（多框并排）。
+     * r49 那条「别自作主张跳到别家」的口径没有被推翻，只是换了承载方式：
+     * 多框里每家各有自己的框，谁都不会被别家的字顶掉。
+     *
+     * 下面只测**只剩一家**时的旧口径（那才是 `ocrStayDefault` 现在管的事）。 */
+    ocrShowTouched = false;
+    {
+        const plan2 = runPlan();
+        check('r78 同时识别（参与 ≥ 2 家）→ 默认进「都看」多框并排',
+            plan2.length >= 2 && pickDefaultMode(plan2) === 'all',
+            'plan=' + JSON.stringify(plan2) + ' mode=' + pickDefaultMode(plan2));
+    }
+    ocrParts = mkParts([['windows', '本地认出来的字']]);
+    check('r78 多引擎时：默认引擎没回来也仍然进「都看」（不切到单框的本地那一档）',
+        pickDefaultMode(runPlan()) === 'all');
+    ocrParts = [];
+    check('r78 多引擎时：谁都没字也是「都看」',
+        pickDefaultMode(runPlan()) === 'all');
+    // 只剩一家时，`ocrStayDefault` 才决定"停在谁"
+    CONF.ocrMulti = [];
+    ocrParts = [];
+    check('r78 只剩一家时：仍停在它那一档（默认引擎）',
+        runPlan().length === 1 && pickDefaultMode(runPlan()) === 'siliconflow',
+        'plan=' + JSON.stringify(runPlan()));
+    CONF.ocrStayDefault = false;
+    check('r78 只剩一家 + 关掉开关：也还是它（只有一家，没得选）',
+        pickDefaultMode(runPlan()) === 'siliconflow');
+    CONF.ocrStayDefault = true;
+
+    // 没勾本地 → 它既不在名单里、也不会被选中（哪怕它恰好有结果）
+    CONF.ocrMulti = [];
+    ocrParts = mkParts([['windows', '本地认出来的字']]);
+    check('r49：没勾本地时它不在参与名单里（实际 "'
+        + JSON.stringify(runPlan()) + '"），档位也只会是默认引擎',
+        runPlan().indexOf('windows') < 0 && pickDefaultMode(runPlan()) === 'siliconflow');
+
+    // 没勾本地 → 它既不在名单里、也不会被选中（哪怕它恰好有结果）
+    CONF.ocrMulti = [];
+    ocrParts = mkParts([['windows', '本地认出来的字']]);
+    check('r49：没勾本地时它不在参与名单里（实际 "'
+        + JSON.stringify(runPlan()) + '"），档位也只会是默认引擎',
+        runPlan().indexOf('windows') < 0 && pickDefaultMode(runPlan()) === 'siliconflow');
+
+    CONF.ocrEngine = savedEngine;
+    CONF.ocrMulti = savedMulti;
+    ocrParts = savedParts2;
+    ocrShowTouched = savedTouched;
+    renderResultText(true);
+
+    openLinksSink = realSink;
+
+    // 还原现场
+    ta.value = saved;
+    syncLinkControls();
+
+    for (const l of lines) invoke('log_msg', { msg: '[ocrselftest] ' + l }).catch(() => {});
+    return lines;
+}
+
+/* 设置改了 —— Rust 的 broadcast 现在也发一份给本窗口。
+ *
+ * ⚠ 这里**只重排版式、不重写文字**（`renderResultText(true)`）：广播随时会来
+ *   （用户在设置页拖滑块、切引擎都触发），而结果框里可能是用户正在改的文字，
+ *   按 parts 重写一遍就冲掉了。
+ *
+ * 修之前这个监听是**死代码**：`broadcast()` 只发 bar / settings，从不发 ocr，
+ * `CONF` 只在 boot 取一次 —— 于是"开着结果窗去设置里打开双引擎并行、再框一次"
+ * 拿到的还是旧版式（该出两段时只有一段，底部却冒出「显示」段控）。 */
+listen('qs://config', (ev) => {
+    CONF = ev.payload || {};
+    // 搜索引擎相关已整体移除，这里不再重建引擎条；
+    // r47：设置里勾/取消「同时识别」会直接改变**参与名单** → 段控要跟着重画。
+    renderResultText(true);
+    // 设置里改了「文本整理」的默认值 → 按钮的亮灭立刻跟着走
+    // （后端 clean_mask_now() 在没有临时覆盖时就是读这些值）。
+    syncCleanBtnsFromConf();
+});
+
+/* 页面首帧一画完就通知 Rust「可以显示了」。
+ *
+ * 窗口是 hidden 建的（见 open_ocr_window 的注释）：WebView2 渲染第一帧是异步的，
+ * 建完窗立刻显示会让用户先看到一块**没有内容的原生黑底** —— 就是"OCR 之后又蹦出
+ * 一个黑框"的来源。等到这里再 show，用户第一眼看到的就是完整界面。
+ *
+ * 用**双重 requestAnimationFrame**：第一次 rAF 只是排进下一帧，第二次 rAF 才保证
+ * 上一帧已经真的提交给合成器了。只等一次 rAF 有可能在内容还没上屏时就 show。
+ * 不放在 boot() 的 await 之后：那几个 fetch/invoke 慢的时候会让窗口白等几百毫秒。 */
+requestAnimationFrame(() => requestAnimationFrame(() => {
+    invoke('ocr_ready').catch(() => {});
+}));
+
+(async function boot() {
+    // 搜索引擎相关已整体移除：不再拉 data/engines.json、不再合并自定义引擎。
+    // CONF 仍要拿 —— 默认引擎 / 「同时识别」名单（ocrEngine + ocrMulti）、
+    // 整理的默认开关、debug 自检开关都在里面。
+    CONF = await invoke('get_config');
+    renderTopBar();
+    // r47：首屏按**参与名单**把底部段控摆好（只参与一家就整块藏起来）
+    renderResultText(true);
+    syncCleanBtnsFromConf();  // 首屏按设置里的默认值点亮文本整理按钮
+    await pull();
+    syncLinkControls();   // pull 之后立刻判一次有没有链接
+    // 自检要等图真的解码完（img.onload 是异步的），所以延后一拍
+    if (CONF && CONF.debug) {
+        window.__qsExpectOcrText = $('text').value;
+        setTimeout(ocrSelfTest, 900);
+    }
+})().catch((e) => {
+    /* get_config reject（安装包损坏、升级到一半）时，窗口照样会显示，
+     * 但文本框空 —— 用户只会以为"识别完没反应"。
+     * 这里必须给出可见反馈。 */
+    const msg = String((e && e.message) || e);
+    try { toast('界面初始化失败：' + msg); } catch (_) {}
+    invoke('log_msg', { msg: '[ocr] boot failed: ' + msg }).catch(() => {});
+});
+</script>
+</body>
+</html>

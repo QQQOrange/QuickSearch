@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="color-scheme" content="light dark">
+<title>拾取程序</title>
+<style>
+/* 和 region.html 一样内联：整屏就一层透明板 + 一行提示，不值得拆文件。 */
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: transparent;
+    /* 十字光标 —— 用户点名要的「变成一个箭头/十字」 */
+    cursor: crosshair;
+    user-select: none;
+    -webkit-user-select: none;
+    font: 13px/1.5 "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+}
+
+/* 极淡的一层底色，只为让用户看出「现在处于拾取状态」，
+   不能太重，否则看不清底下的窗口是哪个。 */
+body { background: rgba(80, 140, 255, .05); }
+
+#tip {
+    position: fixed;
+    left: 50%;
+    top: 40px;
+    transform: translateX(-50%);
+    padding: 9px 18px;
+    border-radius: 10px;
+    background: rgba(16, 18, 24, .88);
+    color: #F0F2F6;
+    font-size: 13px;
+    box-shadow: 0 10px 30px -10px rgba(0, 0, 0, .7);
+    pointer-events: none;
+    white-space: nowrap;
+}
+#tip b { color: #7FB0FF; font-weight: 600; }
+</style>
+</head>
+<body>
+<div id="tip">点一下要加入名单的程序窗口 · <b>Esc</b> 取消</div>
+
+<script>
+const invoke = window.__TAURI__.core.invoke;
+const $ = (id) => document.getElementById(id);
+
+/* 原先这里有个跟随鼠标的 #tag 小标签，注释写着"实时显示指到的是哪个程序"，
+ * 但从头到尾没有给它填过任何内容 —— 用户看到的只是一个跟着鼠标跑的黑色小方块。
+ * 要真预览就得每个 mousemove 都去后端问一次进程名（职责反转、还可能误导），
+ * 不值得。直接去掉，留顶部提示条 + 十字光标。 */
+
+let done = false;
+
+/** 退出：不管成功失败都要把这层铺满全屏的板子收掉，否则用户点不动东西。 */
+function bail() {
+    done = true;
+    invoke('picker_cancel').catch(() => {});
+}
+
+document.addEventListener('mousedown', async (e) => {
+    if (e.button !== 0 || done) return;
+    done = true;
+    $('tip').textContent = '正在读取…';
+    /* r59：两种用途共用这一张覆盖层 ——
+     *   · 默认：挑**程序名**（进黑白名单），走 pick_app_at；
+     *   · `?want=path`：挑**完整路径**（快捷键引擎的「绑定应用」），走 pick_app_path_at。
+     * 分开两条命令是因为两者要的返回值不一样：黑白名单只认 `notepad.exe`，
+     * 而绑定应用要把路径存进配置、以后靠它拉起程序。 */
+    const wantPath = /[?&]want=path/.test(window.location.search || '');
+    try {
+        // 物理像素换算交给 Rust：它知道虚拟屏原点和 dpr
+        const name = await invoke(wantPath ? 'pick_app_path_at' : 'pick_app_at', {
+            x: e.clientX,
+            y: e.clientY,
+            dpr: window.devicePixelRatio || 1
+        });
+        $('tip').textContent = (wantPath ? '已选中：' : '已加入：') + name;
+    } catch (err) {
+        $('tip').textContent = String(err || '没认出来，再点一次');
+        // 失败时**不要**立刻关：留一拍让用户看清提示，再自动退
+        setTimeout(bail, 1200);
+    }
+});
+
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') bail();
+});
+
+document.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    if (!done) bail();
+});
+
+/* 失焦兜底 —— **故意不做**（详细理由见 region.html 末尾那段）。
+ *
+ * 一句话：WebView2 开窗的焦点交接会在几百毫秒里反复丢/拿焦点，本机还有别的
+ * 全局输入工具会在几秒后抢前台，日志里抓到过 `blur (age=4313ms)` 而用户没动过手。
+ * "失焦"不等于用户被困住 —— Esc 走的是 Rust 全局键盘钩子（全系统可收），
+ * 加上 Rust 的心跳看门狗 + 90 秒总闸，兜底都在那侧。
+ * 宁可让拾取器多留一会儿让用户能按 Esc，也不能让它自己消失。
+ */
+
+</script>
+</body>
+</html>

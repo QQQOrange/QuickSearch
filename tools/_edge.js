@@ -1,0 +1,24 @@
+const koffi = require('koffi');
+const u = koffi.load('user32.dll');
+const EW = u.func('int EnumWindows(void *cb, intptr lp)');
+const P = koffi.pointer(koffi.proto('int __stdcall ENUMPROC(void*h,intptr l)'));
+const GTW = u.func('int GetWindowThreadProcessId(void*h, _Out_ uint32*p)');
+const GCW = u.func('int GetClassNameW(void*h, _Out_ uint16*b, int n)');
+const GWT = u.func('int GetWindowTextW(void*h, _Out_ uint16*b, int n)');
+const IV = u.func('int IsWindowVisible(void*h)');
+const IC = u.func('int IsIconic(void*h)');
+const GR = u.func('int GetWindowRect(void*h, _Out_ void*r)');
+const out = [];
+const cb = koffi.register((h) => {
+  const pid = Buffer.alloc(4); GTW(h, pid);
+  if (pid.readUInt32LE(0) !== 27668) return 1;
+  const b = new Uint16Array(256); const n1 = GCW(h, b, 256);
+  let cls = ''; for (let i = 0; i < n1; i++) cls += String.fromCharCode(b[i]);
+  const t = new Uint16Array(256); const n2 = GWT(h, t, 256);
+  let title = ''; for (let i = 0; i < n2; i++) title += String.fromCharCode(t[i]);
+  const r = Buffer.alloc(16); GR(h, r);
+  out.push(`hwnd=0x${h.toString(16)} cls=${cls} title="${title.slice(0,40)}" vis=${IV(h)} min=${IC(h)} rect=(${r.readInt32LE(0)},${r.readInt32LE(4)},${r.readInt32LE(8)},${r.readInt32LE(12)})`);
+  return 1;
+}, P);
+EW(cb, 0); koffi.unregister(cb);
+console.log(out.join('\n') || 'no windows');

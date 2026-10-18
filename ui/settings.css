@@ -1,0 +1,3273 @@
+/* ============================================================
+   Quick Search 桌面版 —— 设置窗口
+   ============================================================ */
+
+* { box-sizing: border-box; }
+
+:root {
+    --bg: #F5F6F8;
+    --card: #FFFFFF;
+    --fg: #1B1D23;
+    --fg-dim: #6B6F7A;
+    --line: #E4E6EB;
+    --hover: rgba(15, 20, 40, .055);
+    --accent: #3B7DFF;
+    --danger: #E5484D;
+    --shadow: 0 1px 2px rgba(16, 24, 40, .05), 0 6px 20px -12px rgba(16, 24, 40, .24);
+}
+
+/* 主题三档：跟随系统（默认）/ 亮色 / 暗色，由 JS 把 data-theme 写在 <html> 上。
+ *
+ * 关键点：强制亮色时要能**盖掉**下面那条跟随系统的深色规则，所以
+ *   · 深色规则只在 :root:not([data-theme="light"]) 下生效；
+ *   · 强制暗色再单独写一份 :root[data-theme="dark"]（不受系统深浅影响）。
+ * 两套深色值必须保持一致，改一处要记得改另一处。
+ */
+@media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+        --bg: #17181C;
+        --card: #1E1F24;
+        --fg: #ECEDF1;
+        --fg-dim: #A0A4AF;
+        --line: rgba(255, 255, 255, .12);
+        --hover: rgba(255, 255, 255, .08);
+        --accent: #6FA1FF;
+        --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 8px 24px -14px rgba(0, 0, 0, .6);
+    }
+}
+
+:root[data-theme="dark"] {
+    --bg: #17181C;
+    --card: #1E1F24;
+    --fg: #ECEDF1;
+    --fg-dim: #A0A4AF;
+    --line: rgba(255, 255, 255, .12);
+    --hover: rgba(255, 255, 255, .08);
+    --accent: #6FA1FF;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 8px 24px -14px rgba(0, 0, 0, .6);
+}
+
+/* 强制亮色：系统虽然是深色，这里也要拉回浅色一套 */
+:root[data-theme="light"] {
+    --bg: #F5F6F8;
+    --card: #FFFFFF;
+    --fg: #1B1D23;
+    --fg-dim: #6B6F7A;
+    --line: #E4E6EB;
+    --hover: rgba(15, 20, 40, .055);
+    --accent: #3B7DFF;
+    --shadow: 0 1px 2px rgba(16, 24, 40, .05), 0 6px 20px -12px rgba(16, 24, 40, .24);
+}
+
+html, body {
+    margin: 0;
+    height: 100%;
+    background: var(--bg);
+    color: var(--fg);
+    font: 13px/1.55 "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+/* ------------------------------------------------------------------
+ * r75：键盘焦点环（全局兜底）
+ *
+ * 以前只有零星两处写了 :focus-visible，其余一百多个可点控件在用键盘 Tab
+ * 走一遍时**什么都看不见** —— 鼠标用户没感觉，键盘/无障碍用户等于摸黑。
+ * 这里给所有可交互元素一条统一的光环：只在键盘导航时出现（:focus-visible
+ * 的语义就是"这次聚焦是键盘来的"），鼠标点击不会多出一圈描边，所以视觉上
+ * 与以前完全一样。
+ *
+ * ⚠ 用 :where() 把特异性压成 0：任何组件自己的 :focus-visible / border
+ *   规则都仍然能盖过它（.to-top、.eng-grp-h 那两处就是这么保住的）。
+ * ------------------------------------------------------------------ */
+:where(button, input, select, textarea, summary, a[href], [tabindex]):focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--accent) 75%, transparent);
+    outline-offset: 2px;
+}
+
+/* r75：尊重系统「减少动态效果」。bar.css 早就支持了，设置页这边一直漏着 ——
+   开了这个开关的用户（前庭敏感 / 晕动症）在这里仍要被动看一堆过渡。 */
+@media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+        animation-duration: .001ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: .001ms !important;
+        scroll-behavior: auto !important;
+    }
+}
+
+/* r56：body 从「竖着排（顶栏 / 标签 / 内容）」改成「竖着排顶栏 + 横着排目录和内容」。
+   顶栏留在最上面一行（跨满宽度，那行只有品牌名和版本号，左右两端对齐好看），
+   下面新加的 .shell 里才是「左目录 + 右内容」。
+   ⚠ 原来的 `flex-direction: column` 那行被 .shell 那段里的 row 规则覆盖了，
+     这里显式写清楚，免得下一个人看两处互相矛盾。 */
+body { display: flex; flex-direction: column; overflow: hidden; }
+
+/* ------------------------------ 顶栏 ------------------------------ */
+.top {
+    flex: none;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    height: 52px;
+    padding: 0 18px;
+    border-bottom: 1px solid var(--line);
+    background: var(--card);
+}
+
+.brand { display: flex; align-items: center; gap: 9px; font-size: 14px; font-weight: 600; }
+.brand em { margin-left: 6px; font-size: 11px; font-style: normal; font-weight: 400; color: var(--fg-dim); }
+
+.brand .dot {
+    width: 11px; height: 11px; border-radius: 50%;
+    background: linear-gradient(135deg, #4E6EF2, #7A5AF8);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.ver { font-size: 11px; color: var(--fg-dim); }
+
+/* ------------------------------ 主体 ------------------------------
+   r56：左边多了一列目录（.tabs 变成 168px 侧栏，见下面「左侧目录」），
+   所以 main 不再是「占满整个 body 宽度的唯一一列」—— 它**只占右边剩下的宽度**
+   并且自己滚。原来 main 是 body 的 flex 直接子元素、靠 flex:1 拿宽度；
+   现在它坐在 .shell 里，flex:1 + min-width:0 照旧成立，只是宽度来源变了。
+   ⚠ min-width:0 不能省：flex 子项默认 min-width:auto（按内容算），
+     宽表格/长代码串会把 main 顶宽、把侧栏挤没。 */
+main {
+    flex: 1;
+    min-width: 0;
+    overflow-y: auto;
+    padding: 16px 18px 40px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}
+
+main::-webkit-scrollbar { width: 10px; }
+main::-webkit-scrollbar-thumb {
+    background: color-mix(in srgb, var(--fg-dim) 34%, transparent);
+    border-radius: 5px;
+    border: 3px solid var(--bg);
+}
+main::-webkit-scrollbar-thumb:hover { background: var(--fg-dim); }
+
+.card {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    box-shadow: var(--shadow);
+    padding: 14px 16px 16px;
+}
+
+.card h2 {
+    margin: 0 0 10px;
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: .02em;
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+}
+
+/* r75：卡片标题前一小截品牌色竖条。
+   设置页有十来张卡片，以前标题和正文同色同重，快速扫视时标题"抓不住眼睛"。
+   这条竖条只占 3px，不改任何尺寸逻辑，却让每张卡的层次一眼分明；
+   ::before 是 flex 子项，align-self 单独居中（标题行用的是 baseline 对齐）。 */
+.card h2::before {
+    content: '';
+    flex: none;
+    align-self: center;
+    width: 3px;
+    height: 12px;
+    border-radius: 2px;
+    background: linear-gradient(180deg,
+        var(--accent),
+        color-mix(in srgb, var(--accent) 55%, #7A5AF8));
+}
+
+.card h2 small { font-size: 11px; font-weight: 400; color: var(--fg-dim); }
+
+.card.hl { animation: hl 1.1s ease; }
+@keyframes hl {
+    0%   { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 55%, transparent); }
+    100% { box-shadow: 0 0 0 10px transparent; }
+}
+
+/* ------------------------------ 开关行 ------------------------------ */
+.row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 9px 0;
+    border-top: 1px solid var(--line);
+}
+.row:first-of-type { border-top: none; }
+.row.col { flex-direction: column; align-items: stretch; gap: 8px; }
+/* 横条样式三主题：非当前主题的配置行整体藏掉。
+ * 必须显式压 .row 的 display:flex —— [hidden] 的 UA 样式（display:none）
+ * 优先级低于类选择器，不加这条 hidden 属性等于没写。 */
+.row[hidden] { display: none; }
+/* 同理：给 display:flex/grid 的容器补 [hidden] 兜底。
+ * 添加引擎的两张表单（.cform）和方式卡（.addways）都靠 hidden 属性显隐。 */
+.cform[hidden], .addways[hidden], .cform-kind[hidden] { display: none; }
+
+.rt b { display: block; font-weight: 500; }
+.rt small { display: block; font-size: 11.5px; color: var(--fg-dim); }
+
+.sw { flex: none; position: relative; width: 40px; height: 23px; cursor: pointer; }
+.sw input { position: absolute; opacity: 0; width: 0; height: 0; }
+.sw i {
+    position: absolute; inset: 0;
+    border-radius: 12px;
+    background: color-mix(in srgb, var(--fg-dim) 42%, transparent);
+    transition: background-color .16s ease;
+}
+.sw i::after {
+    content: '';
+    position: absolute; left: 2.5px; top: 2.5px;
+    width: 18px; height: 18px;
+    border-radius: 50%;
+    background: #fff;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, .3);
+    transition: transform .16s cubic-bezier(.22, 1, .36, 1);
+}
+.sw input:checked + i { background: var(--accent); }
+.sw input:checked + i::after { transform: translateX(17px); }
+
+/* ------------------------------ 滑块 ------------------------------ */
+input[type=range] {
+    -webkit-appearance: none;
+    width: 100%;
+    height: 4px;
+    border-radius: 2px;
+    background: color-mix(in srgb, var(--fg-dim) 32%, transparent);
+    outline: none;
+}
+input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 15px; height: 15px;
+    border-radius: 50%;
+    background: var(--accent);
+    border: 2px solid var(--card);
+    box-shadow: 0 1px 4px rgba(0, 0, 0, .32);
+    cursor: pointer;
+}
+
+/* ------------------------------ 行列表 ------------------------------ */
+.list { display: flex; flex-direction: column; gap: 3px; }
+
+.item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 7px 9px;
+    border: 1px solid transparent;
+    border-radius: 9px;
+    transition: background-color .12s ease, border-color .12s ease;
+}
+.item:hover { background: var(--hover); border-color: var(--line); }
+
+/* r75 记一笔：这里试过给「全部引擎」的 777 行加 `content-visibility: auto`
+   让屏幕外的行跳过布局/绘制。实测（tools/r75-lib-perf.js，桌面 r74 版 vs 新
+   构建）铺列表只从 15ms 降到 13ms、滚动那一段量不出差别 —— 也就是说这张表
+   本来就够快，**没有收益**；而代价是实打实的：列表里"带网址的软件行""带
+   组合键的快捷键行"都比普通行高，占位高度一旦和真实高度不一致，按字母跳转
+   远距离锚点就会偏几十像素，滚动时还会小幅跳一下。收益为零、风险不为零，
+   所以撤回。要再捡起来的话，先把行高做成恒定值。 */
+/* 未加入横条的引擎：只把图标和名字压暗，后面的操作按钮必须保持可读 */
+.item.off > .ic,
+.item.off > .nm { opacity: .55; }
+
+/* 未选中行里的操作按钮再额外补一点背景，避免在复杂页面上灰成一片 */
+.item.off .ops .mini {
+    background: color-mix(in srgb, var(--card) 78%, transparent);
+    color: var(--fg);
+}
+.item.off .ops .mini:hover {
+    background: var(--card);
+    border-color: color-mix(in srgb, var(--fg-dim) 55%, transparent);
+}
+
+.item .ic {
+    flex: none;
+    width: 24px; height: 24px;
+    display: flex; align-items: center; justify-content: center;
+}
+.item .ic > img {
+    width: 100%; height: 100%; object-fit: contain;
+    /* 「统一图标大小」量出来的补偿系数（见 shared.js 的 qsApplyOpticalScale） */
+    transform: scale(var(--qs-optical, 1));
+}
+.item .ic .letter {
+    display: flex; align-items: center; justify-content: center;
+    width: 100%; height: 100%;
+    border-radius: 6px;
+    background: var(--lt-color, #6B7280);
+    color: #fff; font-size: 12px; font-weight: 600;
+}
+
+.item .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.item .nm em { font-style: normal; font-size: 11px; color: var(--fg-dim); margin-left: 7px; }
+
+.item .ops { display: flex; gap: 4px; flex: none; }
+
+.mini {
+    height: 26px;
+    padding: 0 9px;
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    background: transparent;
+    color: var(--fg-dim);
+    font: inherit;
+    font-size: 11.5px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background-color .12s ease, color .12s ease, border-color .12s ease,
+                transform .1s ease;
+}
+/* r75：按下时"陷一下"。行内小按钮按下去以前毫无反馈（只有 hover 变色），
+   点完不知道到底点没点到；1px 位移是这类密集小控件的通用手感。 */
+.mini:active:not(:disabled) { transform: translateY(1px); }
+.mini:hover { background: var(--hover); color: var(--fg); border-color: color-mix(in srgb, var(--fg-dim) 45%, transparent); }
+.mini.on { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+.mini.on:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); }
+.mini.icon-only { width: 26px; padding: 0; font-size: 13px; }
+.mini:disabled { opacity: .35; cursor: default; }
+
+/* ------------------------------ 全部引擎 ------------------------------ */
+.search {
+    width: 100%;
+    height: 32px;
+    margin-bottom: 10px;
+    padding: 0 12px;
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    background: var(--hover);
+    color: var(--fg);
+    font: inherit;
+    outline: none;
+    user-select: text;
+    -webkit-user-select: text;
+}
+.search:focus { border-color: var(--accent); }
+
+/* ------------------ 全部引擎：三大类分组 + 子分类下钻（#136） ------------------
+ * 和横条「更多引擎」面板同一套口味（见 bar.css 的 .cat-nav / .cat-title），
+ * 但设置页自有类名：这里一行一条引擎（不是格子），分组头必须整行可点。 */
+
+/* 引擎库目录（r73）：大类 / 中类 / 小类 三级下钻 + 全部引擎的首字母索引。
+ *
+ *  用户原话：「默认只显示这 4 个大类，当我点击某一个大类之后才会展开这个大类下
+ *  相应的中类，点击某一个中类之后才会展示该中类下的某一小类」「而且还是属于一种
+ *  浮在页面上的，因为我能够在这个大类跟窗口中间看到引擎从那儿经过」——
+ *  所以这里**不吸顶**（普通文档流，引擎不会从它下面穿过）。
+ *
+ *  每级一行：左边级别标签，右边胶囊轨道。中类/小类条目多，单行横滚；
+ *  首字母那一行**换行铺开**，一次把所有字母陈列出来（点一下跳到那一组）。 */
+.eng-nav {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    margin: 8px 2px 10px;
+    padding: 0;
+}
+.eng-nav-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+}
+/* 级别标签：左对齐一列，把「这是第几级」说清楚 */
+.eng-nav-lv {
+    flex: 0 0 auto;
+    min-width: 30px;
+    font-style: normal;
+    font-size: 10.5px;
+    line-height: 1;
+    color: var(--fg-dim);
+    letter-spacing: .04em;
+    text-align: right;
+    white-space: nowrap;
+}
+/* 胶囊轨道：默认单行横滚 */
+.eng-nav-track {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    flex: 1;
+    min-width: 0;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 1px 0 3px;
+}
+/* 首字母索引：换行铺开（用户要「一次性把所有的首字母给陈列出来」） */
+.eng-nav-track.wrap {
+    flex-wrap: wrap;
+    overflow: visible;
+    gap: 4px;
+    padding: 1px 0;
+}
+.eng-nav-track::-webkit-scrollbar { height: 4px; }
+.eng-nav-track::-webkit-scrollbar-thumb {
+    background: color-mix(in srgb, var(--fg-dim) 30%, transparent);
+    border-radius: 2px;
+}
+.eng-nav-track::-webkit-scrollbar-track { background: transparent; }
+
+.eng-nav-item {
+    flex: none;
+    height: 26px;
+    padding: 0 12px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: transparent;
+    color: var(--fg-dim);
+    font: inherit;
+    font-size: 12px;
+    line-height: 24px;
+    white-space: nowrap;
+    cursor: pointer;
+    transition: background-color .12s ease, border-color .12s ease, color .12s ease;
+}
+.eng-nav-item:hover { background: var(--hover); color: var(--fg); }
+.eng-nav-item.on {
+    color: var(--accent);
+    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+/* 胶囊尾巴上的数量 */
+.eng-nav-item .eng-nav-n {
+    margin-left: 5px;
+    font-size: 10.5px;
+    color: var(--fg-dim);
+    opacity: .9;
+}
+.eng-nav-item:hover .eng-nav-n { color: inherit; }
+
+/* 首字母胶囊：单个字母，方一点、小一点（像 Win11 的字母索引） */
+.eng-nav-track.wrap .eng-nav-item {
+    height: 24px;
+    min-width: 30px;
+    padding: 0 6px;
+    border-radius: 7px;
+    font-size: 11.5px;
+    line-height: 22px;
+    text-align: center;
+}
+
+/* 全部引擎 / 搜索结果里的字母分组标题（A / B / … / #） */
+.eng-letter-h {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    margin: 14px 2px 6px 6px;
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--accent);
+    scroll-margin-top: 8px;
+}
+.eng-letter-h small {
+    font-size: 11px;
+    font-weight: 400;
+    color: var(--fg-dim);
+}
+
+/* r74：小类目录汇总行 —— 27 个类一行排不下，换行铺开 + 紧凑小胶囊。
+ *  比字母胶囊再小一档（22px、11px 字）：它是目录，不是主操作。 */
+.eng-nav-track.wrap.cats {
+    flex-wrap: wrap;
+    overflow: visible;
+    gap: 4px;
+    padding: 1px 0;
+}
+.eng-nav-track.wrap.cats .eng-nav-item {
+    height: 22px;
+    padding: 0 9px;
+    border-radius: 999px;
+    font-size: 11px;
+    line-height: 20px;
+}
+.eng-nav-track.wrap.cats .eng-nav-item .eng-nav-n {
+    margin-left: 4px;
+    font-size: 10px;
+}
+
+/* r74：节标题上的「只看这一类」小按钮。
+ *  小类过滤从目录行收进这里（目录行改成纯跳转，见 renderAllDrill 注释），
+ *  所以按钮要贴着节标题、小、不抢戏 —— 悬停才显色。 */
+.eng-cat-h .eng-cat-only {
+    order: 3;
+    align-self: center;
+    margin-left: auto;
+    height: 20px;
+    padding: 0 9px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: transparent;
+    color: var(--fg-dim);
+    font: inherit;
+    font-size: 10.5px;
+    line-height: 18px;
+    cursor: pointer;
+    opacity: .75;
+    transition: background-color .12s ease, border-color .12s ease, color .12s ease, opacity .12s ease;
+}
+.eng-cat-h .eng-cat-only:hover {
+    opacity: 1;
+    color: var(--accent);
+    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+/* ------------------ r74：首字母聚合索引（Win11 式） ------------------ */
+
+/* 右下角浮动钮：letters 模式下才出现（idxFabHide 收起来，[hidden] 要显式
+ * 压掉 inline-flex，否则 hidden 属性会被 display 覆盖）。 */
+.idx-fab {
+    position: fixed;
+    right: 16px;
+    bottom: 16px;
+    z-index: 60;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 30px;
+    padding: 0 12px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: var(--card);
+    color: var(--fg-dim);
+    font: inherit;
+    font-size: 11.5px;
+    cursor: pointer;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, .14);
+    transition: background-color .12s ease, color .12s ease, border-color .12s ease,
+                transform .12s ease;
+}
+.idx-fab[hidden] { display: none; }
+.idx-fab:hover { background: var(--hover); color: var(--fg); transform: translateY(-1px); }
+/* 右边的小徽章：当前所在字母组（滚动监听维护）。空 / 没点亮时不占位。 */
+.idx-fab .idx-fab-c {
+    display: none;
+    min-width: 15px;
+    height: 15px;
+    padding: 0 3px;
+    border-radius: 4px;
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    color: var(--accent);
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 15px;
+    text-align: center;
+}
+.idx-fab.cur .idx-fab-c:not(:empty) { display: block; }
+
+/* 聚合面板：从浮动钮上头弹出，27 个字母 7 列 × 4 行一眼看全 */
+.idx-pop {
+    position: fixed;
+    right: 16px;
+    bottom: 54px;
+    z-index: 61;
+    width: 300px;
+    padding: 10px 12px 12px;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    background: var(--card);
+    box-shadow: 0 10px 34px rgba(0, 0, 0, .2);
+}
+.idx-pop[hidden] { display: none; }
+.idx-pop-h {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: -2px 0 9px;
+}
+.idx-pop-h b { font-size: 12.5px; font-weight: 700; color: var(--fg); }
+.idx-pop-s { font-size: 10.5px; color: var(--fg-dim); }
+.idx-pop-x {
+    margin-left: auto;
+    width: 22px;
+    height: 22px;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--fg-dim);
+    font: inherit;
+    font-size: 11px;
+    line-height: 1;
+    cursor: pointer;
+}
+.idx-pop-x:hover { background: var(--hover); color: var(--fg); }
+.idx-pop-g {
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    gap: 4px;
+}
+.idx-pop-i {
+    height: 34px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: transparent;
+    color: var(--fg-dim);
+    font: inherit;
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1;
+    cursor: pointer;
+    transition: background-color .12s ease, border-color .12s ease, color .12s ease;
+}
+.idx-pop-i:hover { background: var(--hover); color: var(--fg); }
+.idx-pop-i.on {
+    color: var(--accent);
+    border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+/* 没有引擎的字母：位置留着（索引的意义就是看全 27 个），但点不动 */
+.idx-pop-i.off {
+    opacity: .3;
+    cursor: default;
+}
+.idx-pop-i.off:hover { background: transparent; color: var(--fg-dim); }
+
+/* ------------------ r75：回到顶部 ------------------
+ * 滚过两屏（main.scrollTop > 2 × clientHeight）才亮，判据在 settings.js 的
+ * toTopSync 里。这里只管长相与过渡：
+ *  · 与 .idx-fab 同一个角落、同一个尺寸族（30px 高胶囊），一眼看得出是一套；
+ *  · 显隐用 opacity + translateY + pointer-events，不碰 display —— 滚动帧里
+ *    插拔 fixed 元素会触发布局，是长页面最不该做的事；
+ *  · 两个钮同时亮时（引擎页又滚过两屏）由 body.idx-on 把这一颗抬上去。 */
+.to-top {
+    position: fixed;
+    right: 16px;
+    bottom: 16px;
+    z-index: 59;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    height: 30px;
+    padding: 0 12px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: var(--card);
+    color: var(--fg-dim);
+    font: inherit;
+    font-size: 11.5px;
+    cursor: pointer;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, .14);
+    opacity: 0;
+    transform: translateY(8px);
+    pointer-events: none;
+    transition: opacity .16s ease, transform .16s ease,
+                background-color .12s ease, color .12s ease, border-color .12s ease;
+}
+.to-top.on { opacity: 1; transform: none; pointer-events: auto; }
+.to-top.on:hover { transform: translateY(-2px); }
+.to-top:hover {
+    background: var(--hover);
+    color: var(--fg);
+    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+.to-top:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* 箭头单独给一点视觉重量：它是这颗钮的"图标位" */
+.to-top-i { font-size: 13px; line-height: 1; font-weight: 700; }
+/* 首字母索引浮动钮（.idx-fab，z 60）也在右下角：两个同时亮时抬起这一颗 */
+body.idx-on .to-top { bottom: 56px; }
+
+/* 滚动监听点亮的「当前节」—— 与下钻过滤态 .on 分开：
+ *  .on = 正在只看这一类（实底）；.spy = 只是滚到这里（只点边框）。 */
+.eng-nav-item.spy {
+    color: var(--accent);
+    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+/* 一级分类标题（网页引擎 / 软件引擎 / 快捷键引擎）。
+ *
+ * r67/r68：重新做成**清晰的树第一层**。r66 我曾把它整个隐藏 —— 那是我理解错了：
+ * 用户要的是「网页引擎 → 网页搜索引擎 → 知识/开发/翻译」这条三级树，
+ * 不是把第一层删掉；删了之后三个子类标题平铺成一列，反而看不出谁属于谁。
+ *
+ * 三级靠字号 + 颜色拉开：一级 14.5px 实色、二级 13.5px、三级 12.5px。
+ * 右侧数字（共 N 个）用小字。不再是可点的折叠开关（箭头藏掉），
+ * 免得"点了没反应"—— 上一轮用户报的就是这个。 */
+.eng-grp { margin-top: 14px; }
+.eng-grp-h {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    padding: 0 2px 7px;
+    font-size: 14.5px;
+    font-weight: 700;
+    letter-spacing: .01em;
+    color: var(--fg);
+    border-bottom: 1px solid color-mix(in srgb, var(--fg) 16%, transparent);
+    cursor: default;
+}
+.eng-grp-t { font-size: inherit; font-weight: inherit; color: inherit; }
+.eng-grp-n { font-size: 11.5px; font-weight: 400; color: var(--fg-dim); }
+.eng-grp-c { display: none; }
+.eng-grp:first-child { margin-top: 2px; }
+.eng-grp-h {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 10px;
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    background: var(--hover);
+    cursor: pointer;
+    user-select: none;
+    -webkit-user-select: none;
+}
+.eng-grp-h:hover { border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
+.eng-grp-h:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--accent) 55%, transparent);
+    outline-offset: 1px;
+}
+.eng-grp-t { font-size: 13px; font-weight: 600; color: var(--fg); }
+.eng-grp-n { font-size: 11px; color: var(--fg-dim); }
+.eng-grp-c {
+    margin-left: auto;
+    width: 0;
+    height: 0;
+    border-left: 5px solid transparent;
+    border-right: 5px solid transparent;
+    border-top: 6px solid var(--fg-dim);
+    transition: transform .16s ease;
+}
+.eng-grp.shut .eng-grp-c { transform: rotate(-90deg); }
+.eng-grp-body { padding: 2px 0 4px; }
+
+/* 子类节标题（搜索引擎 / 直达网页 / 软件搜索 / 软件直达 / 快捷键）：
+ * 比大类头再淡一档、缩进半格，和引擎行拉开从属关系 */
+/* r66：子类标题（网页搜索 / 网页直达 / 软件搜索 / 软件直达）。
+ * 用户原话：「每一个小分类它的名字落实在显示上特别小，比引擎本身的名字还小…
+ * 而且它的颜色竟然是灰色的，就感觉像是半透明的样式，就不显眼」。
+ * 以前 11.5px + 80% 淡化 → 比引擎名（13px）还小、还灰。
+ * 现在：13.5px、实色 --fg、左边一条强调色短杠 —— 层级一眼看出来。 */
+.eng-sub-h {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    margin: 16px 2px 8px 6px;
+    font-size: 13.5px;
+    font-weight: 700;
+    letter-spacing: .02em;
+    color: var(--fg);
+}
+.eng-sub-h .eng-sub-up {
+    font-style: normal;
+    font-size: 11.5px;
+    font-weight: 600;
+    color: var(--fg-dim);
+}
+.eng-sub-h::before {
+    content: '';
+    flex: 0 0 auto;
+    width: 3px;
+    height: 13px;
+    border-radius: 2px;
+    background: var(--accent);
+}
+.eng-sub-h:first-child { margin-top: 8px; }
+
+/* r64：第三层 —— 用途分类（搜索引擎 / 工具 / 购物 / 娱乐 …）。
+ *
+ * 比上一层的子类标题**更轻**：更小的字、更淡的颜色、左边一道细竖线。
+ * 三级标题如果一样重，用户分不清"哪一层是搜索/直达、哪一层是购物/娱乐"。
+ * 左边那道竖线是给"这一整组"画个括号，一眼能看出归属。 */
+/* r66：第三层（购物 / 游戏 / 视频 …）同样放大加深。
+ * 它比子类标题小半档（12.5px vs 13.5px）—— 层级还是要分得开，
+ * 但不能小到"比引擎名还小、还发灰"。 */
+.eng-cat-h {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    margin: 10px 2px 5px 30px;
+    padding-left: 8px;
+    border-left: 2px solid color-mix(in srgb, var(--fg) 22%, transparent);
+    font-size: 12.5px;
+    font-weight: 650;
+    color: color-mix(in srgb, var(--fg) 88%, transparent);
+}
+.eng-cat-h small {
+    font-weight: 400;
+    font-size: 11px;
+    opacity: .85;
+}
+
+/* r73：`主题组`（r70 的中间层）整个删掉了 —— 用户原话「把主题这一栏全部给删掉」。
+ * 引擎库现在是 大类 → 中类 → 小类 三级下钻 + 「全部引擎」按首字母排，
+ * 不再有主题这一级，对应的 .eng-theme-h 样式也一并移除。 */
+
+/* ------------------ 添加引擎：入口 + 三种方式（#127） ------------------
+ * 表单默认收起。点「＋ 添加引擎」展开三张方式卡，选一种才放对应表单。 */
+.add-entry {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 4px 0 2px;
+}
+.add-entry-tip {
+    font-size: 11.5px;
+    color: var(--fg-dim);
+}
+
+/* r59：这 3 张「添加方式」卡从**竖排大卡**改成**横排小胶囊**。
+ *
+ * 用户原话：「我希望改小的是添加引擎页面的这 3 个添加胶囊的大小。」
+ * 以前是「图标在上、标题居中、说明在下」的竖卡（30px 圆 + 12px 内边距），
+ * 三张并排占掉将近 90px 高，而它们只是三个入口 —— 太占地方。
+ * 现在：图标缩到 22px 方角、贴左边跨两行，标题和说明挤在右边两行，
+ * 内边距收到 8/10px。高度大约从 88px 降到 46px，信息一个不少。
+ *
+ * 用 grid 而不是 flex：三个 span 是**兄弟节点**，要让图标跨两行、标题和
+ * 说明各占右边一行，grid 的 grid-row/grid-column 是最直接的写法
+ * （flex 得额外套一层容器，HTML 就得改，没必要）。 */
+.addways {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 6px;
+    margin: 8px 0 2px;
+}
+
+.addway {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    grid-template-rows: auto auto;
+    column-gap: 8px;
+    row-gap: 0;
+    align-items: center;
+    padding: 7px 9px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--hover);
+    color: var(--fg);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+    transition: background-color .12s ease, border-color .12s ease;
+}
+.addway:hover {
+    border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+}
+.addway.on {
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.addway:active { background: color-mix(in srgb, var(--accent) 18%, transparent); }
+
+.addway .aw-ic {
+    grid-row: 1 / span 2;
+    grid-column: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    border-radius: 6px;
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--accent);
+    border: 1px solid color-mix(in srgb, var(--accent) 60%, transparent);
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.addway .aw-t {
+    grid-column: 2;
+    font-size: 12.5px;
+    font-weight: 700;
+    line-height: 1.25;
+}
+.addway .aw-d {
+    grid-column: 2;
+    font-size: 10.5px;
+    line-height: 1.3;
+    color: var(--fg-dim);
+    /* 说明最多两行，超出省略 —— 三张卡高度因此一致，不会一张高一张矮 */
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
+/* ------------------------------ 关于 ------------------------------ */
+.about p { margin: 0 0 8px; color: var(--fg-dim); }
+/* 备份覆盖范围清单：比正文小一号、行距松一点，当说明书读 */
+.about p.bk-covers { font-size: 12px; line-height: 1.7; opacity: .85; }
+.about code,
+.help-body code {
+    padding: 1px 5px;
+    border-radius: 5px;
+    background: var(--hover);
+    font-family: Consolas, monospace;
+    font-size: 12px;
+    color: var(--fg);
+    user-select: text;
+}
+
+/* 「关于」的元信息表：开发者 / 版本 / 更新时间 / 渲染引擎。
+ * 用「一行一条 + 首行无上边框」而不是网格：窗口压到 600px 宽时网格会折行，
+ * 折出来的行高不一致，看着像坏了。 */
+.about-meta {
+    margin-top: 4px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    overflow: hidden;
+}
+.am-row { display: flex; gap: 12px; padding: 9px 12px; border-top: 1px solid var(--line); }
+.am-row:first-child { border-top: 0; }
+.am-k { flex: none; width: 88px; font-size: 11.5px; color: var(--fg-dim); }
+/* 版本号 / 时间要能选中复制（报 bug 时第一句就是"我这是哪个版本"） */
+.am-v {
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--fg);
+    font-variant-numeric: tabular-nums;
+    user-select: text;
+    -webkit-user-select: text;
+}
+
+/* 「使用的工具」：一排小胶囊，比一整段文字好扫 */
+.tools { margin-top: 14px; }
+.tools-title {
+    margin-bottom: 7px;
+    font-size: 11.5px;
+    letter-spacing: .04em;
+    color: var(--fg-dim);
+}
+.tools-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.tools-chips span {
+    padding: 3px 9px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: var(--hover);
+    font-size: 11.5px;
+    color: var(--fg);
+    white-space: nowrap;
+}
+
+/* 「更新日志」：一条版本号 + 一组要点。
+ * 排版思路：版本号做成左边一根细竖线对齐的小标题，条目跟着往右缩一点 ——
+ * 一眼能看出"哪些是同一版的、哪些是后面的"，比平铺一列更有结构感。 */
+.changelog { margin-top: 9px; }
+.cl-ver {
+    position: relative;
+    margin: 0 0 4px;
+    padding-left: 11px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--accent);
+}
+.cl-ver::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 50%;
+    width: 3px;
+    height: 3px;
+    border-radius: 50%;
+    background: var(--accent);
+    transform: translateY(-50%);
+}
+.cl-list {
+    margin: 0 0 12px;
+    padding: 0 0 0 11px;
+    list-style: none;
+    border-left: 1px solid var(--line);
+}
+.cl-list:last-child { margin-bottom: 2px; }
+.cl-list li {
+    position: relative;
+    margin-bottom: 6px;
+    padding-left: 12px;
+    font-size: 12.5px;
+    line-height: 1.65;
+    color: var(--fg);
+}
+.cl-list li::before {
+    content: '·';
+    position: absolute;
+    left: 2px;
+    color: var(--fg-dim);
+}
+.cl-list li:last-child { margin-bottom: 0; }
+.cl-list li b { font-weight: 600; }
+.cl-list li code {
+    padding: 1px 4px;
+    border-radius: 4px;
+    background: var(--hover);
+    font-size: 11.5px;
+}
+
+/* ------------------------------ 帮助 ------------------------------
+ * 分主题的折叠块（原生 <details>，不依赖脚本）。
+ * 默认全部收起、只第一条展开：这一页的字量很大，一进来全摊开就是一大片
+ * 文字墙，用户根本不会读；收起来反而像一份目录，想看哪条点哪条。
+ */
+.help-list { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
+
+.help-item {
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    overflow: hidden;
+    transition: border-color .15s ease, background-color .15s ease;
+}
+.help-item[open] {
+    border-color: color-mix(in srgb, var(--accent) 30%, var(--line));
+    background: color-mix(in srgb, var(--accent) 5%, transparent);
+}
+
+.help-item > summary {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--fg);
+    cursor: pointer;
+    list-style: none;
+    user-select: none;
+}
+/* 原生三角在 Chrome / Firefox 上是两套写法，都得干掉，否则会各显示一个 */
+.help-item > summary::-webkit-details-marker { display: none; }
+.help-item > summary::marker { content: ''; }
+.help-item > summary:hover { background: var(--hover); }
+.help-item[open] > summary { color: var(--accent); }
+
+/* 自己画的箭头：收起指向右、展开指向下 */
+.help-item > summary::before {
+    content: '';
+    flex: none;
+    width: 6px;
+    height: 6px;
+    margin: 0 2px 2px 1px;
+    border-right: 1.6px solid currentColor;
+    border-bottom: 1.6px solid currentColor;
+    transform: rotate(-45deg);
+    transition: transform .18s ease;
+}
+.help-item[open] > summary::before { transform: rotate(45deg); margin-bottom: 0; }
+
+.help-body {
+    padding: 2px 14px 12px 27px;
+    font-size: 12px;
+    line-height: 1.72;
+    color: var(--fg-dim);
+    user-select: text;
+    -webkit-user-select: text;
+}
+.help-body p { margin: 0 0 7px; }
+.help-body p:last-child { margin-bottom: 0; }
+.help-body ul { margin: 0 0 8px; padding-left: 18px; }
+.help-body ul:last-child { margin-bottom: 0; }
+.help-body li { margin: 0 0 4px; }
+.help-body b { color: var(--fg); font-weight: 600; }
+
+.acts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+
+/* ------------------------------ OCR 诊断面板 ------------------------------ */
+/* 「一键诊断」的结果区：先一行总结，下面每个环节一行（名称 / 实测耗时 /
+ * 说明 / 可选的「优化」按钮）。设计意图：
+ *   · 耗时是用户最关心的数字，等宽右对齐成一列，扫一眼就能比大小；
+ *   · 「识别状态」是背景信息（没有 action），按钮位留空；
+ *   · 整体失败（没网 / 没密钥）时 data-ok="0"，总结行转危险色。 */
+.ocr-diag {
+    margin-top: 10px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--hover);
+    padding: 10px 12px;
+}
+.ocr-diag .od-sum {
+    font-size: 12.5px;
+    line-height: 1.6;
+    color: var(--fg);
+    font-weight: 600;
+}
+.ocr-diag[data-ok="0"] .od-sum { color: var(--danger); }
+.ocr-diag .od-rows { margin-top: 8px; }
+.ocr-diag .od-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 0;
+    border-top: 1px dashed color-mix(in srgb, var(--line) 80%, transparent);
+    font-size: 12px;
+}
+.ocr-diag .od-row:first-child { border-top: 0; }
+.ocr-diag .od-name { flex: 0 0 88px; color: var(--fg); font-weight: 600; }
+.ocr-diag .od-ms {
+    flex: 0 0 72px;
+    text-align: right;
+    color: color-mix(in srgb, #2FA84F 75%, var(--fg));
+    font-variant-numeric: tabular-nums;
+    font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+.ocr-diag[data-ok="0"] .od-ms { color: var(--fg-dim); }
+.ocr-diag .od-detail { flex: 1 1 auto; color: var(--fg-dim); line-height: 1.5; }
+.ocr-diag .od-row .mini { flex: 0 0 auto; }
+
+/* 快捷键行：录入按钮 + 「清除」 + 提示，三者一行。
+ * 「清除」是后加的（用户要求：能设就要能取消）—— 没有它，用户录错一个组合
+ * 就再也回不到"没有快捷键"的状态，只能拿另一个组合顶掉。 */
+.hotkey-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 10px;
+}
+.hotkey-row .btn[disabled] { opacity: .45; cursor: default; }
+
+.btn {
+    height: 32px;
+    padding: 0 14px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: transparent;
+    color: var(--fg);
+    font: inherit;
+    cursor: pointer;
+    transition: background-color .12s ease, border-color .12s ease, color .12s ease,
+                transform .1s ease;
+}
+.btn:hover { background: var(--hover); }
+.btn:active:not([disabled]) { transform: translateY(1px); }
+.btn.danger { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 40%, transparent); }
+.btn.danger:hover { background: color-mix(in srgb, var(--danger) 12%, transparent); }
+
+.hint { margin-top: 10px; font-size: 11.5px; color: var(--fg-dim); }
+
+/* 地址补全预览：告诉用户「你填的半截地址，软件会当成什么」，
+   以及备份文件最终落在哪 —— 自动补全必须看得见，否则用户会以为填错了。 */
+.preview {
+    margin-top: 6px;
+    font-size: 11.5px;
+    line-height: 1.5;
+    color: var(--fg-dim);
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent) 26%, transparent);
+    border-radius: 7px;
+    padding: 6px 9px;
+    word-break: break-all;
+    user-select: text;
+}
+.preview[data-bad] {
+    color: var(--danger);
+    background: color-mix(in srgb, var(--danger) 10%, transparent);
+    border-color: color-mix(in srgb, var(--danger) 34%, transparent);
+}
+
+/* 云端备份列表：恢复时挑一份。每条做成整行可点的按钮 —— 恢复是个
+   「覆盖本机配置」的动作，得点得准，不能靠一个小小的文字链接。 */
+.wd-list {
+    margin-top: 10px;
+    padding: 10px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--fg) 3%, transparent);
+}
+.wd-list-head {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+.wd-list-head b { font-size: 12.5px; }
+.wd-hint { font-size: 11px; color: var(--fg-dim); }
+.wd-items { display: flex; flex-direction: column; gap: 6px; }
+.wd-item {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+    width: 100%;
+    text-align: left;
+    padding: 8px 10px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--card);
+    color: var(--fg);
+    cursor: pointer;
+    font: inherit;
+}
+.wd-item:hover {
+    border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+.wd-item .nm {
+    font-size: 12.5px;
+    word-break: break-all;
+}
+.wd-item .meta {
+    font-size: 11px;
+    color: var(--fg-dim);
+}
+.wd-empty {
+    font-size: 11.5px;
+    color: var(--fg-dim);
+    padding: 6px 2px;
+}
+
+/* 「管理」按钮贴右：它是多选模式的开关，跟标题同排、不抢视线 */
+.wd-list-head .btn {
+    margin-left: auto;
+    flex: none;
+    padding: 2px 10px;
+    font-size: 11.5px;
+}
+
+/* 多选模式：每条从「整行可点 = 恢复」变成「复选框 + 名字 = 待删」。
+   两种模式下 .wd-item 都还是整行可点，只是点下去干的事不同。 */
+.wd-item.sel {
+    flex-direction: row;
+    align-items: center;
+    gap: 9px;
+}
+.wd-item.sel .ck {
+    flex: none;
+    width: 15px;
+    height: 15px;
+    margin: 0;
+    accent-color: var(--accent);
+    cursor: pointer;
+}
+.wd-item.sel .txt {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+.wd-item.picked {
+    border-color: color-mix(in srgb, var(--accent) 70%, transparent);
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+/* 本地备份目录：路径 + 标签 + 现有备份清单。样式刻意和云端备份列表
+   （.wd-list）保持同一直系，两块放在同一个 Tab 里看着是一套东西。 */
+.bk-path {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-top: 8px;
+    padding: 8px 10px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--fg) 3%, transparent);
+}
+.bk-path code {
+    font-size: 12px;
+    word-break: break-all;
+    color: var(--fg);
+}
+.bk-tag {
+    flex: none;
+    font-size: 10.5px;
+    line-height: 1;
+    padding: 3px 7px;
+    border-radius: 99px;
+    border: 1px solid var(--line);
+    color: var(--fg-dim);
+}
+.bk-tag.custom {
+    border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+    color: var(--accent);
+}
+.bk-files {
+    margin-top: 10px;
+    padding: 10px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--fg) 3%, transparent);
+}
+.bk-files-head {
+    font-size: 11.5px;
+    color: var(--fg-dim);
+    margin-bottom: 8px;
+}
+.bk-files:empty { display: none; }
+.bk-file {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 5px 2px;
+}
+.bk-file + .bk-file { border-top: 1px dashed var(--line); }
+.bk-file .bk-name {
+    font-size: 12px;
+    word-break: break-all;
+}
+.bk-file .bk-meta {
+    flex: none;
+    font-size: 11px;
+    color: var(--fg-dim);
+}
+.bk-empty {
+    font-size: 11.5px;
+    color: var(--fg-dim);
+    padding: 4px 2px;
+}
+
+/* ---------------------- 清理冗余数据（扫描结果面板） ----------------------
+ * 扫描结果先摆给用户看、确认了才删 —— 所以这块要在视觉上跟"普通提示"区分开：
+ * 加一道左边框，让人一眼看出"这是一份待确认的清单"。 */
+.bk-cleanup {
+    margin-top: 10px;
+    padding: 10px 12px;
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--accent);
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+.bk-cleanup-head { margin-bottom: 8px; }
+.bk-cleanup-head b { font-size: 12.5px; }
+.bk-cleanup-head small {
+    display: block;
+    margin-top: 2px;
+    font-size: 11.5px;
+    color: var(--fg-dim);
+}
+.bk-cleanup-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+.bk-cleanup-list li {
+    padding: 6px 2px;
+    border-top: 1px dashed var(--line);
+}
+.bk-cleanup-list li:first-child { border-top: 0; }
+.bk-cleanup-list .bk-cu-line {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 10px;
+}
+.bk-cleanup-list .bk-cu-name { font-size: 12px; }
+.bk-cleanup-list .bk-cu-size {
+    flex: none;
+    font-size: 11px;
+    color: var(--fg-dim);
+}
+.bk-cleanup-list .bk-cu-why {
+    margin-top: 3px;
+    font-size: 11px;
+    line-height: 1.5;
+    color: var(--fg-dim);
+}
+.bk-cleanup-list .bk-cu-none {
+    font-size: 12px;
+    color: var(--fg-dim);
+    padding: 4px 2px;
+}
+.bk-cleanup-list .bk-cu-skip {
+    margin-top: 4px;
+    font-size: 11px;
+    color: var(--fg-dim);
+}
+
+/* ------------------------------ toast ------------------------------ */
+.toast {
+    position: fixed;
+    left: 50%;
+    bottom: 22px;
+    transform: translateX(-50%) translateY(10px);
+    padding: 8px 16px;
+    border-radius: 9px;
+    background: rgba(20, 22, 28, .93);
+    color: #fff;
+    font-size: 12.5px;
+    box-shadow: 0 8px 24px -8px rgba(0, 0, 0, .6);
+    opacity: 0;
+    transition: opacity .18s ease, transform .18s ease;
+    pointer-events: none;
+}
+.toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+/* --------------------------- 分段选择器 --------------------------- */
+.seg {
+    display: inline-flex;
+    gap: 3px;
+    padding: 3px;
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    background: color-mix(in srgb, var(--fg-dim) 10%, transparent);
+}
+
+.seg button {
+    padding: 6px 14px;
+    border: 0;
+    border-radius: 7px;
+    background: transparent;
+    color: var(--fg-dim);
+    font: inherit;
+    font-size: 13px;
+    cursor: pointer;
+    transition: background-color .14s ease, color .14s ease;
+}
+
+.seg button:hover { color: var(--fg); }
+
+.seg button.on {
+    background: var(--card);
+    color: var(--fg);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, .14);
+}
+
+/* ------------------------------ 左侧目录 ------------------------------
+   r56：从「顶部一排标签」改成「左侧一列目录」。用户原话：
+   「设置当中的设置目录放左边，点击了哪一项，跳转到哪一项」。
+
+   为什么值得改：十个分页横着排在窗口顶部，每颗 tab 只有几十像素宽，
+   长名字（「文字识别」「识图搜索」）被挤成两行，横向还要 wrap；
+   换成左侧一列之后每一行都有完整宽度放名字 + 图标，
+   而且**窗口越高越占优**（竖向空间本来就闲着）。
+
+   ⚠ DOM 契约一个都没动（还是 `#tabs button[data-tab]`）：
+     bindTabs / qs://goto-tab / qs://focus-tab / reportRects / 全部探针
+     全都按 `#tabs button[data-tab="…"]` 找按钮，改 CSS 就够了，
+     JS 一行不用碰 —— 这正是当初坚持"类名一个都没改"的回报。
+   ⚠ body 仍是 `flex-direction: column`（顶栏在上、.shell 在下）；
+     横排发生在 .shell 内部，不靠改 body 的方向。 */
+
+/* 侧栏与内容区并排；顶栏留给右边那一块（左边整列都是目录）*/
+.shell {
+    flex: 1;
+    display: flex;
+    flex-direction: row;
+    min-width: 0;
+    min-height: 0;
+}
+
+.tabs {
+    flex: none;
+    width: 168px;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 2px;
+    padding: 12px 10px;
+    overflow-y: auto;              /* 矮窗口 + 大字号时竖向可滚 */
+    background: var(--card);
+    border-right: 1px solid var(--line);
+    border-bottom: 0;
+}
+
+.tabs button {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 9px 12px;
+    border: 0;
+    background: transparent;
+    color: var(--fg-dim);
+    font: inherit;
+    font-size: 12.5px;
+    text-align: left;
+    cursor: pointer;
+    border-radius: 8px;
+    white-space: nowrap;
+    transition: color .14s ease, background-color .14s ease;
+}
+.tabs button:hover { color: var(--fg); background: var(--hover); }
+
+.tabs button.on { color: var(--fg); font-weight: 600; background: var(--hover); }
+/* 选中标记从「底部一条横线」换成「左边一根竖条」—— 目录是竖着排的，
+   指示器也跟着竖过来，指向性比横线清楚。 */
+.tabs button.on::after {
+    content: '';
+    position: absolute;
+    left: 0; top: 8px; bottom: 8px;
+    width: 3px;
+    border-radius: 3px;
+    background: var(--accent);
+}
+
+/* r55 加的 tab 前那颗装饰图标，这里接着用。
+ * 尺寸略小于文字 —— emoji 自带内边距，一样大会显得比字还重。
+ * 灰度滤镜让未选中的 tab 更"素"，选中的那颗恢复彩色，
+ * 于是扫过去时颜色也成了一层提示。 */
+.tabs .tb-i {
+    flex: none;
+    font-size: 13px;
+    font-style: normal;
+    filter: grayscale(1);
+    opacity: .8;
+    transition: filter .14s ease, opacity .14s ease;
+}
+.tabs button.on .tb-i { filter: none; opacity: 1; }
+
+/* 目录的滚动条收窄：默认 10px 那条在 168px 的侧栏里太占地 */
+.tabs::-webkit-scrollbar { width: 6px; }
+.tabs::-webkit-scrollbar-thumb {
+    background: color-mix(in srgb, var(--fg-dim) 30%, transparent);
+    border-radius: 3px;
+}
+
+.pane { display: flex; flex-direction: column; gap: 14px; }
+.pane[hidden] { display: none; }
+
+/* ------------------------------ 文本输入 ------------------------------ */
+.txt, .ta {
+    width: 100%;
+    padding: 8px 11px;
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    background: var(--hover);
+    color: var(--fg);
+    font: inherit;
+    font-size: 12.5px;
+    outline: none;
+    user-select: text;
+    -webkit-user-select: text;
+}
+.txt:focus, .ta:focus { border-color: var(--accent); }
+.ta {
+    resize: vertical;
+    min-height: 76px;
+    font-family: Consolas, "Microsoft YaHei", monospace;
+    line-height: 1.5;
+}
+.txt::placeholder, .ta::placeholder { color: color-mix(in srgb, var(--fg-dim) 70%, transparent); }
+
+/* 富文本收藏编辑器（contenteditable div）：和 .ta 同款壳，颜色/加粗等
+   格式由内容自带的 style 决定（用户要求「文字颜色跟着文本的格式走」）。
+   placeholder 用 :empty + attr(data-ph) 画 —— contenteditable 没有
+   placeholder 属性。 */
+.ta.rich {
+    min-height: 76px;
+    max-height: 280px;
+    overflow-y: auto;
+    cursor: text;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+.ta.rich.empty::before {
+    content: attr(data-ph);
+    color: color-mix(in srgb, var(--fg-dim) 70%, transparent);
+    pointer-events: none;
+}
+/* 收藏折叠行上的「带格式」小徽标：存了带颜色/加粗的内容就有它 */
+/* 「带格式」徽标：原来是个 999px 圆角小胶囊 —— 也是「胶囊套胶囊」的一部分。
+ * 现在退成朴素的小字标注（accent 色 + 前置小圆点），不再画胶囊。 */
+.fav-item-line .fav-fmt {
+    flex: none;
+    font-size: 10.5px;
+    line-height: 1.6;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    color: var(--accent);
+    background: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+.fav-item-line .fav-fmt::before {
+    content: '';
+    width: 4px;
+    height: 4px;
+    border-radius: 50%;
+    background: currentColor;
+    flex: none;
+}
+
+.grab-hint { align-self: center; font-size: 11.5px; color: var(--fg-dim); }
+
+/* AI 工具列表：每行一个引擎，左边图标名字、右边后缀输入框 */
+.item .sfx {
+    flex: none;
+    width: 300px;
+    height: 28px;
+    padding: 0 9px;
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    background: transparent;
+    color: var(--fg);
+    font: inherit;
+    font-size: 12px;
+    outline: none;
+    user-select: text;
+    -webkit-user-select: text;
+}
+.item .sfx:focus { border-color: var(--accent); }
+.item .sfx::placeholder { color: color-mix(in srgb, var(--fg-dim) 65%, transparent); }
+.item .sfx.own { border-color: color-mix(in srgb, var(--accent) 55%, transparent); }
+
+/* ==================================================================
+   横条编排：工具栏 / 拖拽排序 / 分隔线行 / 自定义引擎
+   ================================================================== */
+
+/* --------------------------- 横条卡片工具栏 --------------------------- */
+.bar-tools {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 10px;
+    padding-bottom: 10px;
+    border-bottom: 1px dashed var(--line);
+}
+.bar-tools .bt-label {
+    margin-left: auto;
+    font-size: 11.5px;
+    color: var(--fg-dim);
+    white-space: nowrap;
+}
+
+/* ------------------------------ 拖拽排序 ------------------------------ */
+/* 抓手平时压暗，鼠标移到整行才亮起来 —— 它是提示，不该抢视觉重心 */
+.item .grip {
+    flex: none;
+    width: 14px;
+    margin-left: -4px;
+    color: var(--fg-dim);
+    font-size: 11px;
+    line-height: 1;
+    letter-spacing: -1px;
+    opacity: .35;
+    cursor: grab;
+    user-select: none;
+    transition: opacity .12s ease;
+}
+.item:hover .grip { opacity: .8; }
+.item .grip:active { cursor: grabbing; }
+
+.item.dragging { opacity: .4; }
+
+/* 落点提示：在目标行的上边或下边画一条粗线，说明「松手会插到这里」 */
+.item.drop-before { box-shadow: inset 0 2px 0 0 var(--accent); }
+.item.drop-after { box-shadow: inset 0 -2px 0 0 var(--accent); }
+
+/* ------------------------------ 分隔线行 ------------------------------ */
+.item.sep-row {
+    background: color-mix(in srgb, var(--fg-dim) 7%, transparent);
+    border-style: dashed;
+    border-color: var(--line);
+}
+.item.sep-row:hover { border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
+.item.sep-row .nm { color: var(--fg-dim); }
+
+/* 用一小段竖线代表分隔线本身，和横条上的样子对得上 */
+.item .ic .sepic {
+    display: block;
+    width: 2px;
+    height: 18px;
+    border-radius: 1px;
+    background: var(--fg-dim);
+    opacity: .7;
+}
+
+/* ------------------------------ OCR 行 ------------------------------ */
+/* OCR 不是一个引擎（没有图标文件），所以给个文字徽标代替图标。
+ * 用一点强调色区分，让它在满屏引擎里一眼能被认出来。 */
+.item.ocr-row {
+    border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+}
+/* 「＋ 把 OCR 加进横条」这类**入口行**：不是横条成员，用虚线框 + 无抓手
+   跟真正的成员行区分开，免得用户以为它已经在横条上了。 */
+.item.add-row {
+    border-style: dashed;
+    border-color: color-mix(in srgb, var(--fg-dim) 35%, transparent);
+    background: transparent;
+    cursor: default;
+}
+.item.add-row:hover {
+    border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+    background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+.item.add-row > .ic,
+.item.add-row > .nm { opacity: .75; }
+.item .ic .ocr-tag {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 26px;
+    height: 18px;
+    padding: 0 5px;
+    border-radius: 5px;
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    color: var(--accent);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: .3px;
+}
+
+/* 正在编辑的那一条自定义引擎，左侧给一道强调色 */
+.item.editing {
+    background: color-mix(in srgb, var(--accent) 9%, transparent);
+    border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+}
+
+/* --------------------------- 自定义引擎列表 --------------------------- */
+/* URL 原文单独占一行小字，方便回忆「当初填的是什么地址」 */
+.item .nm .curl {
+    display: block;
+    margin-top: 2px;
+    font-size: 11px;
+    color: var(--fg-dim);
+    opacity: .8;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.mini.danger {
+    color: var(--danger);
+    border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+}
+.mini.danger:hover {
+    background: color-mix(in srgb, var(--danger) 14%, transparent);
+    color: var(--danger);
+}
+
+/* 类型小徽标：搜索 =  accent 色，打开 =  teal。
+ * 三类引擎点下去做的事完全不同（带词去搜 / 直接打开 / 发送组合键），列表里必须
+ * 一眼看出哪条是哪种 —— 尤其是地址没带 %s 的那条、以及压根没有地址的那条。 */
+.item .nm .kb {
+    display: inline-block;
+    margin-left: 7px;
+    padding: 0 6px;
+    border-radius: 5px;
+    font-style: normal;
+    font-size: 10.5px;
+    line-height: 16px;
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    vertical-align: 1px;
+}
+.item .nm .kb.open {
+    color: #0E8A6D;
+    background: rgba(14, 138, 109, .12);
+}
+:root[data-theme="dark"] .item .nm .kb.open,
+:root:not([data-theme="light"]) .item .nm .kb.open { color: #3ECFA5; background: rgba(62, 207, 165, .14); }
+@media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) .item .nm .kb.open { color: #3ECFA5; background: rgba(62, 207, 165, .14); }
+}
+/* 快捷键类徽标：琥珀色 —— 它真的会去按别的软件的快捷键，比打开页面更"有后果"，
+   颜色要比打开类更抓眼，和面板格子的 .ck.hot 同一套色。 */
+.item .nm .kb.hot {
+    color: #B45309;
+    background: rgba(217, 119, 6, .14);
+}
+:root[data-theme="dark"] .item .nm .kb.hot,
+:root:not([data-theme="light"]) .item .nm .kb.hot { color: #FBBF24; background: rgba(251, 191, 36, .16); }
+@media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) .item .nm .kb.hot { color: #FBBF24; background: rgba(251, 191, 36, .16); }
+}
+/* 快捷键类的按键序列小字（自定义引擎行里替代 URL 显示） */
+.item .nm .chot {
+    display: block;
+    margin-top: 2px;
+    font-size: 11px;
+    color: var(--fg-dim);
+    font-family: ui-monospace, Consolas, monospace;
+}
+/* 快捷键录入行：地址框换成「组合键输入框 + 录制按钮」 */
+.cform-hotrow {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+.cform-hotrow .txt { flex: 1; }
+.cform-hotrow .btn { flex: none; }
+.cform-hotrow .btn.rec {
+    color: #B45309;
+    border-color: rgba(217, 119, 6, .5);
+}
+
+/* r58：「快捷键引擎 → 绑定应用」那一块。
+ * 做成浅底卡片而不是又一行输入框 —— 它是一组**有从属关系**的选项
+ * （勾了才出现选应用，选了应用才出现管理员），用一块底把它框起来，
+ * 从属关系一眼可见。 */
+.cform-bind {
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+    padding: 10px 12px;
+    border-radius: 9px;
+    background: color-mix(in srgb, var(--accent) 6%, var(--card));
+    border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
+}
+.cform-bind .bind-head {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+}
+.cform-bind .bind-t {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--fg);
+}
+.cform-bind .bind-d {
+    font-size: 11.5px;
+    line-height: 1.5;
+    color: var(--fg-dim);
+}
+.cform-bind .bind-d b { color: var(--fg); font-weight: 600; }
+.cform-bind .bind-path {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+.cform-bind .bind-path .txt { flex: 1; min-width: 0; }
+.cform-bind .bind-path .btn { flex: none; }
+.cform-bind .bind-admin {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    padding-top: 7px;
+    border-top: 1px dashed color-mix(in srgb, var(--accent) 25%, transparent);
+}
+.cform-bind .bind-t2 {
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--fg);
+}
+.cform-bind .bind-d2 {
+    font-size: 11px;
+    color: var(--fg-dim);
+    flex: 1 1 100%;
+    padding-left: 2px;
+}
+
+/* r76：启动延迟那一行。与 .bind-admin 同一族（同一道虚线分隔、同一组字样），
+   只多一个数字框 —— 92px 是四位数毫秒 + 步进按钮的舒适宽度。 */
+.cform-bind .bind-delay {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    padding-top: 7px;
+    border-top: 1px dashed color-mix(in srgb, var(--accent) 25%, transparent);
+}
+.cform-bind .bind-delay .num {
+    width: 92px;
+    flex: none;
+    font-variant-numeric: tabular-nums;
+}
+.cform-bind .bind-delay .num::after {
+    content: attr(data-unit);
+    color: var(--fg-dim);
+    font-size: 10.5px;
+}
+
+/* ---------------------------- 新增/编辑表单 ---------------------------- */
+.cform {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px dashed var(--line);
+}
+.cform .txt {
+    width: 100%;
+    height: 32px;
+    padding: 0 11px;
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    background: var(--hover);
+    color: var(--fg);
+    font: inherit;
+    font-size: 12.5px;
+    outline: none;
+    user-select: text;
+}
+.cform .txt:focus { border-color: var(--accent); }
+.cform .txt::placeholder { color: color-mix(in srgb, var(--fg-dim) 65%, transparent); }
+
+/* 类型选择行：分段控件 + 一句说明（说清 %s 该不该写） */
+.cform-kind {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+.cform-kind .ck-label {
+    font-size: 12px;
+    color: var(--fg-dim);
+}
+.cform-kind .ck-note {
+    flex: 1;
+    min-width: 220px;
+    font-size: 11.5px;
+    color: var(--fg-dim);
+}
+
+.cform-acts {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+/* 校验失败的中文提示可能带换行（比如给出 URL 例子），所以允许折行 */
+.form-hint {
+    flex: 1;
+    font-size: 11.5px;
+    color: var(--fg-dim);
+    white-space: pre-wrap;
+}
+
+/* ============================================================
+   横条预览
+   把真身按当前配置原样画一份：图标大小、内边距、圆角、分隔线样式
+   全由 JS 写进 --pv-* 变量，这里只负责长相。
+   ============================================================ */
+.preview-stage {
+    display: flex;
+    /* 不用 justify-content:center：预览比舞台宽的时候它会把左边裁掉、
+       还滚不过去。靠子元素的 auto 外边距居中就没这个问题。 */
+    justify-content: flex-start;
+    padding: 18px 14px;
+    border-radius: 10px;
+    /* 默认跟设置页主背景保持一致（--bg = 浅色 / 深色主题各一组）。
+       用户点上面的「在深色背景上预览」按钮后，JS 会把 --pv-stage-bg 换成深色，
+       让用户一眼看到横条在深色背景上的样子 —— 这才是真正有意义的「夜间模式预览」，
+       原来左白右灰半截反而看不清横条自身。 */
+    background: var(--pv-stage-bg, var(--bg));
+    /* 纹理底：斜条纹 + 两个柔光斑。
+       为什么非要纹理不可：磨砂（backdrop-filter）干的事是"把**背后已有的东西**
+       糊掉"。背后是一块纯色时，糊完还是同一块纯色 —— 用户在设置页拉
+       「磨砂强度」滑块，预览纹丝不动，自然觉得"这选项没什么用"（原话）。
+       有了纹理，滑块一动就能直接看到糊的程度和玻璃感。
+       成本：两条 gradient 一次性绘制，不参与每帧合成。 */
+    background-image:
+        radial-gradient(150px 110px at 16% 24%,
+            color-mix(in srgb, var(--accent) 30%, transparent), transparent 70%),
+        radial-gradient(170px 120px at 84% 76%,
+            color-mix(in srgb, var(--danger) 24%, transparent), transparent 70%),
+        repeating-linear-gradient(45deg,
+            color-mix(in srgb, var(--fg) 7%, transparent) 0 7px,
+            transparent 7px 14px);
+    border: 1px solid var(--line);
+    overflow-x: auto;
+    transition: background-color .18s ease;
+}
+
+.qs-preview {
+    --pv-size: 30px;
+    --pv-pad: 5px;
+    --pv-radius: 9px;
+    --pv-alpha: 1;
+    /* 待机（未悬停）淡度：和横条真身同一个口径（barDimAlpha）。预览默认
+     * 就当"鼠标没上来"——先淡着；鼠标移到预览上等于悬停 → 全不透明。 */
+    --pv-dim-alpha: .45;
+    /* 浮层投影：默认值和 bar.css 的 .stage 一样给**合法占位**
+     * （不开就没有外影，真值由 renderPreview 按「浮层阴影」开关写）。 */
+    --pv-shadow: 0 0 0 0 rgba(0, 0, 0, 0);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: var(--pv-pad);
+    /* 和横条真身同一个口径：radius + 4（原来是 +6 且带 1px 描边，
+     * 预览跟真身差着 3px，用户对着预览调圆角会调不对） */
+    border-radius: calc(var(--pv-radius) + 4px);
+    border: none;
+    background-color: var(--pv-card, var(--card));
+    color: var(--pv-fg, var(--fg));
+    /* 一段投影，口径和 bar.css 的 .bar 一致 */
+    box-shadow: var(--pv-shadow);
+    width: max-content;
+    /* 和真身一样：不透明度是作用在整个横条上的，不是背景色的一部分。
+     * 默认取待机淡度（弹出来还没人碰的样子），:hover 时过渡到全不透明度。 */
+    opacity: var(--pv-dim-alpha, .45);
+    margin: 0 auto;
+    transition: background-color .18s ease, opacity .22s ease;
+}
+
+/* 鼠标移到预览上 = 悬停：平滑过渡到「不透明度」滑块那个值（和真身一致） */
+.qs-preview:hover {
+    opacity: var(--pv-alpha, 1);
+}
+
+/* 预览里的磨砂：和横条真身同一套（blur + saturate + brightness），
+   参数由 renderPreview 从 qsBlurPx()/qsBlurTone() 写进 --pv-blur*。
+   ⚠ 只有在「不透明度」调低时才看得出 —— 不透明度 100% 时横条是实心的，
+   背后什么都透不过来，这正是真身的口径，预览不搞例外。 */
+.qs-preview[data-blur]:not([data-blur="0"]) {
+    -webkit-backdrop-filter: blur(var(--pv-blur, 0px))
+        saturate(var(--pv-blur-sat, 1.4)) brightness(var(--pv-blur-bright, 1));
+    backdrop-filter: blur(var(--pv-blur, 0px))
+        saturate(var(--pv-blur-sat, 1.4)) brightness(var(--pv-blur-bright, 1));
+}
+
+/* ==========================================================================
+ * 液态玻璃预览（#137）
+ *
+ * 真折射要 WebGL2 抓屏幕（glass.js 的 liquidGL），设置页预览抓不到桌面，
+ * 这里用可实现的层叠效果把玻璃的**样子**学过来（渲染口径见 settings.js
+ * renderPreview 里的玻璃分支）：
+ *   · 半透明染色本体（亮色偏白 / 暗色压深蓝）
+ *   · 内部磨砂 backdrop-filter（「玻璃磨砂」滑块）
+ *   · 上下缘亮线（高光滑块定强度，色差滑块让下缘带冷色偏移）
+ *   · 一道斜向镜面反光
+ * 不透明度 / 待机淡度那套照旧生效（玻璃横条该淡也淡）。
+ * ========================================================================== */
+.qs-preview[data-lg="1"] {
+    /* 染色基色：亮色预览偏白，深色预览压一层深蓝（和真身玻璃染色同思路） */
+    --pv-lg-tint-rgb: 255, 255, 255;
+    background-color: transparent;
+    background-image:
+        /* 斜向镜面反光：一道从左上扫向右下的高光 */
+        linear-gradient(115deg,
+            rgba(255, 255, 255, calc(.10 * var(--pv-lg-spec, 1))) 0%,
+            rgba(255, 255, 255, 0) 42%),
+        /* 本体染色 */
+        linear-gradient(rgba(var(--pv-lg-tint-rgb), var(--pv-lg-tint-a, .3)),
+            rgba(var(--pv-lg-tint-rgb), var(--pv-lg-tint-a, .3)));
+    -webkit-backdrop-filter: blur(var(--pv-lg-frost, 0px)) saturate(1.3);
+    backdrop-filter: blur(var(--pv-lg-frost, 0px)) saturate(1.3);
+    box-shadow:
+        /* 上缘亮线（暖白 —— R 通道先到） */
+        inset 0 1px 0 rgba(255, 246, 219, calc(.55 * var(--pv-lg-spec, 1))),
+        /* 下缘亮线（冷白 —— B 通道分离量跟色差滑块走） */
+        inset 0 -1px 0 rgba(214, 232, 255,
+            calc((.26 + .34 * var(--pv-lg-ab, 0)) * var(--pv-lg-spec, 1))),
+        /* 左右缘各一道细线：厚度感 = 折射/厚度两个滑块 */
+        inset calc(1px * var(--pv-lg-edge, .5)) 0 0 rgba(255, 255, 255, calc(.13 * var(--pv-lg-spec, 1))),
+        inset calc(-1px * var(--pv-lg-edge, .5)) 0 0 rgba(255, 255, 255, calc(.13 * var(--pv-lg-spec, 1))),
+        var(--pv-shadow);
+}
+
+.preview-stage[data-dark="1"] .qs-preview[data-lg="1"] {
+    --pv-lg-tint-rgb: 10, 20, 42;
+}
+
+/* 深色预览：舞台、横条本身、横条上的图标三块都要改调，否则等于换了一块深色底、
+   横条还是亮色，对比反而更扎眼。 */
+.preview-stage[data-dark="1"] {
+    --pv-stage-bg: #1B1D22;
+    --pv-card: #25272D;
+    --pv-fg: #ECEDF1;
+    --pv-line: rgba(255, 255, 255, .14);
+}
+/* 浅色预览明确写一组（覆盖 settings 主题里翻车的"暗色主题下仍是白"那种串色） */
+.preview-stage:not([data-dark="1"]) {
+    --pv-stage-bg: var(--bg);
+    --pv-card: var(--card);
+    --pv-fg: var(--fg);
+    --pv-line: var(--line);
+}
+/* 深色背景上的图标加一层遮罩：原色图标贴在深色背景上普遍「白成一块」刺眼，
+   统一降亮度 + 提饱和度，让它融进深色场景。算法和横条真身的 .stage.qs-dark 那边一致。 */
+.preview-stage[data-dark="1"] .pv-item img:not(.qs-mono-img) {
+    filter: brightness(0.92) saturate(1.05);
+    -webkit-mask-image: radial-gradient(circle, black 78%, transparent 92%);
+    mask-image: radial-gradient(circle, black 78%, transparent 92%);
+}
+
+.qs-preview .pv-item {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: var(--pv-size);
+    height: var(--pv-size);
+    border-radius: var(--pv-radius);
+    background: transparent;
+    flex: none;
+    transition: background-color .12s ease;
+}
+.qs-preview .pv-item:hover { background: var(--hover); }
+.qs-preview .pv-item img {
+    width: calc(var(--pv-size) - 8px);
+    height: calc(var(--pv-size) - 8px);
+    object-fit: contain;
+    /* 和横条上同一个口径：带透明留白的图标自动放大到铺满型一样大 */
+    transform: scale(var(--qs-optical, 1));
+}
+.qs-preview .pv-item .letter {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    height: 100%;
+    border-radius: var(--pv-radius);
+    color: #fff;
+    font-weight: 600;
+    background: var(--lt-color, #4E6EF2);
+}
+/* OCR 成员在预览里的样子：和横条上的 OCR 按钮、列表里的徽标一致。
+   换过图标时这里显示的是 <img>，走上面 .pv-item img 的规则。 */
+.qs-preview .pv-item .ocr-tag {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: calc(var(--pv-size) - 6px);
+    height: calc(var(--pv-size) - 12px);
+    padding: 0 4px;
+    border-radius: calc(var(--pv-radius) - 2px);
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    color: var(--accent);
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: .3px;
+}
+
+/* 分隔线三档，和横条上的 .sep 保持一致 */
+.qs-preview .pv-sep {
+    flex: none;
+    align-self: stretch;
+    width: 1px;
+    margin: 3px 0;
+    background: var(--line);
+}
+.qs-preview[data-sep="dot"] .pv-sep {
+    width: 4px;
+    background: none;
+    background-image: radial-gradient(circle, var(--fg-dim) 1px, transparent 1.2px);
+    background-size: 4px 6px;
+    background-repeat: repeat-y;
+    background-position: center;
+}
+.qs-preview[data-sep="space"] .pv-sep {
+    width: 0;
+    margin: 0 7px;
+    background: none;
+}
+
+.qs-preview .pv-empty {
+    padding: 8px 12px;
+    font-size: 12px;
+    color: var(--fg-dim);
+}
+
+/* 自定义引擎表单里那枚图标预览 */
+.ce-icon {
+    width: 20px;
+    height: 20px;
+    object-fit: contain;
+    border-radius: 5px;
+    border: 1px solid var(--line);
+    background: var(--card);
+}
+
+/* ------------------- 收藏夹：帮助页目录那套「目录卡」 -------------------
+ *
+ * 用户原话（r48）：「我希望收藏夹能用帮助页面目录的这样一种方式来显示，因为这样
+ *   的话它上下的宽度没有那么宽，同时还比较好看，但当前收藏夹样子就比较丑」。
+ *
+ * 所以这里**直接复用帮助页那份目录语言**（见上面 .help-list / .help-item）：
+ *   · 每个一级目录 = 一张圆角卡；卡里第一行是**一行摘要**
+ *     （折叠箭头 + 目录名 + 项数 / 在横条徽标），边框与展开态的色调跟帮助页一模一样；
+ *   · 内容行、二级目录、以及那排操作按钮**全部收进卡内正文**，默认折叠 ——
+ *     折叠时整棵树就是一列目录标题，高度只有原来的几分之一（用户要的"上下没有那么宽"）；
+ *   · 点摘要行（或那颗箭头）展开，才看得见里面的内容与「＋文字 / ＋图片 / 删除」等操作。
+ *
+ * ⚠ 类名一个都没改（.fav-group / .fav-row / .fav-item-line / .mini.fold / .fav-grip）：
+ *   拖拽排序、升降级、按 id 写回树、以及收藏夹探针全都挂在它们上面，改名字纯属破坏。
+ * ⚠ 二级目录**不再是卡**（卡片里再套卡片就是上一轮刚清掉的"胶囊套胶囊"）：
+ *   它是卡内正文里缩进的一块，靠左侧 accent 细线表达层级，观感与内容行一致。
+ */
+#favTree { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+
+.fav-group {
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    overflow: hidden;
+    padding: 0;
+    margin: 0;
+    background: none;
+    transition: border-color .15s ease, background-color .15s ease;
+}
+/* 展开态：与 .help-item[open] 完全同一套（accent 描边 + 5% 淡底） */
+.fav-group.open {
+    border-color: color-mix(in srgb, var(--accent) 30%, var(--line));
+    background: color-mix(in srgb, var(--accent) 5%, transparent);
+}
+.fav-group:hover { box-shadow: none; }
+
+/* 摘要行 = 帮助页的 summary 的语言，但**比 r48 再收紧一圈**（r49 用户口径：
+ *   「可拖动的按钮离卡片边框很远、又离三角形很远、三角形太大、目录名上下留白
+ *   太远，看起来特别丑」）：
+ *     · 内边距 8/12 → 5/7  ：把手贴着卡片左缘
+ *     · 行内间距 8 → 3     ：把手、三角、目录名挤成一簇
+ *     · 目录名高 28 → 22   ：一行不再被标题撑胖（整行约 32px）
+ */
+.fav-group > .fav-row {
+    padding: 5px 7px;
+    margin: 0;
+    border-bottom: 1px solid transparent;
+    gap: 3px;
+    cursor: pointer;          /* r48：点这一行就能展开 / 折叠（和帮助页目录一样） */
+}
+/* 悬停整行给一层极淡的底：告诉用户"这一行可点"（帮助页 summary 也是这个语言） */
+.fav-group > .fav-row:hover { background: color-mix(in srgb, var(--fg) 4%, transparent); }
+.fav-group.open > .fav-row {
+    border-bottom-color: color-mix(in srgb, var(--accent) 18%, var(--line));
+}
+.fav-group > .fav-row .fav-name { font-size: 12.5px; font-weight: 600; }
+.fav-group > .fav-row .fav-name { height: 22px; padding: 0 5px; line-height: 20px; }
+/* 正在改名时别把整行装成"可点折叠"的样子 */
+.fav-row .fav-name.editing { cursor: text; }
+
+/* 二级目录：卡内正文里的一块，缩进 + 左侧细引导线（不是卡） */
+.fav-group.lv2 {
+    border: 0;
+    border-radius: 0;
+    margin: 2px 0 2px 14px;
+    padding-left: 10px;
+    border-left: 2px solid color-mix(in srgb, var(--accent) 22%, transparent);
+    background: none;
+}
+.fav-group.lv2 > .fav-row { padding: 3px 2px; }
+.fav-group.lv2 > .fav-row .fav-name { font-weight: 500; }
+
+/* 卡内正文：左右留白比摘要行略收（r49：别让正文看上去"陷在很深的框里"） */
+.fav-body { padding: 0 8px 6px 10px; }
+
+/* 操作按钮排：展开后**第一眼**就是它（放正文最上面），一行放不下就换行；
+ * 与内容之间用一条极淡的线分开，视觉重心仍在收藏内容上。 */
+.fav-ops {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 3px;
+    padding: 4px 2px 7px;
+    margin-bottom: 2px;
+    border-bottom: 1px solid color-mix(in srgb, var(--fg) 8%, transparent);
+}
+
+.fav-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    border-radius: 0;
+    padding: 2px;
+}
+.fav-row.drag-over { outline: 2px dashed var(--accent); outline-offset: 2px; }
+.fav-row.dragging { opacity: .4; }
+.fav-row.drag-child {
+    outline: 2px solid var(--accent);
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+/* 内容行的长按拖拽视觉：
+   拖动中 = 源行半透明；插入位置 = 行内上/下边缘一条 accent 实线；
+   拖到目录行上 = 目录行整体虚线框（复用 .fav-row.drag-over）。 */
+.fav-item-line.dragging,
+.fav-item-edit.dragging { opacity: .4; }
+.fav-item-line.drag-before,
+.fav-item-edit.drag-before { box-shadow: inset 0 3px 0 -1px var(--accent); }
+.fav-item-line.drag-after,
+.fav-item-edit.drag-after { box-shadow: inset 0 -3px 0 -1px var(--accent); }
+.fav-item-line.drag-over,
+.fav-item-edit.drag-over { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+/* 长按拖动期间全局禁划词 + 抓手光标（450ms 长按默认会选中文字） */
+body.fav-item-dragging { user-select: none !important; cursor: grabbing; }
+body.fav-item-dragging * { cursor: grabbing !important; }
+.fav-row .fav-name { flex: 1; min-width: 120px; font-weight: 600; }
+/* 目录名默认**只读**（用户要求：已添加的目录不该始终处于可编辑状态，
+ * 点「重命名」才改）。读态就别再摆出"这是个输入框"的样子 ——
+ * 去掉边框和底色、光标也给回文本样式，看着像一行标题；
+ * 进编辑态（点重命名）再把输入框的壳亮回来，提示用户"现在能打字了"。 */
+.fav-row .fav-name[readonly] {
+    background: transparent;
+    border-color: transparent;
+    cursor: default;
+}
+.fav-row .fav-name[readonly]:hover {
+    border-color: color-mix(in srgb, var(--fg-dim) 32%, transparent);
+}
+.fav-row .fav-name[readonly]:focus { border-color: transparent; }
+.fav-row .fav-name.editing {
+    background: var(--hover);
+    border-color: var(--accent);
+}
+
+/* 摘要行右侧：项数 + 「在横条」状态徽标。
+ * 折叠时用户只看得见摘要行，所以这两个状态必须写在**这一行**里。 */
+.fav-count {
+    flex: none;
+    font-size: 11px;
+    color: var(--fg-dim);
+    opacity: .8;
+    white-space: nowrap;
+}
+.fav-onbar {
+    flex: none;
+    font-size: 10.5px;
+    font-weight: 600;
+    line-height: 16px;
+    padding: 0 6px;
+    border-radius: 999px;
+    color: var(--accent);
+    border: 1px solid color-mix(in srgb, var(--accent) 34%, transparent);
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    white-space: nowrap;
+}
+
+/* 行内所有小按钮统一「朴素文字按钮」：无框无底，hover 才出一层淡底。
+ * ⚠ 这里刻意不复用 .mini 的描边+圆角 —— 那正是「胶囊套胶囊」的来源。 */
+.fav-row .ops .mini,
+.fav-ops .mini,
+.fav-row .mini.fold {
+    border: 0;
+    background: none;
+    border-radius: 6px;
+    height: 24px;
+    padding: 0 7px;
+    color: var(--fg-dim);
+}
+.fav-row .ops .mini:hover,
+.fav-ops .mini:hover,
+.fav-row .mini.fold:hover {
+    background: var(--hover);
+    border-color: transparent;
+    color: var(--fg);
+}
+.fav-row .ops .mini.on,
+.fav-ops .mini.on {
+    border: 0;
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    color: var(--accent);
+}
+.fav-row .mini.fold { width: 15px; height: 18px; padding: 0; font-size: 10px; }
+/* 收起时箭头低调、展开时跟着卡片一起亮成 accent（和帮助页的箭头同一个语言） */
+.fav-row .mini.fold.closed { opacity: .55; }
+.fav-group.open > .fav-row .mini.fold { color: var(--accent); }
+/* 拖拽把手：平时几乎隐形，hover / 悬停整行时露出来（无底色、无盒子） */
+.fav-grip {
+    flex: none;
+    width: 12px;
+    text-align: center;
+    color: var(--fg);
+    opacity: .22;
+    cursor: grab;
+    font-size: 11px;
+    letter-spacing: -2px;
+    user-select: none;
+    align-self: stretch;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: none;
+    border-radius: 0;
+    transition: opacity .12s ease;
+}
+.fav-row:hover .fav-grip { opacity: .55; }
+.fav-grip:hover { opacity: .95; }
+.fav-grip:active { cursor: grabbing; }
+/* 「已折叠 · N 项」那行提示已按用户要求删除，配套样式一并清掉（别留死规则）。 */
+
+/* 内容（文字/图片）比它所在的目录再缩一层 —— 层级一眼可辨（用户要求）。
+ * ⚠ 缩进由 .fav-item-line / .fav-item-edit 自己的 padding/margin 负责
+ *   （见下面那两条），这里不再叠加 margin —— 叠起来会缩到 60px+，一行放不下几个字。 */
+
+/* 触屏：允许纵向滚动，长按交给 JS（450ms 不动才拖）*/
+.fav-item-line, .fav-item-edit { touch-action: pan-y; }
+
+/* 内容收成一行：细线分隔的扁平行（与横条收藏面板同一套语言）。
+ * 用户反馈"每条都用胶囊样式，占地方、繁琐，文字胶囊还会涨出目录卡片"——
+ * 圆角盒子、边框、备注胶囊全部去掉：无底无框，行间一条细线，
+ * hover 淡色底 + 左侧 accent 竖条，备注是 accent 纯文字 + 小竖线分隔。 */
+.fav-item-line {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    text-align: left;
+    /* 左内边距对齐到目录名下面（折叠箭头 22 + 把手 16 + 间距）——
+       列表式层级：目录是标题，内容是缩进项 */
+    padding: 7px 8px 7px 44px;
+    margin-top: 0;
+    border: none;
+    border-radius: 0;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+    font: inherit;
+    transition: background-color .12s ease;
+}
+.fav-item-line:hover {
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+.fav-item-line:active {
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+/* 行间细线（::after 不占布局、可内缩；只有连续两条内容行之间才画） */
+.fav-item-line + .fav-item-line::after {
+    content: '';
+    position: absolute;
+    left: 8px;
+    right: 8px;
+    top: 0;
+    height: 1px;
+    background: var(--line);
+    pointer-events: none;
+}
+/* hover 时左侧亮出一条 accent 竖线：可点 + 可拖（长按）的 affordance */
+.fav-item-line::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 22%;
+    bottom: 22%;
+    width: 3px;
+    border-radius: 0 2px 2px 0;
+    background: var(--accent);
+    opacity: 0;
+    transition: opacity .12s ease;
+}
+.fav-item-line:hover::before { opacity: .85; }
+/* 备注：accent 纯文字，后面跟一条小竖线跟内容分开（不再是胶囊） */
+.fav-item-line .fav-rm {
+    flex: none;
+    max-width: 42%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--accent);
+}
+.fav-item-line .fav-rm::after {
+    content: '';
+    display: inline-block;
+    width: 1px;
+    height: 11px;
+    margin-left: 10px;
+    vertical-align: -1px;
+    background: color-mix(in srgb, var(--fg) 22%, transparent);
+}
+.fav-item-line .fav-prev {
+    flex: 1;
+    min-width: 0;
+    opacity: .72;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 12px;
+}
+.fav-item-line .fav-edit-hint { flex: none; opacity: .38; font-size: 11px; }
+
+.fav-item-edit {
+    display: flex;
+    gap: 8px;
+    align-items: flex-start;
+    /* 编辑态：不再用「描边 + 圆角盒子」（那也是一层胶囊），
+       改成左侧 accent 竖条 + 极淡底 —— 和列表行的 hover 语言一致 */
+    padding: 8px 8px 8px 12px;
+    margin: 2px 0 2px 40px;
+    border: 0;
+    border-left: 3px solid var(--accent);
+    border-radius: 0;
+    background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+.fav-item-edit .fav-thumb {
+    width: 56px;
+    height: 40px;
+    object-fit: cover;
+    border-radius: 6px;
+    border: 1px solid var(--line);
+    flex: none;
+}
+.fav-item-edit .fav-mid {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-width: 0;
+}
+.fav-item-edit .ops { display: flex; align-items: center; }
+
+/* 引擎页横条成员里，收藏夹目录的图标走 shared.js 的 qsFavIconNode，
+   首字徽标 `.qs-fav-badge` 在这里按设置的变量配色（观感与横条一致） */
+.qs-fav-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    height: 100%;
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--accent);
+    border: 1.5px solid color-mix(in srgb, var(--accent) 60%, transparent);
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    border-radius: 50%;
+    box-sizing: border-box;
+    overflow: hidden;
+}
+
+/* 备注样式见上方 .fav-item-line .fav-rm（纯文字，不再做胶囊）。
+ * 横条收藏面板里的 .fav-remark 由 bar.css 负责，两边同一套语言。 */
+
+/* 拖拽落点：拖到这里 = 升为一级目录 */
+.fav-root-zone {
+    margin: 8px 0 2px;
+    padding: 10px;
+    border: 1.5px dashed var(--line);
+    border-radius: 10px;
+    text-align: center;
+    opacity: .55;
+    font-size: 12px;
+    /* r75：原来写的是 `transition: all .12s ease` —— all 会把**所有**属性的变化
+       都纳入过渡（含布局属性），既容易被后续属性意外"蹭"上动画，也让浏览器没法
+       只针对合成层优化。这里按实际会变的三个属性写清楚（拖拽落点的样式只改这
+       三个）。 */
+    transition: border-color .12s ease, background-color .12s ease, opacity .12s ease;
+}
+.fav-root-zone.drag-over {
+    border-color: var(--accent);
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    opacity: 1;
+}
+
+/* ------------------------ 本地 OCR 环境检测卡片 ------------------------
+   语义色（就绪 / 待补充）三套主题各定义一份，和 --shadow 同一套路：
+   浅色下深字、深色下亮字，保证文字和底色的对比度两边都够。 */
+:root {
+    --ok: #2E9E4F;
+    --ok-bg: rgba(46, 158, 79, .09);
+    --warn: #B26A00;
+    --warn-bg: rgba(214, 138, 10, .11);
+}
+@media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+        --ok: #52BE71;
+        --ok-bg: rgba(82, 190, 113, .13);
+        --warn: #E0A33C;
+        --warn-bg: rgba(224, 163, 60, .13);
+    }
+}
+:root[data-theme="dark"] {
+    --ok: #52BE71;
+    --ok-bg: rgba(82, 190, 113, .13);
+    --warn: #E0A33C;
+    --warn-bg: rgba(224, 163, 60, .13);
+}
+:root[data-theme="light"] {
+    --ok: #2E9E4F;
+    --ok-bg: rgba(46, 158, 79, .09);
+    --warn: #B26A00;
+    --warn-bg: rgba(214, 138, 10, .11);
+}
+
+.dep-box {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    width: 100%;
+}
+
+.dep-box .dep-tip { font-size: 12px; color: var(--fg-dim); }
+
+/* ------------------------------------------------------------------ */
+/* 识别引擎列表（需求 2：引擎从 2 家变 14 家 + 每家的问号按钮）           */
+/* ------------------------------------------------------------------ */
+
+.eng-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    width: 100%;
+}
+
+.eng-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 8px;
+    border: 1px solid color-mix(in srgb, var(--fg) 12%, transparent);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--fg) 3%, transparent);
+}
+
+/* 选中的那家：左边一道强调色竖条 + 底色提一点，一眼看出"现在用的是它" */
+.eng-row.on {
+    border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.eng-name {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    text-align: left;
+    background: none;
+    border: 0;
+    padding: 0;
+    color: var(--fg);
+    cursor: pointer;
+    font: inherit;
+}
+
+.eng-name b { font-size: 13px; font-weight: 600; }
+
+.eng-name small {
+    font-size: 11px;
+    color: var(--fg-dim);
+    /* 说明可能挺长（免费额度、注意事项），换行显示，不要撑破卡片 */
+    white-space: normal;
+    line-height: 1.35;
+}
+
+/* 问号按钮：用户点名的需求「每一个在线引擎旁边加一个问号按钮」 */
+.eng-help {
+    flex: 0 0 auto;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    border: 1px solid color-mix(in srgb, var(--accent) 50%, transparent);
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    color: var(--accent);
+    font-size: 12px;
+    font-weight: 700;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.eng-help:hover { background: color-mix(in srgb, var(--accent) 26%, transparent); }
+
+/* 「文档」那颗是胶囊形，不是圆 —— 和问号区分开，别让人以为点了同一个 */
+.eng-help.doc {
+    width: auto;
+    height: 22px;
+    padding: 0 8px;
+    border-radius: 11px;
+    font-size: 11px;
+    font-weight: 500;
+}
+
+/* ------------------------------------------------------------------ */
+/* r47：引擎列表改手风琴（只展开默认那一家）+「同时识别」多选            */
+/*                                                                     */
+/* 用户原话：「引擎有这么多，却一次性把它全部显示出来了，很占用显示空间， */
+/*   就可以提供一个选项，你选择了哪一个，就会只显示那一个折叠，其他的，   */
+/*   然后再可以配置相关的数据，同时也刚好把选择那一个作为默认的 ocr 引擎」*/
+/* ------------------------------------------------------------------ */
+
+/* 单选圆点：空心 = 可选，实心 + 光晕 = 当前默认引擎。
+   以前列表只有一行行名字，用户找不到"到底在哪儿设默认" —— 这个圆点是给他看的。 */
+.eng-dot {
+    flex: 0 0 auto;
+    width: 11px;
+    height: 11px;
+    border-radius: 50%;
+    border: 1.5px solid color-mix(in srgb, var(--fg) 35%, transparent);
+    background: transparent;
+}
+
+.eng-row.on .eng-dot {
+    border-color: var(--accent);
+    background: radial-gradient(circle at center, var(--accent) 0 45%, transparent 46%);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 20%, transparent);
+}
+
+/* 展开的那一行要能换行（展开块占满下一排） */
+.eng-row.open {
+    flex-wrap: wrap;
+    align-items: flex-start;
+}
+
+/* 徽标（默认 / 同时识别）；warn = 标红提醒（比如"没填凭据"） */
+.eng-tag {
+    flex: 0 0 auto;
+    font-size: 10px;
+    line-height: 1;
+    padding: 3px 6px;
+    border-radius: 999px;
+    border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    color: var(--accent);
+    white-space: nowrap;
+}
+
+.eng-tag.warn {
+    border-color: color-mix(in srgb, #d64545 55%, transparent);
+    background: color-mix(in srgb, #d64545 12%, transparent);
+    color: #d64545;
+}
+
+/* ======================= r54 识图搜索那几行 =======================
+   和 OCR 那套共用 .eng-row / .eng-tag，只多两样：
+   ① 一行左边是**复选框**（多选），不是单选圆点；
+   ② 每个引擎带一个"真上传 / 半自动 / 按图片地址"的模式徽标。
+   ⚠ 模式徽标标黄是刻意的：用户勾了「打开页面」那几家却没自动跳转时，得先看见
+     "半自动"这几个字，才不会以为软件坏了。 */
+/* r59：布局改成「复选框 / 图标 / 名字」三段各占其位。
+ *
+ * ⚠ 以前 `.eng-check` 写的是 `flex: 1` —— 那个 label 里**只有一颗复选框**，
+ *   却让它吃掉整行剩余宽度。结果：复选框孤零零留在最左，图标和名字被挤到
+ *   右边、名字被压到溢出，看上去就像"勾选框和图标叠在一起"（用户报的正是这个）。
+ *   现在 label 只占自己那一格（`flex: 0 0 auto`），宽度让给名字。
+ *
+ * 结构： [☑] [图标] [名字 + 说明 ……] [模式徽标] [设为默认] [换图标] [?] */
+.eng-row .eng-check {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    cursor: pointer;
+}
+
+.eng-row .eng-check input {
+    flex: 0 0 auto;
+    margin: 0;
+    width: 15px;
+    height: 15px;
+    accent-color: var(--accent);
+    cursor: pointer;
+}
+
+/* 名字这一格吃掉剩余宽度，并且允许收缩（min-width:0 是必须的，
+   否则长说明会把整行撑宽、把右边几颗按钮挤出去）。 */
+.eng-row .n {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.eng-row .n b { font-size: 13px; font-weight: 600; }
+
+.eng-row .n small {
+    font-size: 11px;
+    color: var(--fg-dim);
+    white-space: normal;
+    line-height: 1.35;
+}
+
+/* 「打开页面」和「按图片地址」两类标黄，让"能不能一步到位"一眼可辨。
+ * r59：`form`（浏览器表单真提交）不标黄，改成**绿色** —— 它是唯一真的把图
+ *   交出去的走法，应该一眼看出"这家最省事"。 */
+.eng-tag.mode-page,
+.eng-tag.mode-url {
+    border-color: color-mix(in srgb, #d98b2b 55%, transparent);
+    background: color-mix(in srgb, #d98b2b 12%, transparent);
+    color: #c07a1c;
+}
+
+.eng-tag.mode-form {
+    border-color: color-mix(in srgb, #1f9d55 55%, transparent);
+    background: color-mix(in srgb, #1f9d55 12%, transparent);
+    color: #17804a;
+}
+
+/* ======================= r56：识图引擎一行一家 =======================
+   用户原话：「识图搜索这一栏的引擎，不要一个胶囊显示所有的引擎，应该每个引擎
+   单独一行显示，每个引擎都可以自定义图标，也可以在每个引擎旁边点击默认按钮，
+   把这个引擎设为默认，同时每个引擎旁边也要设置一个问号按钮」。
+
+   于是识图这一栏从「一排胶囊选默认 + 一张多选表」合并成**一张表**，每行：
+     复选框（参与搜索） | 图标 | 名字+说明 | 模式徽标 | [默认] [换图标] [?]
+   · 「默认」是行上一颗真按钮（原来只在顶部那排胶囊里，得滚上去才能设）；
+   · 图标复用横条那套 pick_icon / reset_icon / overrideIcons，一套机制两处用；
+   · 「?」走 img_open_help（后端注册表里的 help 地址，界面不另存一份）。
+   ⚠ 行内按钮一多，必须自己处理点击穿透：复选框那格是 <label>，
+     点它只会切勾选，不会误触别的按钮；按钮各自 stopPropagation。 */
+
+/* 行首那颗引擎图标（换过图就是用户的图，没换过是首字徽标）。
+   和横条上的图标同一来源（shared.js 的 qsEngineIconNode），
+   所以"在设置里看到的样子"和"在横条上看到的样子"是一致的。 */
+.eng-row .eng-ico {
+    flex: 0 0 auto;
+    width: 24px;
+    height: 24px;
+    border-radius: 6px;
+    overflow: hidden;
+    background: color-mix(in srgb, var(--fg) 8%, transparent);
+}
+.eng-row .eng-ico img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.eng-row .eng-ico .badge {
+    width: 100%; height: 100%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 12px; font-weight: 600;
+    background: linear-gradient(135deg, #4E6EF2, #7A5AF8);
+    color: #fff;
+}
+
+/* 行上的小按钮（默认 / 换图标 / ?）：共用一个壳，靠 modifier 区分。
+   高度 22px —— 和 OCR 那行的「?」「文档」同高，两张表并排看时不跳。 */
+.eng-btn {
+    flex: 0 0 auto;
+    height: 22px;
+    padding: 0 8px;
+    border-radius: 11px;
+    border: 1px solid color-mix(in srgb, var(--fg) 18%, transparent);
+    background: transparent;
+    color: var(--fg-dim);
+    font: inherit;
+    font-size: 11px;
+    line-height: 1;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: color .14s ease, background-color .14s ease, border-color .14s ease;
+}
+.eng-btn:hover { color: var(--fg); border-color: color-mix(in srgb, var(--fg) 34%, transparent); }
+
+/* 「设为默认」：主操作，用强调色；已经是默认了就退成"当前默认"的静态徽标 */
+.eng-btn.def {
+    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+    color: var(--accent);
+}
+.eng-btn.def:hover { background: color-mix(in srgb, var(--accent) 16%, transparent); }
+.eng-btn.def.on {
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    border-color: color-mix(in srgb, var(--accent) 60%, transparent);
+    font-weight: 600;
+    cursor: default;
+}
+
+/* 图标那颗是方的（不是胶囊）：里面放的是图，圆的会切掉四角 */
+.eng-btn.ico { padding: 0; width: 24px; }
+
+/* 列表里最后一行和下面那排之间的距离（OCR 那边靠 .eng-body 占位，
+   识图这边没有展开块，得自己留一点） */
+.eng-row.img-row + .eng-row.img-row { margin-top: 4px; }
+
+/* ======================= r54 数据（导入导出） =======================
+   勾选表：一组一行，隐私项整行偏红。为什么不用 checkbox 平铺：
+   一组要带说明文字（导出去会带上什么），平铺会糊成一片。 */
+.export-box {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.exp-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 7px 9px;
+    border: 1px solid color-mix(in srgb, var(--fg) 12%, transparent);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--fg) 3%, transparent);
+    cursor: pointer;
+}
+
+.exp-row:hover { background: color-mix(in srgb, var(--fg) 6%, transparent); }
+
+.exp-row.private {
+    border-color: color-mix(in srgb, #d64545 40%, transparent);
+    background: color-mix(in srgb, #d64545 7%, transparent);
+}
+
+.exp-row input {
+    flex: 0 0 auto;
+    margin: 2px 0 0;
+    width: 14px;
+    height: 14px;
+    accent-color: var(--accent);
+    cursor: pointer;
+}
+
+.exp-row .t {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.exp-row .t b { font-size: 12.5px; font-weight: 600; }
+
+.exp-row .t small {
+    font-size: 11px;
+    color: var(--fg-dim);
+    white-space: normal;
+    line-height: 1.35;
+}
+
+.exp-row.private .t b::after {
+    content: '涉及隐私';
+    margin-left: 6px;
+    font-size: 10px;
+    font-weight: 600;
+    padding: 2px 5px;
+    border-radius: 999px;
+    color: #d64545;
+    background: color-mix(in srgb, #d64545 12%, transparent);
+    vertical-align: 1px;
+}
+
+/* 折叠箭头：展开朝下、折起朝右（只是个指示，点它和点整行一个意思） */
+.eng-chev {
+    flex: 0 0 auto;
+    font-size: 10px;
+    color: var(--fg-dim);
+    transform: rotate(-90deg);
+    transition: transform .15s ease;
+}
+
+.eng-row.on .eng-chev { transform: rotate(0deg); }
+
+/* 展开块：JS 把 #w-ocrBody 搬进 .eng-row.open 里，所以它得占满整行的下一排 */
+.eng-body {
+    flex: 1 0 100%;
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px dashed color-mix(in srgb, var(--fg) 14%, transparent);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-width: 0;
+}
+
+.cred-head,
+.multi-head {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.cred-head b,
+.multi-head b { font-size: 12px; font-weight: 600; }
+
+.cred-head small,
+.multi-head small {
+    font-size: 11px;
+    color: var(--fg-dim);
+    line-height: 1.35;
+    white-space: normal;
+}
+
+/* 同时识别：一颗颗可点的胶囊，勾上的亮起来 */
+.multi-box {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.multi-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font: inherit;
+    font-size: 12px;
+    padding: 4px 9px;
+    border-radius: 999px;
+    border: 1px solid color-mix(in srgb, var(--fg) 16%, transparent);
+    background: color-mix(in srgb, var(--fg) 4%, transparent);
+    color: var(--fg);
+    cursor: pointer;
+}
+
+.multi-chip:hover { border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+
+.multi-chip.on {
+    border-color: color-mix(in srgb, var(--accent) 60%, transparent);
+    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    color: var(--accent);
+    font-weight: 600;
+}
+
+/* 勾了但这家没配凭据：勾是勾上了，识别时会跳过 —— 当场标红，别等识别完才发现 */
+.multi-chip.warn { border-color: color-mix(in srgb, #d64545 55%, transparent); }
+
+.multi-tick {
+    font-size: 10px;
+    opacity: .9;
+}
+
+.multi-warn {
+    font-style: normal;
+    font-size: 10px;
+    color: #d64545;
+    padding-left: 5px;
+    border-left: 1px solid color-mix(in srgb, #d64545 40%, transparent);
+}
+
+.cred-box {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    width: 100%;
+}
+
+.cred-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.cred-row label {
+    flex: 0 0 132px;
+    font-size: 12px;
+    color: var(--fg-dim);
+}
+
+.cred-row .txt { flex: 1; min-width: 0; }
+
+/* 「拉取模型」那颗按钮贴在输入框右边（r46：AI 中转站要能挑模型） */
+.cred-row .cred-pull {
+    flex: 0 0 auto;
+    white-space: nowrap;
+}
+
+/* 凭据区底部：测试按钮 + 结果文字（成/败两种颜色） */
+.cred-foot {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 2px;
+    flex-wrap: wrap;
+}
+
+.cred-status {
+    font-size: 12px;
+    color: var(--fg-dim);
+    word-break: break-all;
+}
+
+.cred-status.ok { color: #1f9d55; }
+.cred-status.bad { color: #d64545; }
+
+/* r72：API Key / 密钥默认密码框，框尾一颗眼睛切换可见性。
+ * 按钮绝对定位在输入框右端（.txt 右侧留出 30px 内边距给它）。 */
+.cred-eye-wrap {
+    position: relative;
+    flex: 1;
+    min-width: 0;
+    display: flex;
+}
+
+.cred-eye-wrap .txt {
+    flex: 1;
+    min-width: 0;
+    padding-right: 30px;
+}
+
+.cred-eye-btn {
+    position: absolute;
+    right: 3px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 24px;
+    height: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--fg-dim);
+    cursor: pointer;
+    padding: 0;
+}
+
+.cred-eye-btn:hover { background: var(--hover); color: var(--fg); }
+.cred-eye-btn svg { width: 14px; height: 14px; display: none; }
+/* 默认（隐藏态）显示"睁眼"——点它变成明文；显示态换成"闭上/划掉"的眼 */
+.cred-eye-btn .ic-eye { display: block; }
+.cred-eye-btn.on .ic-eye { display: none; }
+.cred-eye-btn.on .ic-eye-off { display: block; }
+
+/* r72：拉到的模型列表——陈列出来直接点选（datalist 没有可见入口） */
+.cred-models {
+    margin: 2px 0 0 140px;
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    background: var(--card);
+    overflow: hidden;
+}
+
+.cred-models-h {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    padding: 6px 10px;
+    cursor: pointer;
+    user-select: none;
+    background: var(--hover);
+}
+
+.cred-models-h b { font-size: 12px; }
+.cred-models-h small { font-size: 11.5px; color: var(--fg-dim); flex: 1; }
+.cred-models-h .cm-arrow { font-style: normal; font-size: 11px; color: var(--fg-dim); }
+.cred-models.shut .cm-arrow { transform: rotate(-90deg); display: inline-block; }
+.cred-models.shut .cred-models-b { display: none; }
+
+.cred-models-b { max-height: 172px; overflow-y: auto; }
+
+.cred-model-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    border: 0;
+    background: transparent;
+    text-align: left;
+    padding: 5px 10px;
+    font-size: 12px;
+    font-family: inherit;
+    color: var(--fg);
+    cursor: pointer;
+}
+
+.cred-model-item:hover { background: var(--hover); }
+.cred-model-item.sel { background: rgba(59, 125, 255, .12); color: var(--accent); }
+.cred-model-item .cm-id { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 「能看图」徽标：小胶囊，排在前面的那些基本都带它 */
+.cred-model-item .v-badge {
+    font-style: normal;
+    font-size: 10.5px;
+    line-height: 1;
+    padding: 2px 5px;
+    border-radius: 4px;
+    background: rgba(31, 157, 85, .15);
+    color: #1f9d55;
+    flex: none;
+}
+
+.cred-model-item.sel .v-badge { background: rgba(59, 125, 255, .18); color: var(--accent); }
+
+/* 顶部总判横幅：全就绪（绿）/ 有缺失（黄） */
+.dep-banner {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    padding: 9px 12px;
+    border-radius: 9px;
+    font-size: 12.5px;
+    border: 1px solid transparent;
+}
+.dep-banner b { flex: none; font-size: 13px; }
+.dep-banner.ok {
+    color: var(--ok);
+    background: var(--ok-bg);
+    border-color: color-mix(in srgb, var(--ok) 28%, transparent);
+}
+.dep-banner.ok span,
+.dep-banner.ok { line-height: 1.5; }
+.dep-banner.miss {
+    color: var(--warn);
+    background: var(--warn-bg);
+    border-color: color-mix(in srgb, var(--warn) 30%, transparent);
+}
+
+/* 单个依赖项 */
+.dep-item {
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    padding: 9px 12px;
+    background: var(--card);
+}
+.dep-head {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    margin-bottom: 5px;
+}
+.dep-head b { font-size: 13px; }
+.dep-dot {
+    flex: none;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--warn);
+}
+.dep-item.is-ok .dep-dot { background: var(--ok); }
+.dep-badge {
+    margin-left: auto;
+    flex: none;
+    font-size: 11px;
+    padding: 1px 8px;
+    border-radius: 99px;
+    color: var(--warn);
+    background: var(--warn-bg);
+}
+.dep-item.is-ok .dep-badge {
+    color: var(--ok);
+    background: var(--ok-bg);
+}
+.dep-line {
+    display: flex;
+    gap: 8px;
+    font-size: 12px;
+    line-height: 1.6;
+    color: var(--fg);
+}
+.dep-line + .dep-line { margin-top: 3px; }
+.dep-line i {
+    flex: none;
+    font-style: normal;
+    color: var(--fg-dim);
+    width: 34px;
+}
+
+/* 按钮行 */
+.dep-acts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 7px;
+}
+
+/* ---------------- r76：AI 识图的两段延迟 ----------------
+ * 「标签 → 数字框 → 标签 → 数字框 → 恢复默认」一行排开，对齐到同一根基线上。
+ * 数字框收到 92px：四位数毫秒 + 步进按钮刚好，不挤也不空。 */
+.ai-delay {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+.ai-delay label {
+    font-size: 11.5px;
+    color: var(--fg-dim);
+    white-space: nowrap;
+}
+.ai-delay input[type="number"] {
+    width: 92px;
+    height: 30px;
+    padding: 0 8px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--card);
+    color: var(--fg);
+    font: inherit;
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+    transition: border-color .12s ease, background-color .12s ease;
+}
+.ai-delay input[type="number"]:hover { border-color: color-mix(in srgb, var(--fg-dim) 45%, transparent); }
+/* 数字框后面那枚单位：input 自带 data-unit，CSS 画出来，省得用户自己打 "ms" */
+.ai-delay input[type="number"]::after {
+    content: attr(data-unit);
+    color: var(--fg-dim);
+    font-size: 10.5px;
+}
+.ai-delay-reset {
+    margin-left: 2px;
+    padding: 5px 9px;
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    color: var(--fg-dim);
+    font-size: 11px;
+    cursor: pointer;
+    user-select: none;
+    transition: background-color .12s ease, color .12s ease, border-color .12s ease;
+}
+.ai-delay-reset:hover {
+    background: var(--hover);
+    color: var(--fg);
+    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+.dep-btn {
+    padding: 6px 13px;
+    border: 1px solid var(--accent);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--accent) 9%, transparent);
+    color: var(--accent);
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
+    transition: background-color .14s ease, opacity .14s ease, transform .1s ease;
+}
+.dep-btn:hover { background: color-mix(in srgb, var(--accent) 17%, transparent); }
+.dep-btn:active:not([disabled]) { transform: translateY(1px); }
+.dep-btn.ghost {
+    border-color: var(--line);
+    background: transparent;
+    color: var(--fg-dim);
+}
+.dep-btn.ghost:hover { color: var(--fg); border-color: var(--fg-dim); }
+

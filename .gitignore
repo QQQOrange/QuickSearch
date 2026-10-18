@@ -1,0 +1,46 @@
+# ============================================================================
+#  Quick Search —— 构建产物、依赖、运行时产物
+#
+#  原则：**只把"能重新生成的东西"挡在外面**。
+#
+#  ⚠ 实测证据（docs/evidence 截图、tools/probe-out 探针日志）**不入库**：
+#  它们是"当时的实测结果"，体积 38MB，且重跑探针就能再生成。
+#  需要追溯历史证据时去 `D:\Local AI\git\QuickSearch-evidence-archive`。
+# ============================================================================
+
+# ---- Rust / Tauri 构建产物 ----
+/target/
+**/target/
+*.pdb
+*.lib
+
+# ---- Node 依赖（体积大、可重装）----
+/node_modules/
+**/node_modules/
+tools/node_modules/
+
+# ---- 运行时临时文件 ----
+*.tmp
+*.bak
+*.log
+build-warmup.log
+electron-install.log
+fetch-icons.log
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# ---- 本地配置 / 密钥（绝不能进仓库）----
+.env
+.env.*
+*.secret
+config.local.json
+
+# ---- 实测证据（截图 / 探针日志）不入库：体积大且可重跑 ----
+docs/evidence/
+tools/probe-out/

@@ -1,0 +1,2682 @@
+[
+  {
+    "name": "汉典",
+    "url": "https://www.zdic.net/hans/test",
+    "kind": "DEAD",
+    "status": 404,
+    "ms": 247,
+    "final": "https://zdic.net/hans/test"
+  },
+  {
+    "name": "500px",
+    "url": "https://500px.com/search?q=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 120,
+    "error": "ECONNRESET"
+  },
+  {
+    "name": "爱卡汽车",
+    "url": "https://so.xcar.com.cn/?q=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 62,
+    "error": "ENOTFOUND"
+  },
+  {
+    "name": "百度经验",
+    "url": "https://jingyan.baidu.com/search?word=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 2160,
+    "error": "fetch failed"
+  },
+  {
+    "name": "谷歌地球",
+    "url": "https://earth.google.com/web/search/test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10457,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "谷歌地图",
+    "url": "https://www.google.com/maps/search/test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10465,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "谷歌翻译",
+    "url": "https://translate.google.com/?q=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10459,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "谷歌图片",
+    "url": "https://www.google.com/search?q=test&tbm=isch",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10667,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "谷歌新闻",
+    "url": "https://news.google.com/search?q=test&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10632,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "谷歌学术",
+    "url": "https://scholar.google.com/scholar?hl=zh-CN&q=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10596,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "谷歌专利",
+    "url": "https://patents.google.com/?q=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10333,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "乐天市场",
+    "url": "https://search.rakuten.co.jp/search/mall/test/",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10692,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "路透社",
+    "url": "https://www.reuters.com/site-search/?query=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10616,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "太平洋汽车",
+    "url": "https://so.pcauto.com.cn/cs/s?q=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 94,
+    "error": "ENOTFOUND"
+  },
+  {
+    "name": "维基百科",
+    "url": "https://zh.wikipedia.org/wiki/test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10302,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "维基词典",
+    "url": "https://zh.wiktionary.org/w/index.php?search=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10602,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "维基文库",
+    "url": "https://zh.wikisource.org/w/index.php?search=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10580,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "无追搜索",
+    "url": "https://www.wuzhuiso.com/s?q=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 567,
+    "error": "ERR_TLS_CERT_ALTNAME_INVALID"
+  },
+  {
+    "name": "AO3",
+    "url": "https://archiveofourown.org/works/search?work_search%5Bquery%5D=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10252,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "APKPure",
+    "url": "https://apkpure.com/search?q=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10304,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "ArtStation",
+    "url": "https://www.artstation.com/search?q=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10609,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "Bandcamp",
+    "url": "https://bandcamp.com/search?q=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10653,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "BASE",
+    "url": "https://www.base-search.net/Search/Results?lookfor=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10210,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "BBC",
+    "url": "https://www.bbc.co.uk/search?q=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10493,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "Behance",
+    "url": "https://www.behance.net/search/projects?search=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10596,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "Bluesky",
+    "url": "https://bsky.app/search?q=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10628,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "Brave 搜索",
+    "url": "https://search.brave.com/search?q=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10252,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "ChatGPT",
+    "url": "https://chatgpt.com/?q=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10660,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "Chrome商店",
+    "url": "https://chrome.google.com/webstore/search/test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10676,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "Copilot",
+    "url": "https://copilot.microsoft.com/?q=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 329,
+    "error": "ECONNRESET"
+  },
+  {
+    "name": "Dailymotion",
+    "url": "https://www.dailymotion.com/search/test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10631,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "DeviantArt",
+    "url": "https://www.deviantart.com/search?q=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10284,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "Docker Hub",
+    "url": "https://hub.docker.com/search?q=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10649,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "Dropbox",
+    "url": "https://www.dropbox.com/search/personal?query=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10540,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "DuckDuckGo",
+    "url": "https://duckduckgo.com/?q=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10334,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "DuckDuckGo 图片",
+    "url": "https://duckduckgo.com/?q=test&iax=images&ia=images",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10666,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "Etsy",
+    "url": "https://www.etsy.com/search?q=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10527,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "F-Droid",
+    "url": "https://search.f-droid.org/?q=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10404,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "Facebook",
+    "url": "https://www.facebook.com/search/results.php?q=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10446,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "flickr",
+    "url": "https://www.flickr.com/search/?q=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10670,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "GameFAQs",
+    "url": "https://gamefaqs.gamespot.com/search?game=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10587,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "Gemini",
+    "url": "https://gemini.google.com/app?q=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10676,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "Genius",
+    "url": "https://genius.com/search?q=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10654,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "GitHub",
+    "url": "https://github.com/search?q=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 15008,
+    "error": "The operation was aborted due to timeout"
+  },
+  {
+    "name": "Goodreads",
+    "url": "https://www.goodreads.com/search?q=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10586,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "Google",
+    "url": "https://www.google.com/search?q=test&ie=utf-8&oe=utf-8",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10705,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "Google Drive",
+    "url": "https://drive.google.com/drive/u/0/search?q=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10395,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "GreasyFork",
+    "url": "https://greasyfork.org/scripts?q=test&utf8=✓",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10417,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "Grok",
+    "url": "https://grok.com/?q=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10682,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "Hugging Face",
+    "url": "https://huggingface.co/models?search=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10328,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "Internet Archive",
+    "url": "https://archive.org/search?query=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10445,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "itch.io",
+    "url": "https://itch.io/search?q=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10601,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "MEGA",
+    "url": "https://mega.nz/search?q=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10142,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "Mistral",
+    "url": "https://chat.mistral.ai/chat?q=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10363,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "Musixmatch",
+    "url": "https://www.musixmatch.com/search/test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10622,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "niconico",
+    "url": "https://www.nicovideo.jp/search/test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10606,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "OneDrive",
+    "url": "https://onedrive.live.com/?q=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10371,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "OpenCritic",
+    "url": "https://opencritic.com/search?criteria=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 784,
+    "error": "UND_ERR_SOCKET"
+  },
+  {
+    "name": "OpenStreetMap",
+    "url": "https://www.openstreetmap.org/search?query=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10473,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "Ozon",
+    "url": "https://www.ozon.ru/search/?text=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 5112,
+    "error": "fetch failed"
+  },
+  {
+    "name": "Packagist",
+    "url": "https://packagist.org/search/?q=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10651,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "Papers with Code",
+    "url": "https://paperswithcode.com/search?q=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10879,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "Perplexity AI",
+    "url": "https://www.perplexity.ai/search?q=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10673,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "Pinterest",
+    "url": "https://www.pinterest.com/search/pins/?q=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10453,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "pixiv",
+    "url": "https://www.pixiv.net/tags/test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10594,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "Poe",
+    "url": "https://poe.com/search?q=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10649,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "Quora",
+    "url": "https://www.quora.com/search?q=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10314,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "Qwant",
+    "url": "https://www.qwant.com/?q=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10333,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "Reddit",
+    "url": "https://www.reddit.com/search/?q=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10460,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "SoundCloud",
+    "url": "https://soundcloud.com/search?q=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10656,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "Spotify",
+    "url": "https://open.spotify.com/search/test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10542,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "StackOverflow(谷歌)",
+    "url": "https://www.google.com/search?q=test+site%3Astackoverflow.com",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10648,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "Startpage",
+    "url": "https://www.startpage.com/sp/search?query=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10381,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "Threads",
+    "url": "https://www.threads.net/search?q=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10631,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "TikTok",
+    "url": "https://www.tiktok.com/search?q=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10228,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "Tumblr",
+    "url": "https://www.tumblr.com/search/test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10585,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "Twitch",
+    "url": "https://www.twitch.tv/search?term=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10632,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "Twitter",
+    "url": "https://twitter.com/search?q=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10547,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "V2EX(谷歌)",
+    "url": "https://www.google.com/search?q=test+site%3Av2ex.com",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10385,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "Vimeo",
+    "url": "https://vimeo.com/search?q=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10286,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "Wallhaven",
+    "url": "https://wallhaven.cc/search?q=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10202,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "Wayback Machine",
+    "url": "https://web.archive.org/web/*/test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10557,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "Yahoo",
+    "url": "https://search.yahoo.com/search?p=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 460,
+    "error": "ECONNRESET"
+  },
+  {
+    "name": "YouTube",
+    "url": "https://www.youtube.com/results?search_query=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10567,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "YouTube Music",
+    "url": "https://music.youtube.com/search?q=test",
+    "kind": "NETFAIL",
+    "status": 0,
+    "ms": 10653,
+    "error": "UND_ERR_CONNECT_TIMEOUT"
+  },
+  {
+    "name": "LinkedIn",
+    "url": "https://www.linkedin.com/search/results/all/?keywords=test",
+    "kind": "HTTP",
+    "status": 451,
+    "ms": 1402,
+    "final": "https://www.linkedin.cn/incareer/home"
+  },
+  {
+    "name": "WikiHow",
+    "url": "https://zh.wikihow.com/wikiHowTo?search=test",
+    "kind": "HTTP",
+    "status": 406,
+    "ms": 779,
+    "final": "https://zh.wikihow.com/wikiHowTo?search=test"
+  },
+  {
+    "name": "1905 电影网",
+    "url": "https://www.1905.com/search/?q=test",
+    "kind": "BLOCK",
+    "status": 403,
+    "ms": 304,
+    "final": "https://www.1905.com/search/?q=test"
+  },
+  {
+    "name": "百度百科",
+    "url": "https://baike.baidu.com/search/word?pic=1&sug=1&word=test",
+    "kind": "BLOCK",
+    "status": 403,
+    "ms": 692,
+    "final": "https://baike.baidu.com/item/test"
+  },
+  {
+    "name": "柯林斯词典",
+    "url": "https://www.collinsdictionary.com/dictionary/english/test",
+    "kind": "BLOCK",
+    "status": 403,
+    "ms": 764,
+    "final": "https://www.collinsdictionary.com/dictionary/english/test"
+  },
+  {
+    "name": "萌娘百科",
+    "url": "https://zh.moegirl.org.cn/index.php?search=test",
+    "kind": "BLOCK",
+    "status": 403,
+    "ms": 1586,
+    "final": "https://zh.moegirl.org.cn/index.php?search=test"
+  },
+  {
+    "name": "贴吧",
+    "url": "https://tieba.baidu.com/f?kw=test&ie=utf-8",
+    "kind": "BLOCK",
+    "status": 403,
+    "ms": 86,
+    "final": "https://tieba.baidu.com/f?kw=test&ie=utf-8"
+  },
+  {
+    "name": "韦氏词典",
+    "url": "https://www.merriam-webster.com/dictionary/test",
+    "kind": "BLOCK",
+    "status": 403,
+    "ms": 877,
+    "final": "https://www.merriam-webster.com/dictionary/test"
+  },
+  {
+    "name": "知乎",
+    "url": "https://www.zhihu.com/search?q=test",
+    "kind": "BLOCK",
+    "status": 403,
+    "ms": 446,
+    "final": "https://www.zhihu.com/search?q=test"
+  },
+  {
+    "name": "AlternativeTo",
+    "url": "https://alternativeto.net/browse/search/?q=test",
+    "kind": "BLOCK",
+    "status": 403,
+    "ms": 805,
+    "final": "https://alternativeto.net/browse/search/?q=test"
+  },
+  {
+    "name": "Codecademy",
+    "url": "https://www.codecademy.com/search?query=test",
+    "kind": "BLOCK",
+    "status": 403,
+    "ms": 804,
+    "final": "https://www.codecademy.com/search?query=test"
+  },
+  {
+    "name": "CORE",
+    "url": "https://core.ac.uk/search?q=test",
+    "kind": "BLOCK",
+    "status": 403,
+    "ms": 2974,
+    "final": "https://core.ac.uk/search/?q=test"
+  },
+  {
+    "name": "Crunchyroll",
+    "url": "https://www.crunchyroll.com/search?q=test",
+    "kind": "BLOCK",
+    "status": 403,
+    "ms": 793,
+    "final": "https://www.crunchyroll.com/search?q=test"
+  },
+  {
+    "name": "eBay",
+    "url": "https://www.ebay.com/sch/i.html?_nkw=test",
+    "kind": "BLOCK",
+    "status": 403,
+    "ms": 787,
+    "final": "https://www.ebay.com/sch/i.html?_nkw=test"
+  },
+  {
+    "name": "Epic 商店",
+    "url": "https://store.epicgames.com/zh-CN/search?q=test",
+    "kind": "BLOCK",
+    "status": 403,
+    "ms": 518,
+    "final": "https://store.epicgames.com/zh-CN/search?q=test"
+  },
+  {
+    "name": "Free Dictionary",
+    "url": "https://www.thefreedictionary.com/test",
+    "kind": "BLOCK",
+    "status": 403,
+    "ms": 814,
+    "final": "https://www.thefreedictionary.com/test"
+  },
+  {
+    "name": "GitLab",
+    "url": "https://gitlab.com/search?search=test",
+    "kind": "BLOCK",
+    "status": 403,
+    "ms": 2073,
+    "final": "https://gitlab.com/users/sign_in"
+  },
+  {
+    "name": "IEEE 标准",
+    "url": "https://standards.ieee.org/search/?q=test",
+    "kind": "BLOCK",
+    "status": 403,
+    "ms": 572,
+    "final": "https://standards.ieee.org/search/?q=test"
+  },
+  {
+    "name": "IGDB",
+    "url": "https://www.igdb.com/search?type=1&q=test",
+    "kind": "BLOCK",
+    "status": 403,
+    "ms": 770,
+    "final": "https://www.igdb.com/search?type=1&q=test"
+  },
+  {
+    "name": "Lottiefiles",
+    "url": "https://lottiefiles.com/search?q=test",
+    "kind": "BLOCK",
+    "status": 403,
+    "ms": 774,
+    "final": "https://lottiefiles.com/search?q=test"
+  },
+  {
+    "name": "Maven",
+    "url": "https://mvnrepository.com/search?q=test",
+    "kind": "BLOCK",
+    "status": 403,
+    "ms": 877,
+    "final": "https://mvnrepository.com/search?q=test"
+  },
+  {
+    "name": "Nexus Mods",
+    "url": "https://www.nexusmods.com/search/?gsearch=test",
+    "kind": "BLOCK",
+    "status": 403,
+    "ms": 572,
+    "final": "https://www.nexusmods.com/search/?gsearch=test"
+  },
+  {
+    "name": "npm",
+    "url": "https://www.npmjs.com/search?q=test",
+    "kind": "BLOCK",
+    "status": 403,
+    "ms": 795,
+    "final": "https://www.npmjs.com/search?q=test"
+  },
+  {
+    "name": "Pexels",
+    "url": "https://www.pexels.com/search/test/",
+    "kind": "BLOCK",
+    "status": 403,
+    "ms": 793,
+    "final": "https://www.pexels.com/search/test/"
+  },
+  {
+    "name": "Pixabay",
+    "url": "https://pixabay.com/zh/images/search/test/",
+    "kind": "BLOCK",
+    "status": 403,
+    "ms": 1308,
+    "final": "https://pixabay.com/zh/images/search/test/"
+  },
+  {
+    "name": "Product Hunt",
+    "url": "https://www.producthunt.com/search?q=test",
+    "kind": "BLOCK",
+    "status": 403,
+    "ms": 780,
+    "final": "https://www.producthunt.com/search?q=test"
+  },
+  {
+    "name": "ResearchGate",
+    "url": "https://www.researchgate.net/search?q=test",
+    "kind": "BLOCK",
+    "status": 403,
+    "ms": 811,
+    "final": "https://www.researchgate.net/search?q=test"
+  },
+  {
+    "name": "Reverso",
+    "url": "https://context.reverso.net/translation/english-chinese/test",
+    "kind": "BLOCK",
+    "status": 403,
+    "ms": 765,
+    "final": "https://context.reverso.net/translation/english-chinese/test"
+  },
+  {
+    "name": "Science",
+    "url": "https://www.science.org/action/doSearch?AllField=test",
+    "kind": "BLOCK",
+    "status": 403,
+    "ms": 534,
+    "final": "https://www.science.org/action/doSearch?AllField=test"
+  },
+  {
+    "name": "ScienceDirect",
+    "url": "https://www.sciencedirect.com/search?qs=test",
+    "kind": "BLOCK",
+    "status": 403,
+    "ms": 543,
+    "final": "https://www.sciencedirect.com/search?qs=test"
+  },
+  {
+    "name": "Softpedia",
+    "url": "https://www.softpedia.com/search.php?q=test",
+    "kind": "BLOCK",
+    "status": 403,
+    "ms": 883,
+    "final": "https://www.softpedia.com/search.php?q=test"
+  },
+  {
+    "name": "Sourcegraph",
+    "url": "https://sourcegraph.com/search?q=test",
+    "kind": "BLOCK",
+    "status": 403,
+    "ms": 817,
+    "final": "https://sourcegraph.com/search?q=test"
+  },
+  {
+    "name": "Stack Exchange",
+    "url": "https://stackexchange.com/search?q=test",
+    "kind": "BLOCK",
+    "status": 403,
+    "ms": 477,
+    "final": "https://stackexchange.com/search?q=test"
+  },
+  {
+    "name": "StackOverflow",
+    "url": "https://stackoverflow.com/search?q=test",
+    "kind": "BLOCK",
+    "status": 403,
+    "ms": 517,
+    "final": "https://stackoverflow.com/search?q=test"
+  },
+  {
+    "name": "Taylor & Francis",
+    "url": "https://www.tandfonline.com/action/doSearch?AllField=test",
+    "kind": "BLOCK",
+    "status": 403,
+    "ms": 767,
+    "final": "https://www.tandfonline.com/action/doSearch?AllField=test"
+  },
+  {
+    "name": "Udemy",
+    "url": "https://www.udemy.com/courses/search/?q=test",
+    "kind": "BLOCK",
+    "status": 403,
+    "ms": 793,
+    "final": "https://www.udemy.com/courses/search/?q=test"
+  },
+  {
+    "name": "Unsplash",
+    "url": "https://unsplash.com/s/photos/test",
+    "kind": "BLOCK",
+    "status": 401,
+    "ms": 2636,
+    "final": "https://unsplash.com/.within.website?redir=%2Fs%2Fphotos%2Ftest"
+  },
+  {
+    "name": "Wiley",
+    "url": "https://onlinelibrary.wiley.com/action/doSearch?AllField=test",
+    "kind": "BLOCK",
+    "status": 403,
+    "ms": 876,
+    "final": "https://onlinelibrary.wiley.com/action/doSearch?AllField=test"
+  },
+  {
+    "name": "115 网盘",
+    "url": "https://115.com/?mode=search&search_value=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 219,
+    "final": "https://115.com/?goto=http%3A%2F%2F115.com%2F%3Fmode%3Dsearch%26search_value%3Dtest"
+  },
+  {
+    "name": "1688",
+    "url": "https://s.1688.com/selloffer/offer_search.htm?keywords=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 516,
+    "final": "https://s.1688.com/selloffer/offer_search.htm?keywords=test"
+  },
+  {
+    "name": "360",
+    "url": "https://www.so.com/s?ie=utf-8&q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 209,
+    "final": "https://www.so.com/s?ie=utf-8&q=test"
+  },
+  {
+    "name": "36氪",
+    "url": "https://36kr.com/search/articles/test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 176,
+    "final": "https://36kr.com/search/articles/test"
+  },
+  {
+    "name": "3DM",
+    "url": "https://so.3dmgame.com/?keyword=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 375,
+    "final": "https://so.3dmgame.com/?keyword=test"
+  },
+  {
+    "name": "阿里云开发者",
+    "url": "https://developer.aliyun.com/search?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 786,
+    "final": "https://www.aliyun.com/search?q=test"
+  },
+  {
+    "name": "阿里云盘",
+    "url": "https://www.alipan.com/search?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 416,
+    "final": "https://www.alipan.com/search?q=test"
+  },
+  {
+    "name": "爱奇艺",
+    "url": "https://so.iqiyi.com/so/q_test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 677,
+    "final": "https://www.iqiyi.com/so/q_test"
+  },
+  {
+    "name": "爱企查",
+    "url": "https://aiqicha.baidu.com/s?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 931,
+    "final": "https://aiqicha.baidu.com/cbae/tr?headto=https%3A%2F%2Faiqicha.baidu.com%2Fs%3Fq%3Dtest"
+  },
+  {
+    "name": "百度",
+    "url": "https://www.baidu.com/s?wd=test&ie=utf-8",
+    "kind": "OK",
+    "status": 200,
+    "ms": 1299,
+    "final": "https://www.baidu.com/s?wd=test&ie=utf-8"
+  },
+  {
+    "name": "百度地图",
+    "url": "https://map.baidu.com/search?querytype=s&wd=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 209,
+    "final": "http://map.baidu.com/search/?querytype=s&wd=test"
+  },
+  {
+    "name": "百度翻译",
+    "url": "https://fanyi.baidu.com/#auto/zh/test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 769,
+    "final": "https://fanyi.baidu.com/mtpe-individual/multimodal"
+  },
+  {
+    "name": "百度汉语",
+    "url": "https://hanyu.baidu.com/s?wd=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 837,
+    "final": "https://hanyu.baidu.com/s?wd=test"
+  },
+  {
+    "name": "百度图片",
+    "url": "https://image.baidu.com/search/index?tn=baiduimage&ie=utf-8&word=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 462,
+    "final": "https://wappass.baidu.com/static/captcha/tuxing_v2.html?&logid=12100256144256120062&ak=5c55ec1d6f983c7c410423a63d2071b6&backurl=https%3A%2F%2Fimage.baidu.com%2Fsearch%2Findex%3Ftn%3Dbaiduimage%26ie%3Dutf-8%26word%3Dtest&ext=teV2tmljlW96WuTkCJ1P9FULpXHCR7%2F%2F6fcYQvd3gmO5j1MeQi1WwIKWAC1DGr5EMA04OB9EmSd2%2FDV2dV7o9FLUkZk8r58pb0cIPQubfYcVIg2Sk%2BJXPnaJtHP83ojc&signature=d78b412573b0e0ab9d34510914e1828d&timestamp=1791859586"
+  },
+  {
+    "name": "百度网盘",
+    "url": "https://pan.baidu.com/disk/home?#/search?key=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 1011,
+    "final": "https://pan.baidu.com/login?redirecturl=https%3A%2F%2Fpan.baidu.com%2Fdisk%2Fhome"
+  },
+  {
+    "name": "百度文库",
+    "url": "https://wenku.baidu.com/search?word=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 1108,
+    "final": "https://wenku.baidu.com/search?word=test"
+  },
+  {
+    "name": "百度新闻",
+    "url": "https://www.baidu.com/s?rtt=1&bsst=1&cl=2&tn=news&rsv_dl=ns_pc&word=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 1127,
+    "final": "https://www.baidu.com/s?rtt=1&bsst=1&cl=2&tn=news&rsv_dl=ns_pc&word=test"
+  },
+  {
+    "name": "百度学术",
+    "url": "http://xueshu.baidu.com/s?wd=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 678,
+    "final": "https://wappass.baidu.com/static/captcha/tuxing_v2.html?&logid=8476047916438893274&ak=c27bbc89afca0463650ac9bde68ebe06&backurl=https%3A%2F%2Fxueshu.baidu.com%2Fs%3Fwd%3Dtest&ext=x9G9QDmMXq%2FNo87gjGO0P5%2Bbtzt72PxtAyu0rvoZnc09qxHzv8tRxodBg5SciE9xUgqUK9LXd1cIlztrhMwivx2iUVItnBusd1N%2BFyMq5KmoDY2lWBcQud1OquYKHWL0&signature=8442f2d10326102b65cbf7de52e95d2c&timestamp=1791859656"
+  },
+  {
+    "name": "百度知道",
+    "url": "https://zhidao.baidu.com/search?word=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 410,
+    "final": "https://zhidao.baidu.com/search?word=test"
+  },
+  {
+    "name": "必应",
+    "url": "https://cn.bing.com/search?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 271,
+    "final": "https://cn.bing.com/search?q=test"
+  },
+  {
+    "name": "必应地图",
+    "url": "https://www.bing.com/maps?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 317,
+    "final": "https://cn.bing.com/maps?q=test"
+  },
+  {
+    "name": "必应翻译",
+    "url": "https://cn.bing.com/dict/search?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 356,
+    "final": "https://cn.bing.com/dict/search?q=test"
+  },
+  {
+    "name": "必应图片",
+    "url": "https://www.bing.com/images/search?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 201,
+    "final": "https://cn.bing.com/images/search?q=test"
+  },
+  {
+    "name": "哔哩哔哩",
+    "url": "https://search.bilibili.com/all?keyword=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 790,
+    "final": "https://search.bilibili.com/all?keyword=test"
+  },
+  {
+    "name": "博客园",
+    "url": "https://zzk.cnblogs.com/s?w=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 343,
+    "final": "https://zzkx.cnblogs.com/s?w=test"
+  },
+  {
+    "name": "财联社",
+    "url": "https://www.cls.cn/searchPage?keyword=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 404,
+    "final": "https://www.cls.cn/searchPage?keyword=test"
+  },
+  {
+    "name": "菜鸟教程",
+    "url": "https://www.runoob.com/?s=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 308,
+    "final": "https://www.runoob.com/?s=test"
+  },
+  {
+    "name": "大众点评",
+    "url": "https://www.dianping.com/search/keyword/1/0_test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 893,
+    "final": "https://verify.meituan.com/v2/app/general_page?requestCode=c203904c6f4a493c9a35b114ebe500c7&adaptor=auto&action=spiderindefence&succCallbackUrl=https%3A%2F%2Foptimus-mtsi.meituan.com%2Foptimus%2FverifyResult%3ForiginUrl%3Dhttps%253A%252F%252Fwww.dianping.com%252Fsearch%252Fkeyword%252F1%252F0_test&theme=dianping"
+  },
+  {
+    "name": "当当",
+    "url": "https://search.dangdang.com/?key=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 361,
+    "final": "https://search.dangdang.com/?key=test"
+  },
+  {
+    "name": "第一财经",
+    "url": "https://www.yicai.com/search?keys=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 395,
+    "final": "https://www.yicai.com/search?keys=test"
+  },
+  {
+    "name": "丁香医生",
+    "url": "https://dxy.com/search?keyword=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 285,
+    "final": "https://dxy.com/search/health/index?keyword=test"
+  },
+  {
+    "name": "东方财富",
+    "url": "https://so.eastmoney.com/web/s?keyword=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 419,
+    "final": "https://so.eastmoney.com/web/s?keyword=test"
+  },
+  {
+    "name": "懂车帝",
+    "url": "https://www.dongchedi.com/search?keyword=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 244,
+    "final": "https://www.dongchedi.com/search?keyword=test"
+  },
+  {
+    "name": "抖音",
+    "url": "https://www.douyin.com/search/test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 496,
+    "final": "https://www.douyin.com/search/test"
+  },
+  {
+    "name": "豆瓣",
+    "url": "https://www.douban.com/search?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 222,
+    "final": "https://www.douban.com/search?q=test"
+  },
+  {
+    "name": "豆瓣电影",
+    "url": "https://search.douban.com/movie/subject_search?search_text=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 599,
+    "final": "https://search.douban.com/movie/subject_search?search_text=test"
+  },
+  {
+    "name": "豆瓣读书",
+    "url": "https://search.douban.com/book/subject_search?search_text=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 469,
+    "final": "https://search.douban.com/book/subject_search?search_text=test"
+  },
+  {
+    "name": "豆包",
+    "url": "https://www.doubao.com/chat/?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 1411,
+    "final": "https://www.doubao.com/chat/?q=test"
+  },
+  {
+    "name": "饿了么",
+    "url": "https://www.ele.me/search?keyword=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 840,
+    "final": "https://taobaoshangou.ele.me/"
+  },
+  {
+    "name": "凤凰网",
+    "url": "https://search.ifeng.com/sofeng/search.action?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 297,
+    "final": "https://www.ifeng.com/?q=test"
+  },
+  {
+    "name": "高德地图",
+    "url": "https://www.amap.com/search?query=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 73,
+    "final": "https://www.amap.com/search?query=test"
+  },
+  {
+    "name": "古诗文网",
+    "url": "https://so.gushiwen.cn/search.aspx?value=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 405,
+    "final": "https://so.gushiwen.cn/search.aspx?value=test"
+  },
+  {
+    "name": "果壳",
+    "url": "https://www.guokr.com/search/?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 423,
+    "final": "https://www.guokr.com/?q=test"
+  },
+  {
+    "name": "海词",
+    "url": "https://dict.cn/test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 493,
+    "final": "https://dict.cn/test"
+  },
+  {
+    "name": "海螺AI",
+    "url": "https://hailuoai.com/?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 360,
+    "final": "https://hailuoai.com/?q=test"
+  },
+  {
+    "name": "好大夫在线",
+    "url": "https://www.haodf.com/search/?kw=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 368,
+    "final": "https://www.haodf.com/"
+  },
+  {
+    "name": "好看视频",
+    "url": "https://haokan.baidu.com/web/search/page?query=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 339,
+    "final": "https://haokan.baidu.com/web/search/page?query=test"
+  },
+  {
+    "name": "虎扑",
+    "url": "https://bbs.hupu.com/search?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 497,
+    "final": "https://bbs.hupu.com/search?q=test"
+  },
+  {
+    "name": "虎嗅",
+    "url": "https://www.huxiu.com/search.html?s=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 542,
+    "final": "https://www.huxiu.com/"
+  },
+  {
+    "name": "花瓣",
+    "url": "https://huaban.com/search/?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 347,
+    "final": "https://huaban.com/search/?q=test"
+  },
+  {
+    "name": "华尔街见闻",
+    "url": "https://wallstreetcn.com/search?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 441,
+    "final": "https://wallstreetcn.com/search?q=test"
+  },
+  {
+    "name": "即刻",
+    "url": "https://web.okjike.com/search?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 184,
+    "final": "https://web.okjike.com/search?q=test"
+  },
+  {
+    "name": "简书",
+    "url": "https://www.jianshu.com/search?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 486,
+    "final": "https://www.jianshu.com/search?q=test"
+  },
+  {
+    "name": "剑桥词典",
+    "url": "https://dictionary.cambridge.org/dictionary/english-chinese-simplified/test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 948,
+    "final": "https://dictionary.cambridge.org/dictionary/english-chinese-simplified/test"
+  },
+  {
+    "name": "今日头条",
+    "url": "https://www.toutiao.com/search/?keyword=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 1385,
+    "final": "https://so.toutiao.com/search/?dvpf=pc&keyword=test"
+  },
+  {
+    "name": "金山词霸",
+    "url": "https://www.iciba.com/word?w=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 544,
+    "final": "https://www.iciba.com/word?w=test"
+  },
+  {
+    "name": "晋江文学城",
+    "url": "https://search.jjwxc.net/search.php?kw=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 345,
+    "final": "https://www.jjwxc.net/search.php?kw=test"
+  },
+  {
+    "name": "京东",
+    "url": "https://search.jd.com/Search?keyword=test&enc=utf-8",
+    "kind": "OK",
+    "status": 200,
+    "ms": 1073,
+    "final": "https://cfe.m.jd.com/privatedomain/risk_handler/03101900/?evApi=color-mesh_A_SC_pc_search_java_Search&evExt=&evtype=3&lgid=2193&returnurl=https%3A%2F%2Fsearch.jd.com%2FSearch%3Fkeyword%3Dtest%26enc%3Dutf-8&rpid=rp-188601182-10280-1791859624606"
+  },
+  {
+    "name": "巨潮资讯",
+    "url": "http://www.cninfo.com.cn/new/fulltextSearch?keyWord=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 122,
+    "final": "http://www.cninfo.com.cn/new/fulltextSearch?keyWord=test"
+  },
+  {
+    "name": "掘金",
+    "url": "https://juejin.cn/search?query=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 177,
+    "final": "https://juejin.cn/search?query=test"
+  },
+  {
+    "name": "开源中国",
+    "url": "https://www.oschina.net/search?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 489,
+    "final": "https://www.oschina.net/search/?q=test"
+  },
+  {
+    "name": "孔夫子旧书网",
+    "url": "https://search.kongfz.com/product_result/?key=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 448,
+    "final": "https://search.kongfz.com/product/?redirectFrom=product_result&keyword=test&actionPath=keyword"
+  },
+  {
+    "name": "酷安",
+    "url": "https://www.coolapk.com/algo?keyword=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 498,
+    "final": "https://www.coolapk.com/algo?keyword=test"
+  },
+  {
+    "name": "酷狗5sing",
+    "url": "http://search.5sing.kugou.com/?keyword=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 383,
+    "final": "http://search.5sing.kugou.com/?keyword=test"
+  },
+  {
+    "name": "酷我音乐",
+    "url": "http://www.kuwo.cn/search/list?type=all&key=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 807,
+    "final": "https://www.kuwo.cn/search/list?type=all&key=test"
+  },
+  {
+    "name": "夸克搜索",
+    "url": "https://quark.sm.cn/s?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 341,
+    "final": "https://quark.sm.cn/s?q=test"
+  },
+  {
+    "name": "夸克网盘",
+    "url": "https://pan.quark.cn/search?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 910,
+    "final": "https://pan.quark.cn/"
+  },
+  {
+    "name": "快递100",
+    "url": "https://www.kuaidi100.com/?nu=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 194,
+    "final": "https://www.kuaidi100.com/?nu=test"
+  },
+  {
+    "name": "快手",
+    "url": "https://www.kuaishou.com/search/video?searchKey=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 655,
+    "final": "https://www.kuaishou.com/search/video?searchKey=test"
+  },
+  {
+    "name": "朗文词典",
+    "url": "https://www.ldoceonline.com/dictionary/test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 1093,
+    "final": "https://www.ldoceonline.com/dictionary/test"
+  },
+  {
+    "name": "脉脉",
+    "url": "https://maimai.cn/web/search_center?type=gossip&query=test&highlight=true",
+    "kind": "OK",
+    "status": 200,
+    "ms": 878,
+    "final": "https://maimai.cn/platform/login?to=https%3A%2F%2Fmaimai.cn%2Fweb%2Fsearch_center%3Ftype%3Dgossip%26query%3Dtest%26highlight%3Dtrue"
+  },
+  {
+    "name": "芒果TV",
+    "url": "https://so.mgtv.com/so?k=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 271,
+    "final": "https://so.mgtv.com/so?k=test"
+  },
+  {
+    "name": "美食杰",
+    "url": "https://www.meishij.net/search?keyword=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 84,
+    "final": "https://www.meishij.net/search?keyword=test"
+  },
+  {
+    "name": "咪咕音乐",
+    "url": "https://music.migu.cn/v3/search?keyword=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 806,
+    "final": "https://music.migu.cn/v5/"
+  },
+  {
+    "name": "秘塔AI搜索",
+    "url": "https://metaso.cn/?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 403,
+    "final": "https://metaso.cn/search/70633c88-7e0c-4c8b-8497-4c04d6690e50?question=test"
+  },
+  {
+    "name": "慕课网",
+    "url": "https://www.imooc.com/search/?words=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 199,
+    "final": "https://www.imooc.com/search/?words=test"
+  },
+  {
+    "name": "牛津词典",
+    "url": "https://www.oxfordlearnersdictionaries.com/search/english/?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 2029,
+    "final": "https://www.oxfordlearnersdictionaries.com/definition/english/test_1?q=test"
+  },
+  {
+    "name": "澎湃新闻",
+    "url": "https://www.thepaper.cn/searchResult?searchWord=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 502,
+    "final": "https://www.thepaper.cn/searchResult?searchWord=test"
+  },
+  {
+    "name": "拼多多",
+    "url": "https://mobile.yangkeduo.com/search_result.html?search_key=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 435,
+    "final": "https://mobile.yangkeduo.com/search_result.html?search_key=test"
+  },
+  {
+    "name": "企查查",
+    "url": "https://www.qcc.com/web/search?key=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 368,
+    "final": "https://www.qcc.com/web/search?key=test"
+  },
+  {
+    "name": "起点中文网",
+    "url": "https://www.qidian.com/so/test.html",
+    "kind": "OK",
+    "status": 202,
+    "ms": 416,
+    "final": "https://www.qidian.com/so/test.html"
+  },
+  {
+    "name": "汽车之家",
+    "url": "https://sou.autohome.com.cn/zonghe?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 197,
+    "final": "https://sou.autohome.com.cn/zonghe?q=test"
+  },
+  {
+    "name": "千千音乐",
+    "url": "https://music.taihe.com/search?key=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 373,
+    "final": "https://music.taihe.com/search?key=test"
+  },
+  {
+    "name": "少数派",
+    "url": "https://sspai.com/search/post/test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 87,
+    "final": "https://sspai.com/search/post/test"
+  },
+  {
+    "name": "什么值得买",
+    "url": "https://search.smzdm.com/?c=home&s=test",
+    "kind": "OK",
+    "status": 202,
+    "ms": 146,
+    "final": "https://search.smzdm.com/?c=home&s=test"
+  },
+  {
+    "name": "神马搜索",
+    "url": "https://m.sm.cn/s?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 347,
+    "final": "https://m.sm.cn/s?q=test"
+  },
+  {
+    "name": "搜狗",
+    "url": "https://www.sogou.com/web?query=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 573,
+    "final": "https://www.sogou.com/web?query=test"
+  },
+  {
+    "name": "搜狗翻译",
+    "url": "https://fanyi.sogou.com/text?keyword=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 299,
+    "final": "https://fanyi.sogou.com/text?keyword=test"
+  },
+  {
+    "name": "搜狗图片",
+    "url": "https://pic.sogou.com/pics?query=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 140,
+    "final": "https://pic.sogou.com/pics?query=test"
+  },
+  {
+    "name": "搜狐视频",
+    "url": "https://so.tv.sohu.com/mts?wd=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 201,
+    "final": "https://tv.sohu.com/upload/static/special/anti-reptile/index.html"
+  },
+  {
+    "name": "苏宁易购",
+    "url": "https://search.suning.com/test/",
+    "kind": "OK",
+    "status": 200,
+    "ms": 457,
+    "final": "https://search.suning.com/test/"
+  },
+  {
+    "name": "淘宝",
+    "url": "https://s.taobao.com/search?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 313,
+    "final": "https://s.taobao.com/search?q=test"
+  },
+  {
+    "name": "腾讯地图",
+    "url": "https://map.qq.com/?what=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 366,
+    "final": "https://map.qq.com/?what=test"
+  },
+  {
+    "name": "腾讯软件中心",
+    "url": "https://pc.qq.com/search.html#!keyword=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 112,
+    "final": "https://pc.qq.com/search.html"
+  },
+  {
+    "name": "腾讯视频",
+    "url": "https://v.qq.com/x/search/?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 440,
+    "final": "https://v.qq.com/x/search/?q=test"
+  },
+  {
+    "name": "腾讯元宝",
+    "url": "https://yuanbao.tencent.com/?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 335,
+    "final": "https://yuanbao.tencent.com/?q=test"
+  },
+  {
+    "name": "腾讯云社区",
+    "url": "https://cloud.tencent.com/developer/search/article-test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 1005,
+    "final": "https://cloud.tencent.com/developer/search/article?q=test"
+  },
+  {
+    "name": "天猫",
+    "url": "https://list.tmall.com/search_product.htm?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 436,
+    "final": "https://s.taobao.com/search?fromTmallRedirect=true&tab=mall&q=test&spm="
+  },
+  {
+    "name": "天气网",
+    "url": "https://www.tianqi.com/so/?keyword=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 78,
+    "final": "https://www.tianqi.com/so/?keyword=test"
+  },
+  {
+    "name": "天眼查",
+    "url": "https://www.tianyancha.com/search?key=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 417,
+    "final": "https://www.tianyancha.com/login?from=%2Fsearch%3Fkey%3Dtest"
+  },
+  {
+    "name": "通义",
+    "url": "https://www.tongyi.com/qianwen/?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 885,
+    "final": "https://www.qianwen.com/qianwen/?q=test&ch=tongyi_redirect"
+  },
+  {
+    "name": "头条搜索",
+    "url": "https://so.toutiao.com/search?keyword=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 355,
+    "final": "https://so.toutiao.com/search?keyword=test"
+  },
+  {
+    "name": "万方",
+    "url": "http://www.wanfangdata.com.cn/search/searchList.do?searchType=all&searchWord=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 457,
+    "final": "https://s.wanfangdata.com.cn/paper?q=test"
+  },
+  {
+    "name": "网易新闻",
+    "url": "https://www.163.com/search?keyword=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 469,
+    "final": "https://www.163.com/search?keyword=test"
+  },
+  {
+    "name": "网易严选",
+    "url": "https://you.163.com/search?keyword=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 194,
+    "final": "https://you.163.com/search?keyword=test"
+  },
+  {
+    "name": "网易云课堂",
+    "url": "https://study.163.com/search.htm?keyword=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 276,
+    "final": "https://study.163.com/systemError.htm?_trace_c_p_k2_=2c934d05225a4b00a5e7bffc681bdfaa"
+  },
+  {
+    "name": "网易云音乐",
+    "url": "https://music.163.com/#/search/m/?s=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 363,
+    "final": "https://music.163.com/"
+  },
+  {
+    "name": "微博",
+    "url": "https://s.weibo.com/weibo/test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 820,
+    "final": "https://passport.weibo.com/visitor/visitor?entry=miniblog&a=enter&url=https%3A%2F%2Fs.weibo.com%2Fweibo%2Ftest&domain=.weibo.com&sudaref=&ua=php-sso_sdk_client-0.6.29&_rand=1791859667.1042"
+  },
+  {
+    "name": "微信(搜狗)",
+    "url": "https://weixin.sogou.com/weixin?ie=utf8&type=2&query=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 324,
+    "final": "https://weixin.sogou.com/weixin?ie=utf8&type=2&query=test"
+  },
+  {
+    "name": "微信读书",
+    "url": "https://weread.qq.com/web/search/books?keyword=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 665,
+    "final": "https://weread.qq.com/web/search/books?keyword=test"
+  },
+  {
+    "name": "唯品会",
+    "url": "https://category.vip.com/suggest.php?keyword=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 335,
+    "final": "https://category.vip.com/suggest.php?keyword=test"
+  },
+  {
+    "name": "文心一言",
+    "url": "https://yiyan.baidu.com/?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 793,
+    "final": "https://wenxin.baidu.com/?enter_type=yiyan_site"
+  },
+  {
+    "name": "西瓜视频",
+    "url": "https://www.ixigua.com/search/test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 468,
+    "final": "https://www.ixigua.com/search/test"
+  },
+  {
+    "name": "下厨房",
+    "url": "https://www.xiachufang.com/search/?keyword=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 377,
+    "final": "https://www.xiachufang.com/search/?keyword=test"
+  },
+  {
+    "name": "闲鱼",
+    "url": "https://www.goofish.com/search?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 319,
+    "final": "https://www.goofish.com/search?q=test"
+  },
+  {
+    "name": "小红书",
+    "url": "https://www.xiaohongshu.com/search_result?keyword=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 826,
+    "final": "https://www.xiaohongshu.com/search_result/?keyword=test"
+  },
+  {
+    "name": "小米应用商店",
+    "url": "https://app.mi.com/searchAll?keywords=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 1024,
+    "final": "https://app.mi.com/"
+  },
+  {
+    "name": "新浪财经",
+    "url": "https://search.sina.com.cn/?q=test&c=finance",
+    "kind": "OK",
+    "status": 200,
+    "ms": 822,
+    "final": "https://search.sina.com.cn/search?q=test&tp=mix"
+  },
+  {
+    "name": "新浪新闻",
+    "url": "https://search.sina.com.cn/?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 803,
+    "final": "https://search.sina.com.cn/search?q=test&tp=mix"
+  },
+  {
+    "name": "学堂在线",
+    "url": "https://www.xuetangx.com/search?query=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 174,
+    "final": "https://www.xuetangx.com/search?query=test"
+  },
+  {
+    "name": "雪球",
+    "url": "https://xueqiu.com/k?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 412,
+    "final": "https://www.xueqiu.com/k?q=test"
+  },
+  {
+    "name": "亚马逊",
+    "url": "https://www.amazon.cn/s?k=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 189,
+    "final": "https://www.amazon.cn/s?k=test"
+  },
+  {
+    "name": "央视网",
+    "url": "https://search.cctv.com/search.php?qtext=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 777,
+    "final": "https://search.cctv.com/search.php?qtext=test"
+  },
+  {
+    "name": "宜家",
+    "url": "https://www.ikea.cn/cn/zh/search/products/?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 1188,
+    "final": "https://www.ikea.cn/cn/zh/search/products/?q=test"
+  },
+  {
+    "name": "易车",
+    "url": "https://so.yiche.com/?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 443,
+    "final": "https://so.yiche.com/?q=test"
+  },
+  {
+    "name": "优酷",
+    "url": "https://so.youku.com/search_video/q_test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 1281,
+    "final": "https://so.youku.com/search/q_test?"
+  },
+  {
+    "name": "游民星空",
+    "url": "https://so.gamersky.com/?s=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 156,
+    "final": "https://so.gamersky.com/?s=test"
+  },
+  {
+    "name": "有道词典",
+    "url": "https://youdao.com/w/test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 144,
+    "final": "https://youdao.com/w/test"
+  },
+  {
+    "name": "站酷",
+    "url": "https://www.zcool.com.cn/search/content?&word=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 321,
+    "final": "https://www.zcool.com.cn/search/content?&word=test"
+  },
+  {
+    "name": "站长之家",
+    "url": "https://tool.chinaz.com/?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 229,
+    "final": "https://tool.chinaz.com/?q=test"
+  },
+  {
+    "name": "知乎直答",
+    "url": "https://zhida.zhihu.com/?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 861,
+    "final": "https://www.zhihu.com/signin?next=%2F%3Fq%3Dtest"
+  },
+  {
+    "name": "知网",
+    "url": "http://epub.cnki.net/kns/brief/default_result.aspx?txt_1_value1=test&dbPrefix=SCDB&db_opt=CJFQ%2CCJFN%2CCDFD%2CCMFD%2CCPFD%2CIPFD%2CCCND%2CCCJD%2CHBRD&singleDB=SCDB&action=scdbsearch",
+    "kind": "OK",
+    "status": 200,
+    "ms": 476,
+    "final": "https://kns.cnki.net/verify/home?captchaType=blockPuzzle&ident=d3624d&captchaId=5fc2e83c-5932-4790-9712-7e039769541f&returnUrl=dJtEXPYsRr880KajUervyfnsk-M6kXo-MQcCQa2o8Tbknpn7Yq0HBFNuvvkS8gR2AJ72V68QsNq0F_xldjZYqbG0cgghocywoHargLHcuYTbzkKPcW0dJwfwLW0BczPLPnE_OwNk-y3bay3BDiM8-ccbtP6Hn7yMUIU28lfkw2BwVTHhLQLOJhJTn03J4NxlKlnRRNyYiADldrW7kS10hjYy3938uPnk"
+  },
+  {
+    "name": "智谱清言",
+    "url": "https://chatglm.cn/?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 535,
+    "final": "https://chatglm.cn/?q=test"
+  },
+  {
+    "name": "中国大学MOOC",
+    "url": "https://www.icourse163.org/search.htm?search=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 130,
+    "final": "https://www.icourse163.org/search.htm?search=test"
+  },
+  {
+    "name": "中国新闻网",
+    "url": "https://sou.chinanews.com.cn/search.do?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 159,
+    "final": "https://sou.chinanews.com.cn/search.do?q=test"
+  },
+  {
+    "name": "纵横中文网",
+    "url": "https://search.zongheng.com/s?keyword=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 208,
+    "final": "https://search.zongheng.com/s?keyword=test"
+  },
+  {
+    "name": "AcFun",
+    "url": "https://www.acfun.cn/search/?type=complex&keyword=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 124,
+    "final": "https://www.acfun.cn/search/?type=complex&keyword=test"
+  },
+  {
+    "name": "AliExpress",
+    "url": "https://www.aliexpress.com/wholesale?SearchText=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 229,
+    "final": "https://www.aliexpress.com/wholesale?SearchText=test"
+  },
+  {
+    "name": "Apache Issues",
+    "url": "https://issues.apache.org/jira/secure/QuickSearch.jspa?searchString=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 808,
+    "final": "https://issues.apache.org/jira/secure/QuickSearch.jspa?searchString=test"
+  },
+  {
+    "name": "Arch Wiki",
+    "url": "https://wiki.archlinux.org/index.php?search=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 900,
+    "final": "https://wiki.archlinux.org/index.php?search=test"
+  },
+  {
+    "name": "arXiv",
+    "url": "https://arxiv.org/search/?query=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 848,
+    "final": "https://arxiv.org/search/?query=test"
+  },
+  {
+    "name": "Bitbucket",
+    "url": "https://bitbucket.org/repo/all?name=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 3112,
+    "final": "https://id.atlassian.com/login?application=bitbucket&continue=https%3A%2F%2Fbitbucket.org%2Faccount%2Fsignin%2F%3Fnext%3D%252Frepo%252Fall%253Fname%253Dtest%26redirectCount%3D1"
+  },
+  {
+    "name": "Claude",
+    "url": "https://claude.ai/new?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 1634,
+    "final": "https://claude.com/app-unavailable-in-region"
+  },
+  {
+    "name": "CNN",
+    "url": "https://edition.cnn.com/search?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 832,
+    "final": "https://edition.cnn.com/search?q=test"
+  },
+  {
+    "name": "Codeberg",
+    "url": "https://codeberg.org/explore/repos?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 988,
+    "final": "https://codeberg.org/explore/repos?q=test"
+  },
+  {
+    "name": "Conda",
+    "url": "https://anaconda.org/search?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 860,
+    "final": "https://anaconda.org/search?q=test"
+  },
+  {
+    "name": "Coursera",
+    "url": "https://www.coursera.org/search?query=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 1183,
+    "final": "https://www.coursera.org/search?query=test"
+  },
+  {
+    "name": "crates.io",
+    "url": "https://crates.io/search?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 1058,
+    "final": "https://crates.io/search?q=test"
+  },
+  {
+    "name": "CSDN",
+    "url": "https://so.csdn.net/so/search?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 258,
+    "final": "https://so.csdn.net/so/search?q=test"
+  },
+  {
+    "name": "DBLP",
+    "url": "https://dblp.org/search?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 546,
+    "final": "https://dblp.org/search?q=test"
+  },
+  {
+    "name": "DeepL",
+    "url": "https://www.deepl.com/translator#zh/en/test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 1637,
+    "final": "https://www.deepl.com/zh/translator"
+  },
+  {
+    "name": "DeepSeek",
+    "url": "https://chat.deepseek.com/?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 213,
+    "final": "https://chat.deepseek.com/?q=test"
+  },
+  {
+    "name": "DEV",
+    "url": "https://dev.to/search?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 1042,
+    "final": "https://dev.to/search?q=test"
+  },
+  {
+    "name": "Dribbble",
+    "url": "https://dribbble.com/search/test",
+    "kind": "OK",
+    "status": 202,
+    "ms": 1029,
+    "final": "https://dribbble.com/search/test"
+  },
+  {
+    "name": "EBSCO",
+    "url": "https://www.ebsco.com/search?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 1710,
+    "final": "https://about.ebsco.com/search"
+  },
+  {
+    "name": "Ecosia",
+    "url": "https://www.ecosia.org/search?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 1095,
+    "final": "https://cn.bing.com/"
+  },
+  {
+    "name": "Edge商店",
+    "url": "https://microsoftedge.microsoft.com/addons/search/test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 590,
+    "final": "https://microsoftedge.microsoft.com/addons/search/test"
+  },
+  {
+    "name": "edX",
+    "url": "https://www.edx.org/search?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 1416,
+    "final": "https://www.edx.org/search?q=test"
+  },
+  {
+    "name": "freeCodeCamp",
+    "url": "https://www.freecodecamp.org/news/search?query=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 1133,
+    "final": "https://www.freecodecamp.org/news/search?query=test"
+  },
+  {
+    "name": "Freepik",
+    "url": "https://www.freepik.com/search?query=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 1807,
+    "final": "https://www.magnific.com/search?query=test"
+  },
+  {
+    "name": "Giphy",
+    "url": "https://giphy.com/search/test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 947,
+    "final": "https://giphy.com/search/test"
+  },
+  {
+    "name": "Gitee",
+    "url": "https://search.gitee.com/?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 494,
+    "final": "https://so.gitee.com/?q=test"
+  },
+  {
+    "name": "Go Packages",
+    "url": "https://pkg.go.dev/search?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 1127,
+    "final": "https://pkg.go.dev/search?q=test"
+  },
+  {
+    "name": "GOG",
+    "url": "https://www.gog.com/games?query=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 3154,
+    "final": "https://www.gog.com/zh/games?rp=1"
+  },
+  {
+    "name": "Hacker News",
+    "url": "https://hn.algolia.com/?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 840,
+    "final": "https://hn.algolia.com/?q=test"
+  },
+  {
+    "name": "Humble Bundle",
+    "url": "https://www.humblebundle.com/store/search?search=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 906,
+    "final": "https://www.humblebundle.com/store/search?search=test"
+  },
+  {
+    "name": "iconfont",
+    "url": "https://www.iconfont.cn/search/index?searchType=icon&q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 434,
+    "final": "https://www.iconfont.cn/search/index?searchType=icon&q=test"
+  },
+  {
+    "name": "Iconify",
+    "url": "https://icon-sets.iconify.design/?query=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 887,
+    "final": "https://icon-sets.iconify.design/?query=test"
+  },
+  {
+    "name": "IEEE Xplore",
+    "url": "https://ieeexplore.ieee.org/search/searchresult.jsp?queryText=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 1126,
+    "final": "https://ieeexplore.ieee.org/search/searchresult.jsp?queryText=test"
+  },
+  {
+    "name": "IGN",
+    "url": "https://www.ign.com/search?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 1184,
+    "final": "https://www.ign.com/search?q=test"
+  },
+  {
+    "name": "InfoQ",
+    "url": "https://www.infoq.cn/search?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 203,
+    "final": "https://www.infoq.cn/search?q=test"
+  },
+  {
+    "name": "IP138",
+    "url": "https://www.ip138.com/iplookup.asp?ip=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 159,
+    "final": "https://www.ip138.com/iplookup.asp?ip=test"
+  },
+  {
+    "name": "IT之家",
+    "url": "https://www.ithome.com/search/test.html",
+    "kind": "OK",
+    "status": 200,
+    "ms": 776,
+    "final": "https://www.ithome.com/user-login/index.htm?url=https%3a%2f%2fwww.ithome.com%2fsearch%2ftest.html&_id=redirect&source=ithome&tip=%e7%99%bb%e5%bd%95%e4%bb%a5%e6%9f%a5%e7%9c%8b%e6%90%9c%e7%b4%a2%e7%bb%93%e6%9e%9c"
+  },
+  {
+    "name": "JSTOR",
+    "url": "http://www.jstor.org/action/doAdvancedSearch?q0=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 1011,
+    "final": "https://www.jstor.org/action/doAdvancedSearch?q0=test"
+  },
+  {
+    "name": "Khan Academy",
+    "url": "https://www.khanacademy.org/search?page_search_query=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 595,
+    "final": "https://www.khanacademy.org/search?page_search_query=test"
+  },
+  {
+    "name": "Kimi",
+    "url": "https://www.kimi.com/?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 480,
+    "final": "https://www.kimi.com/?q=test"
+  },
+  {
+    "name": "Last.fm",
+    "url": "https://www.last.fm/search?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 1588,
+    "final": "https://www.last.fm/search?q=test"
+  },
+  {
+    "name": "LeetCode",
+    "url": "https://leetcode.cn/search/?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 275,
+    "final": "https://leetcode.cn/search/?q=test"
+  },
+  {
+    "name": "Linguee",
+    "url": "https://www.linguee.com/english-chinese/search?query=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 885,
+    "final": "https://www.linguee.com/english-chinese/search?query=test"
+  },
+  {
+    "name": "Lobsters",
+    "url": "https://lobste.rs/search?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 1094,
+    "final": "https://lobste.rs/search?q=test"
+  },
+  {
+    "name": "MDN",
+    "url": "https://developer.mozilla.org/zh-CN/search?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 851,
+    "final": "https://developer.mozilla.org/zh-CN/search?q=test"
+  },
+  {
+    "name": "Metacritic",
+    "url": "https://www.metacritic.com/search/test/",
+    "kind": "OK",
+    "status": 200,
+    "ms": 1467,
+    "final": "https://www.metacritic.com/search/test/"
+  },
+  {
+    "name": "Microsoft Store",
+    "url": "https://apps.microsoft.com/search?query=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 1431,
+    "final": "https://apps.microsoft.com/search?query=test&hl=zh-CN&gl=CN"
+  },
+  {
+    "name": "MIT OpenCourseWare",
+    "url": "https://ocw.mit.edu/search/?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 600,
+    "final": "https://ocw.mit.edu/search/?q=test"
+  },
+  {
+    "name": "Mojeek",
+    "url": "https://www.mojeek.com/search?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 834,
+    "final": "https://www.mojeek.com/search?q=test"
+  },
+  {
+    "name": "Nature",
+    "url": "https://www.nature.com/search?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 3572,
+    "final": "https://www.nature.com/search?q=test&error=cookies_not_supported&code=e3f45342-f362-4c49-b6e0-daebc7a523de"
+  },
+  {
+    "name": "NuGet",
+    "url": "https://www.nuget.org/packages?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 1049,
+    "final": "https://www.nuget.org/packages?q=test"
+  },
+  {
+    "name": "Papago",
+    "url": "https://papago.naver.com/?sk=auto&tk=zh-CN&st=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 355,
+    "final": "https://papago.naver.com/?sk=auto&tk=zh-CN&st=test"
+  },
+  {
+    "name": "Project Gutenberg",
+    "url": "https://www.gutenberg.org/ebooks/search/?query=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 1029,
+    "final": "https://www.gutenberg.org/ebooks/search/?query=test"
+  },
+  {
+    "name": "PubMed",
+    "url": "https://pubmed.ncbi.nlm.nih.gov/?term=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 1766,
+    "final": "https://pubmed.ncbi.nlm.nih.gov/?term=test"
+  },
+  {
+    "name": "PyPI",
+    "url": "https://pypi.org/search/?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 2169,
+    "final": "https://pypi.org/search/?q=test"
+  },
+  {
+    "name": "PyPI 搜索",
+    "url": "https://pypi.org/search/?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 2214,
+    "final": "https://pypi.org/search/?q=test"
+  },
+  {
+    "name": "QQ音乐",
+    "url": "https://y.qq.com/portal/search.html#page=1&searchid=1&remoteplace=txt.yqq.top&t=song&w=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 355,
+    "final": "https://y.qq.com/portal/search.html"
+  },
+  {
+    "name": "Qwen Chat",
+    "url": "https://chat.qwen.ai/?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 137,
+    "final": "https://chat.qwen.ai/?q=test"
+  },
+  {
+    "name": "RubyGems",
+    "url": "https://rubygems.org/search?query=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 894,
+    "final": "https://rubygems.org/search?query=test"
+  },
+  {
+    "name": "SegmentFault",
+    "url": "https://segmentfault.com/search?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 3243,
+    "final": "https://segmentfault.com/search?q=test"
+  },
+  {
+    "name": "Semantic Scholar",
+    "url": "https://www.semanticscholar.org/search?q=test",
+    "kind": "OK",
+    "status": 202,
+    "ms": 481,
+    "final": "https://www.semanticscholar.org/search?q=test"
+  },
+  {
+    "name": "Shopee",
+    "url": "https://shopee.sg/search?keyword=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 351,
+    "final": "https://shopee.sg/search?keyword=test"
+  },
+  {
+    "name": "SimilarWeb",
+    "url": "https://www.similarweb.com/website/test/",
+    "kind": "OK",
+    "status": 202,
+    "ms": 988,
+    "final": "https://www.similarweb.com/website/test/"
+  },
+  {
+    "name": "Springer",
+    "url": "http://rd.springer.com/search?query=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 8514,
+    "final": "https://rd.springer.com/search?query=test&error=cookies_not_supported&code=552ecbee-6c27-443f-ae52-e8d47e8efa4f"
+  },
+  {
+    "name": "Steam",
+    "url": "https://store.steampowered.com/search/?term=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 1306,
+    "final": "https://store.steampowered.com/search/?term=test"
+  },
+  {
+    "name": "TapTap",
+    "url": "https://www.taptap.cn/search/test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 562,
+    "final": "https://www.taptap.cn/search/test"
+  },
+  {
+    "name": "Temu",
+    "url": "https://www.temu.com/search_result.html?search_key=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 794,
+    "final": "https://www.temu.com/search_result.html?search_key=test"
+  },
+  {
+    "name": "VirusTotal",
+    "url": "https://www.virustotal.com/gui/search/test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 755,
+    "final": "https://www.virustotal.com/gui/search/test"
+  },
+  {
+    "name": "Vocabulary.com",
+    "url": "https://www.vocabulary.com/dictionary/test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 814,
+    "final": "https://www.vocabulary.com/dictionary/test"
+  },
+  {
+    "name": "Walmart",
+    "url": "https://www.walmart.com/search?q=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 2950,
+    "final": "https://www.walmart.com/blocked?url=L3NlYXJjaD9xPXRlc3Q=&uuid=6442f9be-c6b0-11f1-9872-1fdf48ba2d6c&vid=&g=b"
+  },
+  {
+    "name": "who.is",
+    "url": "https://who.is/whois/test",
+    "kind": "OK",
+    "status": 202,
+    "ms": 936,
+    "final": "https://who.is/whois/test"
+  },
+  {
+    "name": "Wolfram Alpha",
+    "url": "https://www.wolframalpha.com/input?i=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 712,
+    "final": "https://www.wolframalpha.com/input?i=test"
+  },
+  {
+    "name": "WOS",
+    "url": "http://apps.webofknowledge.com/UA_GeneralSearch.do?fieldCount=3&action=search&product=UA&search_mode=GeneralSearch&max_field_count=25&max_field_notice=Notice%3A+You+cannot+add+another+field.&input_invalid_notice=Search+Error%3A+Please+enter+a+search+term.&input_invalid_notice_limits=+%3Cbr%2F%3ENote%3A+Fields+displayed+in+scrolling+boxes+must+be+combined+with+at+least+one+other+search+field.&sa_img_alt=Select+terms+from+the+index&value(input1)=test&value%28select1%29=TI&value%28hidInput1%29=initVoid&value%28hidShowIcon1%29=0&value%28bool_1_2%29=AND&value%28input2%29=&value%28select2%29=AU&value%28hidInput2%29=initAuthor&value%28hidShowIcon2%29=1&value%28bool_2_3%29=AND&value%28input3%29=&value%28select3%29=SO&value%28hidInput3%29=initSource&value%28hidShowIcon3%29=1&limitStatus=collapsed&expand_alt=Expand+these+settings&expand_title=Expand+these+settings&collapse_alt=Collapse+these+settings&collapse_title=Collapse+these+settings&SinceLastVisit_UTC=&SinceLastVisit_DATE=×panStatus=display%3A+block&timeSpanCollapsedListStatus=display%3A+none&period=Range+Selection&range=ALL&ssStatus=display%3Anone&ss_lemmatization=On&ss_query_language=&rsStatus=display%3Anone&rs_rec_per_page=10&rs_sort_by=PY.D%3BLD.D%3BVL.D%3BSO.A%3BPG.A%3BAU.A&rs_refinePanel=visibility%3Ashow",
+    "kind": "OK",
+    "status": 200,
+    "ms": 2297,
+    "final": "https://access.clarivate.com/login?app=wos&alternative=true&goto=https%3A%2F%2Fwww.webofknowledge.com&shibShireURL=https%3A%2F%2Fwww.webofknowledge.com%2F%3Fauth%3DShibboleth&shibReturnURL=https%3A%2F%2Fwww.webofknowledge.com%2F&roaming=true"
+  },
+  {
+    "name": "Yandex",
+    "url": "https://yandex.com/search/?text=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 2173,
+    "final": "https://yandex.com/showcaptcha?cc=1&form-fb-hint=2.1&mt=376536C2B9470F0C3704C524A63655B904CB37C5CA6F4783096ED389BEC0DEDB79BE03C9C3BD48EA8F174885CD5DC67ABDFA737A0BF66C72AA63E4344F7A9D299764DD03686D4D1FD83CD02838BA22F5691808967EEFBA5EC93E8A06F1C18DECCC170F6DC4C5DD48D2677B1FEC5519EE2D0AA0BE8A85CC6864F1C77B31C7EEEECD698E3F68A76AF4&retpath=aHR0cHM6Ly95YW5kZXguY29tL3NlYXJjaD90ZXh0PXRlc3Q%2C_d29c578c47994d9a5b87e237671e5b75&t=2%252F1791859537%252F5c4fa31faaf05137ed964cd6b7de6dfd&u=9569193534519735565&s=095a6b70c8072ceb6390c2ba0e42fabc"
+  },
+  {
+    "name": "Yandex 翻译",
+    "url": "https://translate.yandex.com/?text=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 1431,
+    "final": "https://translate.yandex.com/showcaptchafast?d=90F755774A3D52551AE05589B927208EACA9125BBE6B35AC426CCA813D0A4EC910C8C53A24A2357C8E0145BA4C3A690DE094D72813&retpath=aHR0cHM6Ly90cmFuc2xhdGUueWFuZGV4LmNvbS8_dGV4dD10ZXN0_01c9fa17beb4a7f0b3bc796f5b460b08&s=52df64e6e40ea37ce112daebaffdff36"
+  },
+  {
+    "name": "Yandex 图片",
+    "url": "https://yandex.com/images/search?text=test",
+    "kind": "OK",
+    "status": 200,
+    "ms": 1243,
+    "final": "https://yandex.com/images/search?text=test"
+  }
+]

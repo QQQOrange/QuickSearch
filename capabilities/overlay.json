@@ -1,0 +1,9 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "overlay-win",
+  "description": "region（截图选区）/ picker（点选程序）两个叠加窗：只放行事件通道。这两个窗今天只用 app 命令（ACL 不管），但历史上踩过「窗口 label 漏登记 → 一加 listen() 事件通道就静默失效」的坑，所以预登记；不要给它们 core:window:* 之类的宽权限。",
+  "windows": ["region", "picker"],
+  "permissions": [
+    "core:event:default"
+  ]
+}

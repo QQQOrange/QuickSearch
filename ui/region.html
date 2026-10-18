@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="color-scheme" content="light dark">
+<title>框选识别区域</title>
+<style>
+/* 这个页面的样式故意内联：整个窗口就一个遮罩 + 一个方框，不值得再拆一个 css 文件，
+   而且少一个文件就少一种「打包漏了导致一片空白」的可能。 */
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: transparent;
+    cursor: crosshair;
+    user-select: none;
+    -webkit-user-select: none;
+    font: 13px/1.5 "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+}
+
+/* 整屏压暗。选中区域靠 .sel 自己的超大 box-shadow「掏」出一个洞 ——
+   比摆四个遮罩 div 简单，也不会在边界露缝。 */
+#dim {
+    position: fixed;
+    inset: 0;
+    background: rgba(10, 12, 18, .34);
+    cursor: crosshair;
+}
+
+#sel {
+    position: fixed;
+    display: none;
+    border: 1.5px solid #4C8DFF;
+    border-radius: 2px;
+    background: rgba(255, 255, 255, .04);
+    box-shadow: 0 0 0 9999px rgba(10, 12, 18, .34);
+    pointer-events: none;
+}
+
+#size {
+    position: fixed;
+    display: none;
+    padding: 3px 8px;
+    border-radius: 6px;
+    background: rgba(16, 18, 24, .9);
+    color: #fff;
+    font-size: 11.5px;
+    font-variant-numeric: tabular-nums;
+    pointer-events: none;
+    white-space: nowrap;
+}
+
+#tip {
+    position: fixed;
+    left: 50%;
+    top: 40px;
+    transform: translateX(-50%);
+    padding: 9px 18px;
+    border-radius: 10px;
+    background: rgba(16, 18, 24, .88);
+    color: #F0F2F6;
+    font-size: 13px;
+    box-shadow: 0 10px 30px -10px rgba(0, 0, 0, .7);
+    pointer-events: none;
+    white-space: nowrap;
+}
+#tip b { color: #7FB0FF; font-weight: 600; }
+</style>
+</head>
+<body>
+<div id="dim"></div>
+<div id="sel"></div>
+<div id="size"></div>
+<div id="tip">拖拽框选要识别的区域 · <b>Esc</b> 取消</div>
+
+<script>
+/* 日志通道要最先定义：这个页面一旦异常，表现就是「满屏遮罩、点哪都没反应」，
+   没有日志就等于瞎查。任何 JS 错误都回传给 Rust 落进 log.txt。 */
+function jlog(msg) {
+    try {
+        window.__TAURI__.core.invoke('log_msg', { msg: '[region] ' + msg });
+    } catch (_) { }
+}
+window.addEventListener('error', (e) =>
+    jlog('JS ERROR: ' + e.message + ' @' + e.lineno + ':' + e.colno));
+window.addEventListener('unhandledrejection', (e) =>
+    jlog('JS UNHANDLED: ' + ((e.reason && e.reason.message) || e.reason)));
+
+const hasTauri = !!(window.__TAURI__ && window.__TAURI__.core);
+jlog('page script start, tauri=' + hasTauri + ' dpr=' + (window.devicePixelRatio || 1));
+
+/* r54：这一轮框选是要**识图**还是要**OCR**。
+ *
+ * 靠 URL 参数区分（`region.html?mode=img`），而不是让 Rust 塞全局变量 ——
+ * 同一个遮罩窗口复用两套用途，页面按参数分流到 img_region / ocr_region 两条
+ * 命令。框选交互（拖框、Esc、右键、看门狗）对两者完全一样，所以只差这一句。
+ *
+ * 为什么不复制一份遮罩页面：两套要并行维护的代码迟早会对不上（这一版 OCR
+ * 那边还有"失焦兜底故意不做"的实测结论），共用一份反而更不容易走样。 */
+const MODE = (function () {
+    try {
+        const m = /[?&]mode=([a-z]+)/.exec(window.location.search || '');
+        return (m && m[1] === 'img') ? 'img' : 'ocr';
+    } catch (_) { return 'ocr'; }   // 解析不出来就当 OCR（老行为）
+})();
+jlog('mode=' + MODE);
+
+/* 就算 Tauri 全局没注入也绝不能在这里抛错 —— 一抛错后面的事件监听就全没了，
+   那才是「满屏点不动」的真正来源。缺了就给个永远 reject 的桩，
+   各处的 .catch / 看门狗会收拾残局。 */
+const invoke = hasTauri
+    ? window.__TAURI__.core.invoke
+    : () => Promise.reject(new Error('tauri global missing'));
+
+/* 心跳：每 2 秒向 Rust 报一次「我还活着」。页面脚本跑起来了就一定发得出；
+   Rust 那边开窗 5 秒还收不到心跳，会判定页面没活过来并主动关窗兜底。 */
+let beatTimer = null;
+function startBeat() {
+    const beat = () => invoke('region_beat').catch(() => { });
+    beat();
+    beatTimer = setInterval(beat, 2000);
+}
+function stopBeat() {
+    if (beatTimer) { clearInterval(beatTimer); beatTimer = null; }
+}
+startBeat();
+
+const $ = (id) => document.getElementById(id);
+
+const dim = $('dim');
+const sel = $('sel');
+const sizeEl = $('size');
+const tip = $('tip');
+
+/* 顶部提示按用途换一句话：识图是"框完去搜图"，OCR 是"框完去认字"，
+   app 是"点一下某个程序"（r59 的十字准星点选）。
+   不换的话用户框完会以为点了 OCR，白白再框一次。 */
+tip.innerHTML = MODE === 'img'
+    ? '拖拽框选要识图搜索的区域 · <b>Esc</b> 取消'
+    : MODE === 'app'
+        ? '点一下要绑定的那个程序窗口（鼠标移到目标上点左键） · <b>Esc</b> 取消'
+        : '拖拽框选要识别的区域 · <b>Esc</b> 取消';
+
+let sx = 0, sy = 0, cx = 0, cy = 0;
+let dragging = false;
+let done = false;
+
+/** 起点/终点都换成「左上 + 宽高」，这样从右下往左上拖也一样。
+ *
+ *  ⚠ 以前这里写成 `Math.min(a, b)`，而 a/b 是 {x,y} 对象 —— 对对象求 min
+ *  得到 NaN，而且返回里压根没有 h。于是发给 Rust 的是 NaN，JSON 里没有 NaN，
+ *  命令反序列化直接失败、根本没执行，遮罩窗口也就永远不会关 ——
+ *  用户看到的就是「点啥都没反应」。改成逐分量取。 */
+function rectOf(a, b) {
+    return {
+        x: Math.min(a.x, b.x),
+        y: Math.min(a.y, b.y),
+        w: Math.abs(a.x - b.x),
+        h: Math.abs(a.y - b.y)
+    };
+}
+
+/** 兜底退出：无论哪里出错，都必须把这个铺满全屏的遮罩窗口关掉。
+ *  它一旦留下，用户满屏都点不动，是最糟糕的失败形态。 */
+function bail(msg) {
+    done = true;
+    dragging = false;
+    stopBeat();
+    sel.style.display = 'none';
+    sizeEl.style.display = 'none';
+    if (msg) {
+        tip.textContent = msg;
+        tip.style.display = '';
+    }
+    jlog('bail' + (msg ? ': ' + msg : ''));
+    invoke('ocr_cancel').catch(() => {});
+}
+
+function paint() {
+    const a = { x: sx, y: sy };
+    const b = { x: cx, y: cy };
+    const rx = Math.min(a.x, b.x), ry = Math.min(a.y, b.y);
+    const rw = Math.abs(a.x - b.x), rh = Math.abs(a.y - b.y);
+
+    sel.style.display = 'block';
+    sel.style.left = rx + 'px';
+    sel.style.top = ry + 'px';
+    sel.style.width = rw + 'px';
+    sel.style.height = rh + 'px';
+
+    if (rw > 40 && rh > 24) {
+        sizeEl.style.display = 'block';
+        sizeEl.textContent = Math.round(rw) + ' × ' + Math.round(rh);
+        // 贴着选框上方，顶到屏幕边就挪到里面
+        const above = ry - 26;
+        sizeEl.style.left = rx + 'px';
+        sizeEl.style.top = (above > 4 ? above : ry + 6) + 'px';
+    } else {
+        sizeEl.style.display = 'none';
+    }
+}
+
+document.addEventListener('mousedown', (e) => {
+    if (e.button !== 0 || done) return;
+    dragging = true;
+    sx = cx = e.clientX;
+    sy = cy = e.clientY;
+    tip.style.display = 'none';
+    jlog('mousedown at ' + e.clientX + ',' + e.clientY);
+    paint();
+});
+
+document.addEventListener('mousemove', (e) => {
+    if (!dragging || done) return;
+    cx = e.clientX;
+    cy = e.clientY;
+    paint();
+});
+
+document.addEventListener('mouseup', (e) => {
+    if (!dragging || done) return;
+    dragging = false;
+    /* r59：`app` 模式**点一下就够了**，不要拖框 —— 在它之前分流，
+     * 否则下面"太小当误点"那段会把这个单击直接吞掉（app 模式永远触发不了）。 */
+    if (MODE === 'app') {
+        done = true;
+        stopBeat();
+        sel.style.display = 'none';
+        sizeEl.style.display = 'none';
+        tip.innerHTML = '正在识别这个窗口…';
+        jlog('app click at ' + e.clientX + ',' + e.clientY);
+        invoke('pick_app_at', {
+            x: e.clientX,
+            y: e.clientY,
+            dpr: window.devicePixelRatio || 1
+        }).catch((err) => {
+            jlog('pick_app_at failed: ' + ((err && err.message) || err));
+            bail('点选失败，已退出');
+        });
+        return;
+    }
+    const r = rectOf({ x: sx, y: sy }, { x: e.clientX, y: e.clientY });
+    if (e.clientX === sx && e.clientY === sy) {
+        // ⚠ 只是点了一下没拖动 —— 直接 return 的话，mousedown 时已经显出来的 #sel
+        //   连同它 9999px 的暗色阴影会一直留在屏幕上（再暗一层 34%），提示条也
+        //   再也回不来（除按 Esc）。这里把三样都复位。
+        sel.style.display = 'none';
+        sizeEl.style.display = 'none';
+        tip.style.display = '';
+        return;
+    }
+
+    // 太小的框基本是误点，直接当没框过
+    if (r.w < 8 || r.h < 8) {
+        sel.style.display = 'none';
+        sizeEl.style.display = 'none';
+        tip.style.display = '';
+        return;
+    }
+
+    // 数字必须都是有限值才敢发 —— 带着 NaN/Infinity 过去，Rust 那边
+    // 反序列化会失败，命令等于没执行，遮罩就会一直留着。
+    if (![r.x, r.y, r.w, r.h].every((n) => Number.isFinite(n))) {
+        bail('框选坐标算不出来，已退出');
+        return;
+    }
+
+    done = true;
+    stopBeat();
+    /* r54：按用途分流到 img_region（识图）或 ocr_region（OCR）。
+     * 两条命令收同一组坐标（css 坐标 + dpr，物理像素换算在 Rust 侧）。 */
+    const cmd = MODE === 'img' ? 'img_region' : 'ocr_region';
+    jlog('mouseup -> ' + cmd + ' ' + JSON.stringify(r));
+    // 交给 Rust 去算物理像素：那边知道虚拟屏原点，也知道 dpr
+    invoke(cmd, {
+        x: r.x,
+        y: r.y,
+        w: r.w,
+        h: r.h,
+        dpr: window.devicePixelRatio || 1
+    }).catch((e) => {
+        jlog(cmd + ' invoke failed: ' + ((e && e.message) || e));
+        bail(MODE === 'img' ? '识图没能开始，已退出框选' : '识别没能开始，已退出框选');
+    });
+
+    // 看门狗：正常情况下 Rust 收到命令会立刻关掉这个窗口，页面随之销毁，
+    // 这个定时器也就不会跑。要是 6 秒后页面还活着，说明那条命令根本没到，
+    // 那就自己退场，绝不把用户困在满屏点不动的状态里。
+    setTimeout(() => {
+        if (done) invoke('ocr_cancel').catch(() => {});
+    }, 6000);
+});
+
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+        jlog('ESC pressed -> cancel');
+        bail();
+    }
+});
+
+// 右键也当取消，符合截图工具的肌肉记忆
+document.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    if (done) return;
+    bail();
+});
+
+/* 失焦兜底 —— **故意不做**，这里只留一段说明，免得后人再把它加回来。
+ *
+ * 为什么删掉：
+ *   遮罩是「铺满全屏 + 置顶」的，它一旦不响应，用户会满屏点不动，所以最初
+ *   加了一层"一失焦就自己关掉"的兜底。但实测（见 log.txt）这层兜底**误关
+ *   的概率远高于它救场的概率**：
+ *     · WebView2 开窗时焦点交接是**多阶段**的，几百毫秒里会反复丢/拿焦点；
+ *     · 就算熬过了交接期，本机上还有别的全局输入工具会在几秒后抢走前台 ——
+ *       日志里抓到过 `blur (age=4313ms)`，用户压根没动过手，遮罩却自己关了。
+ *   而"失焦"这件事**根本不代表用户被困住** —— 因为：
+ *     ① 遮罩窗口还盖在屏幕上（`always_on_top`），视觉上没变；
+ *     ② Esc 的退出走的是 Rust 那侧**全局低级键盘钩子**，全系统都收得到，
+ *        跟哪个窗口在前台**无关**，照样能退出；
+ *     ③ Rust 另有「页面 5 秒无心跳就关窗」+「90 秒总闸」两道硬兜底。
+ *   所以：宁可让遮罩在失焦时多留一会儿（用户还能按 Esc），也不能让它
+ *   在用户正要框选时自己消失。真出问题的兜底全在 Rust 侧。 */
+
+</script>
+</body>
+</html>

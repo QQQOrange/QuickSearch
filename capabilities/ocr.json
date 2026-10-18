@@ -1,0 +1,9 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "ocr-win",
+  "description": "OCR 结果窗：只放行事件通道（收后端的识别结果/失败原因推送）",
+  "windows": ["ocr"],
+  "permissions": [
+    "core:event:default"
+  ]
+}

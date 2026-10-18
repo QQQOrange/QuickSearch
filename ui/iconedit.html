@@ -1,0 +1,766 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="color-scheme" content="light dark">
+<title>编辑图标</title>
+<style>
+/* 图标编辑器（#143）：换图标后一键消除背景 + 前后对比 + 保存/取消。
+ * 独立窗口、独立文件（和 ocr.html 同款做法）：这个页面的版式
+ * 「标题 → 前后对比 → 控制行 → 底部按钮」和设置页差得远，塞不进去。
+ * 主题跟随系统（和 OCR 结果窗同一套 CSS 变量口径）。 */
+* { box-sizing: border-box; }
+
+:root {
+    --bg: #F5F6F8;
+    --card: #FFFFFF;
+    --fg: #1B1D23;
+    --fg-dim: #6B6F7A;
+    --line: #E4E6EB;
+    --hover: rgba(15, 20, 40, .06);
+    --accent: #3B7DFF;
+    --danger: #C42B1C;
+}
+
+@media (prefers-color-scheme: dark) {
+    :root {
+        --bg: #17181C;
+        --card: #1E1F24;
+        --fg: #ECEDF1;
+        --fg-dim: #A0A4AF;
+        --line: rgba(255, 255, 255, .12);
+        --hover: rgba(255, 255, 255, .09);
+        --accent: #6FA1FF;
+        --danger: #FF6B5E;
+    }
+}
+
+html, body {
+    margin: 0;
+    height: 100%;
+    background: var(--bg);
+    color: var(--fg);
+    font: 13px/1.55 "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+body { display: flex; flex-direction: column; overflow: hidden; }
+[hidden] { display: none !important; }
+
+/* ------------------------------ 顶栏 ------------------------------ */
+.hd {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    background: var(--card);
+    border-bottom: 1px solid var(--line);
+}
+.hd-t { font-size: 14px; font-weight: 600; }
+.hd-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 12px;
+    color: var(--fg-dim);
+}
+.hd-x {
+    flex: none;
+    width: 28px;
+    height: 28px;
+    border: 0;
+    border-radius: 7px;
+    background: transparent;
+    color: var(--fg-dim);
+    font-size: 14px;
+    cursor: pointer;
+}
+.hd-x:hover { background: var(--hover); color: var(--fg); }
+
+/* ------------------------------ 前后对比 ------------------------------ */
+.stage {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    gap: 12px;
+    padding: 12px;
+}
+.pane {
+    flex: 1 1 0;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--card);
+    overflow: hidden;
+}
+.pane-h {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 11px;
+    border-bottom: 1px solid var(--line);
+    font-size: 11.5px;
+    color: var(--fg-dim);
+}
+.tag { font-weight: 600; color: var(--fg); }
+.tag.after { color: var(--accent); }
+.dim { margin-left: auto; font-variant-numeric: tabular-nums; }
+
+/* 棋盘格底：透明区域一眼可见（这也是「对比」能成立的前提） */
+.cv {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 10px;
+    position: relative;
+    background:
+        repeating-conic-gradient(rgba(128, 128, 128, .16) 0% 25%, transparent 0% 50%)
+        0 0 / 16px 16px;
+}
+.cv img {
+    max-width: 100%;
+    max-height: 100%;
+    object-fit: contain;
+    border-radius: 4px;
+    /* 图标普遍偏小，放大到看清边缘；消除背景后边缘质量是重点 */
+    image-rendering: auto;
+}
+.cv .ph {
+    font-size: 12px;
+    color: var(--fg-dim);
+    text-align: center;
+    padding: 20px;
+}
+/* 处理中的遮罩：和 OCR 结果窗「识别中」同一套语言 */
+.cv.busy::after {
+    content: '处理中…';
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 13px;
+    color: #fff;
+    background: rgba(10, 12, 18, .45);
+    z-index: 2;
+}
+
+/* r77：描边保护画布。盖在「编辑前」那张图上，尺寸由 JS 对齐到图片的
+   实际显示框（否则画笔位置和图片对不上，描了个寂寞）。
+   平时 hidden（不挡鼠标），进描边模式才显示并接管指针事件。 */
+.cv { position: relative; }
+.cv .mask {
+    position: absolute;
+    cursor: crosshair;
+    touch-action: none;
+    /* 画出的是半透明红：既看得见自己描了哪儿，又不遮住底下的图 */
+    border-radius: 4px;
+}
+.cv .mask:not([hidden]) { display: block; }
+/* 描边模式：给「编辑前」面板一圈提示色，让人知道现在点在画哪边 */
+.pane.masking .cv { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+/* r77：描边工具条。与 .ctl 同一套视觉语言（同高、同一行、同样的 .tol/.btn），
+   只是多了一条分隔线让人看出"这是另一个阶段"。 */
+.mask-bar {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 16px;
+    border-top: 1px dashed var(--line);
+    background: color-mix(in srgb, var(--accent) 6%, transparent);
+    flex-wrap: wrap;
+}
+.mask-bar[hidden] { display: none; }
+.mask-bar .mb-t { font-size: 12px; color: var(--fg-dim); }
+.mask-bar .mb-t b { color: var(--fg); font-weight: 600; }
+
+/* ------------------------------ 控制行 ------------------------------ */
+.ctl {
+    flex: none;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+    padding: 0 12px 10px;
+}
+.btn {
+    height: 30px;
+    padding: 0 13px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: transparent;
+    color: var(--fg);
+    font: inherit;
+    white-space: nowrap;
+    cursor: pointer;
+    transition: background-color .12s ease, opacity .12s ease;
+}
+.btn:hover { background: var(--hover); }
+.btn:disabled { opacity: .5; cursor: not-allowed; }
+.btn:disabled:hover { background: transparent; }
+.btn.primary {
+    border-color: transparent;
+    background: var(--accent);
+    color: #fff;
+    font-weight: 600;
+}
+.btn.primary:hover { filter: brightness(1.07); background: var(--accent); }
+.btn.primary:disabled:hover { filter: none; }
+.btn.busy { opacity: .6; cursor: progress; }
+.btn .spinner {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    margin-right: 5px;
+    border: 2px solid rgba(255, 255, 255, .35);
+    border-top-color: #fff;
+    border-radius: 50%;
+    animation: ie-spin .8s linear infinite;
+    vertical-align: -2px;
+}
+@keyframes ie-spin { to { transform: rotate(360deg); } }
+
+.tol {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 12px;
+    color: var(--fg-dim);
+}
+.tol input[type=range] {
+    width: 110px;
+    accent-color: var(--accent);
+    cursor: pointer;
+}
+.tol input[type=range]:disabled { cursor: not-allowed; }
+.tol b { color: var(--fg); font-weight: 600; font-variant-numeric: tabular-nums; min-width: 22px; text-align: right; }
+
+.hint {
+    flex: 1;
+    min-width: 180px;
+    font-size: 11.5px;
+    color: var(--fg-dim);
+}
+.hint.warn { color: var(--danger); }
+.hint.ok { color: #0FA36B; }
+@media (prefers-color-scheme: dark) {
+    .hint.ok { color: #34D399; }
+}
+
+/* ------------------------------ 底栏 ------------------------------ */
+.ft {
+    flex: none;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+    border-top: 1px solid var(--line);
+    background: var(--card);
+}
+.ft .tip {
+    flex: 1;
+    min-width: 200px;
+    font-size: 11.5px;
+    color: var(--fg-dim);
+}
+.ft .btn { flex: none; }
+
+.toast {
+    position: fixed;
+    left: 50%;
+    bottom: 18px;
+    transform: translateX(-50%) translateY(8px);
+    padding: 7px 15px;
+    border-radius: 9px;
+    background: rgba(20, 22, 28, .93);
+    color: #fff;
+    font-size: 12.5px;
+    opacity: 0;
+    transition: opacity .18s ease, transform .18s ease;
+    pointer-events: none;
+    z-index: 10;
+}
+.toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+</style>
+</head>
+<body>
+
+<header class="hd">
+    <span class="hd-t">编辑图标</span>
+    <span class="hd-name" id="ieName">…</span>
+    <button class="hd-x" id="btnX" title="关闭（不保存）">✕</button>
+</header>
+
+<main class="stage">
+    <section class="pane">
+        <div class="pane-h">
+            <span class="tag">编辑前</span>
+            <span class="dim" id="dimBefore"></span>
+        </div>
+        <div class="cv" id="cvBefore">
+            <img id="imgBefore" alt="编辑前的图标">
+            <!-- r77：手动描边画布。压在「编辑前」那张图上，只在描边模式里接收
+                 指针事件（平时 pointer-events:none，不挡任何东西）。
+                 用户原话：「当前编辑图标的一键消除背景功能，它会把图标的主体内容
+                 也会消除掉，所以有需要在一键消除背景之前还要先进行手动描边」。
+                 画出来的红色是"这块是主体，别抠"的保护蒙版，随「一键消除背景」
+                 一起发给后端（icon_remove_bg 的 keep 参数）。 -->
+            <canvas class="mask" id="maskCanvas" hidden></canvas>
+        </div>
+    </section>
+    <section class="pane">
+        <div class="pane-h">
+            <span class="tag after">编辑后</span>
+            <span class="dim" id="dimAfter"></span>
+        </div>
+        <div class="cv" id="cvAfter">
+            <div class="ph" id="phAfter">点下面的「一键消除背景」看看效果</div>
+            <img id="imgAfter" alt="消除背景后的图标" hidden>
+        </div>
+    </section>
+</main>
+
+<div class="ctl">
+    <!-- r77：描边保护。放在「一键消除背景」**左边** —— 用户的口径是
+         「在一键消除背景之前还要先进行手动描边」，顺序上就是这么走的。 -->
+    <button class="btn" id="btnMask" title="在左边的图上涂出图标主体，涂过的地方不会被消除背景吃掉">
+        描边保护
+    </button>
+    <button class="btn primary" id="btnRemove">一键消除背景</button>
+    <label class="tol" title="颜色差多少之内算「背景」。图标底是纯色/渐变时不用动；抠不干净就调大，主体被吃掉了就调小">
+        容差
+        <input type="range" id="tol" min="10" max="120" step="2" value="48" disabled>
+        <b id="tolVal">48</b>
+    </label>
+    <span class="hint" id="hint"></span>
+</div>
+
+<!-- r77：描边模式的工具条。只在描边模式里出现（平时 hidden，不占高度）。 -->
+<div class="mask-bar" id="maskBar" hidden>
+    <span class="mb-t">在图上涂出<b>主体</b>（不会被消除）</span>
+    <label class="tol" title="画笔粗细">
+        笔刷
+        <input type="range" id="maskSize" min="4" max="64" step="2" value="18">
+        <b id="maskSizeVal">18</b>
+    </label>
+    <button class="btn" id="btnMaskUndo" title="撤销上一笔">撤销</button>
+    <button class="btn" id="btnMaskClear" title="清掉全部描边">清空</button>
+    <button class="btn primary" id="btnMaskDone">完成描边</button>
+</div>
+
+<footer class="ft">
+    <span class="tip" id="tip">消除背景只去掉与四边边缘连成一片的底色；图标主体内部的花纹、镂空不受影响。</span>
+    <button class="btn" id="btnSkip" title="不消除背景，把这张原图直接设成图标">跳过编辑，直接用作图标</button>
+    <button class="btn" id="btnCancel">取消</button>
+    <button class="btn primary" id="btnSave" disabled>保存</button>
+</footer>
+
+<div class="toast" id="toast"></div>
+
+<script src="shared.js"></script>
+<script>
+const invoke = window.__TAURI__.core.invoke;
+const listen = window.__TAURI__.event.listen;
+const $ = (id) => document.getElementById(id);
+
+/** 会话状态。SRC = 原图（data URL）；OUT = 处理结果（data URL，恒 PNG）。 */
+let KEY = '', NAME = '', SRC = '', VECTOR = false, OUT = '';
+
+function toast(msg) {
+    const t = $('toast');
+    t.textContent = msg;
+    t.classList.add('show');
+    clearTimeout(toast._t);
+    toast._t = setTimeout(() => t.classList.remove('show'), 1800);
+}
+
+function setHint(msg, kind) {
+    const h = $('hint');
+    h.textContent = msg || '';
+    h.className = 'hint' + (kind ? ' ' + kind : '');
+}
+
+/** 图上尺寸标注（原图可能很大，处理后 ≤512px，用户该知道这一点）。 */
+function markDim(img, el) {
+    const show = () => { el.textContent = img.naturalWidth + ' × ' + img.naturalHeight; };
+    if (img.complete && img.naturalWidth) show();
+    else img.onload = show;
+}
+
+/** 载入（或重载）一次会话。qs://icon-edit-load 推新会话时也走这里。 */
+async function loadSession() {
+    const s = await invoke('icon_edit_load').catch(() => null);
+    if (!s) {
+        // 会话过期（窗口被复用但 Rust 侧清了场）：只能关掉让用户重来
+        toast('编辑会话已过期，请重新打开');
+        setTimeout(() => invoke('close_icon_editor').catch(() => {}), 800);
+        return;
+    }
+    KEY = s.key; NAME = s.name; SRC = s.src; VECTOR = !!s.vector; OUT = '';
+    $('ieName').textContent = NAME + '（' + KEY + '）';
+    $('ieName').title = NAME + '　' + KEY;
+    $('imgBefore').src = SRC;
+    markDim($('imgBefore'), $('dimBefore'));
+    // 编辑后复位
+    $('imgAfter').hidden = true;
+    $('imgAfter').removeAttribute('src');
+    $('phAfter').hidden = false;
+    $('dimAfter').textContent = '';
+    $('btnSave').disabled = true;
+    $('btnSkip').disabled = false;
+    $('btnRemove').disabled = false;
+    $('btnRemove').innerHTML = '一键消除背景';
+    $('tol').disabled = true;
+    $('tol').value = '48';
+    $('tolVal').textContent = '48';
+    $('cvAfter').classList.remove('busy');
+    // r77：换一张图时描边要一起清掉 —— 留着上一张的保护区域，
+    // 用户会看到"新图上莫名有块地方没被抠掉"，而且那形状跟这张图毫无关系。
+    maskReset();
+    if (VECTOR) {
+        // SVG 是矢量图：没有位图背景可消，但「保存」仍要能用 ——
+        // 挑了一张 SVG 当图标，编辑器里点保存就原样应用（取消就是没挑）。
+        $('btnRemove').disabled = true;
+        $('btnRemove').title = 'SVG 是矢量图，没有位图背景可以消除';
+        setHint('SVG 是矢量图，没有需要消除的背景。点「保存」直接应用这张图标，或「取消」。');
+        $('btnSave').disabled = false;
+    } else {
+        $('btnRemove').title = '';
+        setHint('');
+    }
+}
+
+/* ==========================================================================
+ *  r77：手动描边保护
+ *
+ *  用户原话：「当前编辑图标的一键消除背景功能，它会把图标的主体内容也会消除掉，
+ *  所以有需要在一键消除背景之前还要先进行手动描边，你要把描边功能也加上」。
+ *
+ *  为什么会误删主体：消除背景是"从四边出发的颜色泛洪"，判据只看颜色像不像底色。
+ *  浅色 logo 落在白底上时两者颜色相近，泛洪就会一路吃进主体 —— 这不是算法写错，
+ *  是"只看颜色"这件事本身的天花板。**人描一圈**是最直接的解法：
+ *  描过的地方后端不许扩散进来（见 iconedit.rs 里 KeepMask 那段）。
+ *
+ *  实现要点：
+ *   · 画布尺寸对齐到图片的**实际显示框**（不是原始像素），否则笔尖和画面对不上；
+ *   · 蒙版分辨率按 **min(512, 显示尺寸)** 取：后端处理上限就是 512，
+ *     再多是浪费；但也不用太小，否则细笔画会被糊成一团；
+ *   · 撤销是**整笔**撤销（一笔 = 一次按下到松开），不是按像素 ——
+ *     按像素撤销对手绘来说等于没有；
+ *   · 蒙版只在描边模式下接收指针事件，平时 pointer-events 由 CSS 挡住。
+ * ========================================================================== */
+
+/** 描边画布的实际绘制坐标 → 蒙版数组（Uint8Array，长度 mw*mh，非零 = 保护）。 */
+let maskCanvasPx = null;   // 画布像素尺寸 (w, h)
+const MASK_MAX = 512;      // 与后端 iconedit::MAX_EDGE 对齐
+
+const maskOn = () => !$('maskCanvas').hidden;
+const maskCtx = () => $('maskCanvas').getContext('2d', { willReadFrequently: true });
+
+/** 把画布对齐到图片显示框，并按同样的宽高比重建蒙版。 */
+function maskSync() {
+    const img = $('imgBefore');
+    const cv = $('maskCanvas');
+    if (!img || !cv || !SRC) return;
+    const box = img.getBoundingClientRect();
+    if (!box.width || !box.height) return;
+    const parent = cv.parentElement.getBoundingClientRect();
+    // 画布贴着图片本身放（图片是居中 contain 的，直接取它的框最准）
+    cv.style.left = (box.left - parent.left) + 'px';
+    cv.style.top = (box.top - parent.top) + 'px';
+    cv.style.width = box.width + 'px';
+    cv.style.height = box.height + 'px';
+    // 蒙版分辨率：按显示尺寸等比缩到不超过 MASK_MAX，至少 32
+    const scale = Math.min(1, MASK_MAX / Math.max(box.width, box.height));
+    const mw = Math.max(32, Math.round(box.width * scale));
+    const mh = Math.max(32, Math.round(box.height * scale));
+    if (!maskCanvasPx || maskCanvasPx.w !== mw || maskCanvasPx.h !== mh) {
+        cv.width = mw;
+        cv.height = mh;
+        maskCanvasPx = { w: mw, h: mh };
+        maskReset();
+    }
+}
+
+/** 清空蒙版并抹掉画布上的红。 */
+function maskReset() {
+    const cv = $('maskCanvas');
+    if (!cv) return;
+    const cx = cv.getContext('2d', { willReadFrequently: true });
+    if (cx) cx.clearRect(0, 0, cv.width, cv.height);
+    maskHistory.length = 0;
+}
+
+/** 整笔撤销的栈：每项是这一笔之前的 ImageData（一笔可能跨很多 mousemove）。 */
+const maskHistory = [];
+
+/** 进入/退出描边模式。 */
+function maskSetMode(on) {
+    const cv = $('maskCanvas');
+    const bar = $('maskBar');
+    const pane = document.querySelector('.pane');
+    if (!cv || !bar) return;
+    if (on) {
+        // 进模式前先对齐一次（窗口可能刚改过大小）
+        maskSync();
+        cv.hidden = false;
+        bar.hidden = false;
+        if (pane) pane.classList.add('masking');
+        setHint('在左边的图上涂出图标主体 —— 涂过的地方不会被「一键消除背景」吃掉。');
+        // 已经抠过一次的话，描完顺手重算一遍，让用户立刻看到差别
+    } else {
+        cv.hidden = true;
+        bar.hidden = true;
+        if (pane) pane.classList.remove('masking');
+        setHint(maskHasInk() ? '描边已记录 —— 点「一键消除背景」时会保护这些区域。' : '');
+    }
+}
+
+/** 蒙版里有没有真的画过东西（决定要不要带给后端）。 */
+function maskHasInk() {
+    const cv = $('maskCanvas');
+    if (!cv || !cv.width) return false;
+    try {
+        const d = maskCtx().getImageData(0, 0, cv.width, cv.height).data;
+        // 只看 alpha 通道：画上去的笔迹 alpha 恒 > 0
+        for (let i = 3; i < d.length; i += 4) if (d[i] > 0) return true;
+    } catch (e) { }
+    return false;
+}
+
+/** 取出要发给后端的保护蒙版；没描过就返回 undefined（后端走老路）。 */
+function maskPayload() {
+    const cv = $('maskCanvas');
+    if (!cv || !cv.width || !maskHasInk()) return undefined;
+    const d = maskCtx().getImageData(0, 0, cv.width, cv.height).data;
+    // 单通道：alpha > 0 就是保护（后端只关心非零）
+    const one = new Uint8Array(cv.width * cv.height);
+    for (let i = 0, j = 0; i < d.length; i += 4, j++) one[j] = d[i + 3] > 0 ? 255 : 0;
+    // Tauri 的 Vec<u8> 参数用普通数组最稳（Uint8Array 走 JSON 序列化会变成对象）
+    return { w: cv.width, h: cv.height, data: Array.from(one) };
+}
+
+/** 画笔：指针按下/移动/松开，整笔记一次历史用于撤销。 */
+(function bindMaskPainting() {
+    const cv = $('maskCanvas');
+    if (!cv) return;
+    let drawing = false, strokeBefore = null;
+
+    // 把指针的**窗口坐标**换成画布内坐标（画布有独立像素密度）
+    const posOf = (ev) => {
+        const r = cv.getBoundingClientRect();
+        return {
+            x: (ev.clientX - r.left) * (cv.width / Math.max(1, r.width)),
+            y: (ev.clientY - r.top) * (cv.height / Math.max(1, r.height)),
+        };
+    };
+    const strokeWidth = () => {
+        const shown = Number($('maskSize').value) || 18;
+        const r = cv.getBoundingClientRect();
+        // 滑块的数是"屏幕上多少像素"，换成画布像素
+        return Math.max(1, shown * (cv.width / Math.max(1, r.width)));
+    };
+
+    const down = (ev) => {
+        if (!maskOn()) return;
+        ev.preventDefault();
+        drawing = true;
+        const cx = maskCtx();
+        // 记下这一笔开始前的样子（撤销用）
+        try { strokeBefore = cx.getImageData(0, 0, cv.width, cv.height); } catch (e) { strokeBefore = null; }
+        cx.lineCap = 'round';
+        cx.lineJoin = 'round';
+        cx.strokeStyle = 'rgba(255,60,60,.55)';
+        cx.lineWidth = strokeWidth();
+        const p = posOf(ev);
+        cx.beginPath();
+        cx.moveTo(p.x, p.y);
+        // 单击也留一个点（不然"点一下"什么都不出现）
+        cx.lineTo(p.x + 0.01, p.y + 0.01);
+        cx.stroke();
+        try { cv.setPointerCapture(ev.pointerId); } catch (_) { }
+    };
+    const move = (ev) => {
+        if (!drawing || !maskOn()) return;
+        ev.preventDefault();
+        const cx = maskCtx();
+        const p = posOf(ev);
+        cx.lineWidth = strokeWidth();
+        cx.lineCap = 'round';
+        cx.lineJoin = 'round';
+        cx.strokeStyle = 'rgba(255,60,60,.55)';
+        cx.lineTo(p.x, p.y);
+        cx.stroke();
+    };
+    const up = (ev) => {
+        if (!drawing) return;
+        drawing = false;
+        if (strokeBefore) {
+            // 存的是"这一笔之前"的快照（撤销时直接盖回去）
+            maskHistory.push(strokeBefore);
+            if (maskHistory.length > 30) maskHistory.shift();   // 只留最近 30 笔
+            strokeBefore = null;
+        }
+        try { cv.releasePointerCapture(ev.pointerId); } catch (_) { }
+    };
+    cv.addEventListener('pointerdown', down);
+    cv.addEventListener('pointermove', move);
+    cv.addEventListener('pointerup', up);
+    cv.addEventListener('pointercancel', up);
+    cv.addEventListener('pointerleave', up);
+
+    $('btnMask').addEventListener('click', () => maskSetMode(!maskOn() || $('maskBar').hidden));
+    $('btnMaskDone').addEventListener('click', () => maskSetMode(false));
+    $('btnMaskClear').addEventListener('click', () => { maskReset(); setHint('描边已清空。'); });
+    $('btnMaskUndo').addEventListener('click', () => {
+        const cx = maskCtx();
+        const prev = maskHistory.pop();
+        if (prev) {
+            cx.putImageData(prev, 0, 0);
+            setHint('已撤销一笔。');
+        } else {
+            setHint('没有可撤销的笔画了。');
+        }
+    });
+    $('maskSize').addEventListener('input', () => {
+        $('maskSizeVal').textContent = $('maskSize').value;
+    });
+    // 窗口改大小 → 画布得重新对齐（蒙版内容保留，只是缩放网格）
+    window.addEventListener('resize', () => { if (maskOn()) maskSync(); else maskCanvasPx = null; });
+})();
+
+/** 跑一次消除背景。fromSlider=true 表示是拖容差滑块触发的重算。 */
+let removing = false;
+async function runRemove(fromSlider) {
+    if (removing || VECTOR || !SRC) return;
+    removing = true;
+    const btn = $('btnRemove');
+    btn.classList.add('busy');
+    btn.innerHTML = '<span class="spinner"></span>处理中';
+    $('cvAfter').classList.add('busy');
+    const tol = Number($('tol').value) || 48;
+    try {
+        /* r77：带上描边保护蒙版。没描过就是 undefined —— 那条路与 r76 完全一致。 */
+        const keep = maskPayload();
+        const r = await invoke('icon_remove_bg', { src: SRC, tolerance: tol, keep });
+        OUT = r.src || '';
+        if (!OUT) throw new Error('后端没返回处理结果');
+        const img = $('imgAfter');
+        img.onload = () => { $('phAfter').hidden = true; img.hidden = false; };
+        img.src = OUT;
+        markDim(img, $('dimAfter'));
+        $('btnSave').disabled = false;
+        const n = Number(r.removed) || 0;
+        if (n === 0) {
+            setHint('没有找到可消除的底色 —— 这张图可能已经是透明背景。', 'warn');
+        } else {
+            setHint('已消除 ' + n.toLocaleString() + ' 个背景像素。拖动「容差」可以重新算。', 'ok');
+        }
+        // 消过一次之后容差滑块才启用：没消过的时候拖着它没有意义
+        $('tol').disabled = false;
+    } catch (e) {
+        OUT = '';
+        $('btnSave').disabled = true;
+        setHint('消除失败：' + ((e && e.message) || e), 'warn');
+        toast('消除背景失败');
+    } finally {
+        removing = false;
+        btn.classList.remove('busy');
+        btn.innerHTML = '一键消除背景';
+        $('cvAfter').classList.remove('busy');
+    }
+}
+
+$('btnRemove').addEventListener('click', () => runRemove(false));
+
+/* 容差滑块：消过一次之后拖动 = 按新容差从**原图**重算（防抖 180ms，
+ * 拖动过程中每 2 步一次 invoke 就够跟手了，不至于把命令队列塞满）。 */
+let tolTimer = 0;
+$('tol').addEventListener('input', () => {
+    $('tolVal').textContent = $('tol').value;
+    if ($('tol').disabled || removing) return;
+    clearTimeout(tolTimer);
+    tolTimer = setTimeout(() => runRemove(true), 180);
+});
+
+/* 保存 / 取消。
+ * 保存的内容：处理过就存处理结果（OUT，恒 PNG）；SVG 原样应用时存 SRC。
+ * 保存成功后 Rust 会写 overrideIcons + 广播（横条、设置页、预览全部跟着
+ * 更新），这里只负责关窗。 */
+$('btnSave').addEventListener('click', async () => {
+    const src = OUT || SRC;
+    if (!src) { toast('没有可保存的内容'); return; }
+    $('btnSave').disabled = true;
+    try {
+        await invoke('icon_editor_save', { src });
+        await invoke('close_icon_editor');
+    } catch (e) {
+        $('btnSave').disabled = false;
+        toast('保存失败：' + ((e && e.message) || e));
+    }
+});
+
+/* 跳过编辑，直接用作图标（#146）。
+ *
+ * 编辑器不该是「换图标」的必经步骤：挑完图只想直接用的人，以前被逼着
+ * 要么点「一键消除背景」再保存（怕抠坏主体），要么点「取消」（等于这张
+ * 图白挑）。这条路就是给「我不想编辑」用的 —— 把原图 SRC 原样应用，
+ * 和「保存」共用同一条 Rust 链路（icon_editor_save 写 overrideIcons
+ * + 广播刷新），只是不要求跑过消除背景。 */
+$('btnSkip').addEventListener('click', async () => {
+    if (!SRC) { toast('没有可应用的图标'); return; }
+    $('btnSkip').disabled = true;
+    try {
+        await invoke('icon_editor_save', { src: SRC });
+        await invoke('close_icon_editor');
+    } catch (e) {
+        $('btnSkip').disabled = false;
+        toast('应用失败：' + ((e && e.message) || e));
+    }
+});
+
+$('btnCancel').addEventListener('click', () => invoke('close_icon_editor').catch(() => {}));
+$('btnX').addEventListener('click', () => invoke('close_icon_editor').catch(() => {}));
+
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') invoke('close_icon_editor').catch(() => {});
+});
+document.addEventListener('contextmenu', (e) => e.preventDefault());
+
+/* 窗口被复用（又挑了一张图 / 又点了一个「编辑」）：Rust 换会话后推这个事件，
+ * 页面整场重载。 */
+listen('qs://icon-edit-load', () => { loadSession().catch(() => {}); });
+
+/* 未处理的 Promise 拒绝兜底（和 OCR 结果窗同款）：点了没反应是最差的反馈 */
+window.addEventListener('unhandledrejection', (e) => {
+    const r = e && e.reason;
+    const msg = (r && r.message) || String(r || '');
+    try {
+        console.warn('[iconedit] unhandled rejection:', r);
+        if (msg) toast('操作失败：' + msg);
+        invoke('log_msg', { msg: '[iconedit] unhandledrejection: ' + msg }).catch(() => { });
+    } catch (_) { }
+});
+
+/* 首帧画完再让 Rust 亮窗口（窗口是 hidden 建的，理由见 open_ocr_window）。
+ * 双重 rAF：第一次只是排进下一帧，第二次才保证上一帧真的提交了。 */
+requestAnimationFrame(() => requestAnimationFrame(() => {
+    invoke('icon_edit_ready').catch(() => {});
+}));
+
+loadSession().catch((e) => toast('初始化失败：' + ((e && e.message) || e)));
+</script>
+</body>
+</html>
