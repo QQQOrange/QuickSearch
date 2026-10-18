@@ -6915,4 +6915,249 @@ requestAnimationFrame(() => requestAnimationFrame(() => {
     // 只在调试构建（QS_DEBUG=1，由后端在启动时把开关塞进 body.dataset）时跑，
     // 正式使用不受任何影响；对用户来说这条路永不执行。
     if (document.body.dataset.qsDebug === '1') reportRects();
+
+    /* ── r80：AI 抠图（图标编辑器）────────────────────────────────────
+       把"开关 + 模型选择 + 下载进度"整套挂在这里。逻辑说明见块内注释。 */
+
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * r80：AI 抠图（图标编辑器用）
+ *
+ * 用户要求：
+ *   ① 「图标的编辑功能处于可选，在设置通用里面打开」
+ *   ② 「打开之后就会验证本地有没有这个模型，有的话就直接调用，没有的话那要下载，
+ *      会弹出下载窗口以及下载进度条」
+ *   ③ 「这个（模型）本身不包含在安装包之内」
+ *   ④ 「模型分为多个版本，还有量化的版本，大小可选，想下载哪个那就用哪个」
+ *
+ * 所以这里的逻辑分四层：
+ *   1. 开关打开 → 刷新状态（`ai_matting_status`）
+ *   2. 状态里有运行时缺失 → 显示硬阻塞提示（模型能下但跑不了）
+ *   3. 列出所有可选模型 + 体积 + 实测速度 + 是否已下载 + 哪个在用
+ *   4. 点「下载」→ 就地显示进度条（可取消）；下完自动变成「使用」
+ *
+ * 为什么进度条放在卡片里而不是弹独立窗口：设置页本来就是个窗口，
+ * 再弹一个窗口会挡住下面的选项、用户还得关它。就地显示最省事也最不易迷失。
+ * （如果以后要独立窗口，进度事件 `model-download` 已经是通用的，换个宿主即可。）
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+let AI_STATUS = null;          // 最近一次 ai_matting_status 的结果
+const AI_DL = new Map();       // id -> { done, total, pct, phase }（正在下载的）
+
+/** 人类可读体积（与 Rust 侧 aimodels::human_size 同口径，避免两边显示不一致）。 */
+function aiSize(bytes) {
+    const mb = 1024 * 1024;
+    if (!bytes || bytes < 0) return '—';
+    return bytes >= mb ? (bytes / mb).toFixed(1) + ' MB' : Math.round(bytes / 1024) + ' KB';
+}
+
+/** 渲染模型列表。 */
+function aiRenderModels() {
+    const box = $('aiModels');
+    if (!box || !AI_STATUS) return;
+    const models = AI_STATUS.models || [];
+    const cur = AI_STATUS.current;
+    box.innerHTML = '';
+    for (const m of models) {
+        const el = document.createElement('div');
+        el.className = 'ai-model' + (m.id === cur ? ' on' : '');
+        el.dataset.id = m.id;
+
+        const downloading = AI_DL.get(m.id);
+        // 「推荐」标记：用实测得分而不是写死的名字 —— 得分最高的那个才是推荐
+        const best = Math.max(...models.map((x) => x.score || 0));
+        const isBest = (m.score || 0) === best;
+
+        const info = document.createElement('div');
+        info.className = 'am-i';
+        info.innerHTML =
+            '<div class="am-n">' + aiEsc(m.name) +
+            (isBest ? '<span class="am-tag">推荐</span>' : '') +
+            (m.id === cur ? '<span class="am-tag" style="background:#16a34a">使用中</span>' : '') +
+            '</div>' +
+            '<div class="am-d">' + aiEsc(m.note) + '</div>' +
+            '<div class="am-m">' + aiSize(m.bytes) +
+            ' · 实测约 ' + (m.avgMs || 0) + ' ms' +
+            ' · 输入 ' + (m.inputEdge || 0) + '×' + (m.inputEdge || 0) +
+            (m.downloaded ? ' · 已下载' : '') +
+            '</div>';
+        el.appendChild(info);
+
+        // 正在下载 → 进度条取代按钮
+        if (downloading && downloading.phase === 'downloading') {
+            const wrap = document.createElement('div');
+            wrap.style.flex = '1';
+            wrap.innerHTML =
+                '<div class="ai-dl"><i style="width:' + (downloading.pct || 0) + '%"></i></div>' +
+                '<div class="ai-dl-t"><span>' + (downloading.pct || 0) + '%</span>' +
+                '<span>' + aiSize(downloading.done) + ' / ' + aiSize(downloading.total) + '</span></div>';
+            el.appendChild(wrap);
+            const cancel = document.createElement('button');
+            cancel.className = 'btn';
+            cancel.textContent = '取消';
+            cancel.addEventListener('click', async () => {
+                await invoke('ai_matting_cancel').catch(() => { });
+            });
+            el.appendChild(cancel);
+        } else {
+            const btns = document.createElement('div');
+            btns.className = 'am-b';
+            if (!m.downloaded) {
+                const dl = document.createElement('button');
+                dl.className = 'btn primary';
+                dl.textContent = '下载';
+                dl.title = '下载这个模型（' + aiSize(m.bytes) + '）';
+                dl.addEventListener('click', () => aiStartDownload(m.id));
+                btns.appendChild(dl);
+            } else {
+                if (m.id !== cur) {
+                    const use = document.createElement('button');
+                    use.className = 'btn primary';
+                    use.textContent = '使用';
+                    use.addEventListener('click', async () => {
+                        AI_STATUS = await invoke('ai_matting_select', { id: m.id });
+                        aiRender();
+                    });
+                    btns.appendChild(use);
+                }
+                const del = document.createElement('button');
+                del.className = 'btn';
+                del.textContent = '删除';
+                del.title = '删掉已下载的模型文件腾出空间';
+                del.addEventListener('click', async () => {
+                    if (!confirm('删除「' + m.name + '」？下次要用得重新下载。')) return;
+                    AI_STATUS = await invoke('ai_matting_remove', { id: m.id }).catch((e) => {
+                        toast('删除失败：' + ((e && e.message) || e));
+                        return null;
+                    });
+                    if (AI_STATUS) aiRender();
+                });
+                btns.appendChild(del);
+            }
+            el.appendChild(btns);
+        }
+        box.appendChild(el);
+    }
+
+    /* 一句总结：现在到底能不能用、还差什么。
+     * 这是给"点了开关却发现没效果"的用户准备的 —— 别让他们自己猜。 */
+    const tip = $('aiMatteTip');
+    if (tip) {
+        let msg;
+        if (!AI_STATUS.runtime) {
+            msg = '缺少推理运行时（onnxruntime.dll），下载模型也没法运行。请重新下载完整程序包。';
+        } else if (!AI_STATUS.currentReady) {
+            const cm = models.find((x) => x.id === cur);
+            msg = '当前选的是「' + (cm ? cm.name : cur) + '」，但还没下载 —— 点上面的「下载」按钮，'
+                + '下载完成后图标编辑器的自动抠图就会用上它。';
+        } else {
+            msg = '已就绪：图标编辑器 → 自动抠图 会先用 AI 模型；'
+                + 'AI 跑不动时自动回退本地算法，不会出现"点了没反应"。';
+        }
+        tip.textContent = msg;
+    }
+}
+
+/** 转义（模型名/说明里有 `（）` 与 `·`，但来源是本地清单，仍按规矩转义）。 */
+function aiEsc(s) {
+    return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+}
+
+/** 根据当前状态决定显示/隐藏区块。 */
+function aiRender() {
+    const wrap = $('aiModelWrap');
+    const rtRow = $('aiRuntimeRow');
+    const on = !!(AI_STATUS && AI_STATUS.enable);
+    if (wrap) wrap.hidden = !on;
+    if (rtRow) rtRow.hidden = !(on && AI_STATUS && !AI_STATUS.runtime);
+    if (on) aiRenderModels();
+}
+
+/** 拉一次状态并渲染。 */
+async function aiRefresh() {
+    try {
+        AI_STATUS = await invoke('ai_matting_status');
+    } catch (e) {
+        AI_STATUS = null;
+    }
+    aiRender();
+}
+
+/** 开始下载：先把本地状态标成"下载中"（立刻出进度条），再发命令。 */
+async function aiStartDownload(id) {
+    AI_DL.set(id, { done: 0, total: 0, pct: 0, phase: 'downloading' });
+    aiRenderModels();
+    try {
+        await invoke('ai_matting_download', { id });
+    } catch (e) {
+        AI_DL.delete(id);
+        aiRenderModels();
+        toast('下载启动失败：' + ((e && e.message) || e));
+    }
+}
+
+/* 进度事件：后端每 1% 推一次（按百分比节流，见 aimodels::download 的注释）。
+ * done / error / canceled 三种收尾都要刷新列表 —— 用户需要看到
+ * "下好了，现在能用了" 或 "失败了，为什么"。 */
+function aiBindProgress() {
+    if (typeof listen !== 'function') return;
+    listen('model-download', (ev) => {
+        const p = (ev && ev.payload) || {};
+        if (!p.id) return;
+        if (p.phase === 'downloading') {
+            AI_DL.set(p.id, {
+                done: p.done || 0, total: p.total || 0,
+                pct: p.pct || 0, phase: 'downloading',
+            });
+            aiRenderModels();
+            return;
+        }
+        // 收尾：清掉进度状态再刷新（刷新会拿到最新的 downloaded 标记）
+        AI_DL.delete(p.id);
+        if (p.phase === 'done') {
+            toast('模型下载完成');
+            aiRefresh();
+        } else if (p.phase === 'canceled') {
+            toast('已取消下载');
+            aiRefresh();
+        } else {
+            toast('下载失败：' + (p.msg || '未知原因'));
+            aiRefresh();
+        }
+    });
+}
+
+/** 开关：写配置后立刻刷新（"打开就验证本地有没有模型"）。 */
+async function aiBindSwitch() {
+    const sw = $('s-aiMatting');
+    if (!sw) return;
+    sw.addEventListener('change', async () => {
+        const on = sw.checked;
+        try {
+            AI_STATUS = await invoke('ai_matting_enable', { on });
+        } catch (e) {
+            sw.checked = !on;
+            toast('开关保存失败：' + ((e && e.message) || e));
+            return;
+        }
+        aiRender();
+    });
+}
+
+/* 初始化：把开关按配置摆好，然后拉状态。
+ * 注意顺序 —— 开关状态从 CONF 里读（与其它设置项同一套回填机制），
+ * 但"能不能用"必须问后端（要检查 dll 与模型文件），所以两者都要。 */
+function aiInit() {
+    const sw = $('s-aiMatting');
+    if (sw) sw.checked = !!(CONF && CONF.aiMattingEnable);
+    aiBindSwitch();
+    aiBindProgress();
+    aiRefresh();
+}
+
+
+    // r80：AI 抠图（开关回填 + 状态查询 + 模型列表）
+    aiInit();
 })();

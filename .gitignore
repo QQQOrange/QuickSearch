@@ -48,3 +48,10 @@ tools/probe-out/
 # 探针脚本会把结果写回 tools/*.txt（历史习惯，脚本里硬编码的路径）。
 # 这些也是"重跑就有"的产物，同样不该入库 —— 不然每次跑完探针工作区都变脏。
 tools/*.txt
+
+# ---- AI 推理运行时（r80）----
+# `onnxruntime.dll` 11.8MB：二进制不该进版本库（每次改动都产生新 blob，
+# 历史迅速膨胀，而且它极少变）。构建机上放一份到 vendor/ort/lib/ 即可，
+# `build.rs` 会自动拷到产物目录、随发布包分发。放法见 vendor/ort/README.md。
+vendor/ort/lib/*.dll
+vendor/ort/lib/*.lib

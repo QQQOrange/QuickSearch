@@ -365,6 +365,8 @@ body { display: flex; flex-direction: column; overflow: hidden; }
 <footer class="ft">
     <span class="tip" id="tip">消除背景只去掉与四边边缘连成一片的底色；图标主体内部的花纹、镂空不受影响。</span>
     <button class="btn" id="btnSkip" title="不消除背景，把这张原图直接设成图标">跳过编辑，直接用作图标</button>
+    <!-- r80：导出。与「保存」的区别：保存 = 应用到横条；导出 = 另存一份文件拿到别处用 -->
+    <button class="btn" id="btnExport" title="把当前结果另存为一份图片文件（不改动横条上的图标）" disabled>导出…</button>
     <button class="btn" id="btnCancel">取消</button>
     <button class="btn primary" id="btnSave" disabled>保存</button>
 </footer>
@@ -424,6 +426,9 @@ async function loadSession() {
     $('btnSkip').disabled = false;
     $('btnRemove').disabled = false;
     $('btnRemove').innerHTML = '自动抠图';
+    /* r80：导出按钮跟着"有没有内容"走。刚进来 SRC 就有（挑好的图），
+     * 所以直接可用 —— 用户可能只想把这张原图另存一份，不想抠也不想应用。 */
+    $('btnExport').disabled = !SRC;
     $('tol').disabled = true;
     $('tol').value = '48';
     $('tolVal').textContent = '48';
@@ -736,6 +741,38 @@ $('btnSave').addEventListener('click', async () => {
     } catch (e) {
         $('btnSave').disabled = false;
         toast('保存失败：' + ((e && e.message) || e));
+    }
+});
+
+/* 导出（r80）：把当前结果**另存为一份文件**，不改动横条上的图标。
+ *
+ * 和「保存」的区别要说清楚，否则用户会以为点哪个都一样：
+ *   · 保存 = 应用到横条（写 icons 目录 + 改 overrideIcons + 广播刷新）
+ *   · 导出 = 另存一份拿到别处用（发出去、进素材库、给别的软件）
+ *
+ * 导出的是**当前看到的结果**：抠过就是抠完的（OUT，PNG 带透明），
+ * 没抠过就是原图。所以按钮在有内容时就该可用 —— 不要求先抠图。
+ * 用户取消（cancel）不弹报错，那不是失败。 */
+$('btnExport').addEventListener('click', async () => {
+    const src = OUT || SRC;
+    if (!src) { toast('没有可导出的内容'); return; }
+    $('btnExport').disabled = true;
+    try {
+        const r = await invoke('icon_editor_export', {
+            src,
+            /* 默认文件名给个有意义的名字（图标名），Rust 会安全化处理 */
+            suggested: NAME || 'icon',
+        });
+        if (r && r.cancel) {
+            // 用户自己取消的，什么都不说反而更好
+        } else if (r && r.ok) {
+            setHint('已导出到 ' + r.path, 'ok');
+            toast('已导出');
+        }
+    } catch (e) {
+        toast('导出失败：' + ((e && e.message) || e));
+    } finally {
+        $('btnExport').disabled = false;
     }
 });
 

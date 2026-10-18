@@ -27,6 +27,15 @@ mod engines;
 //      图标编辑器「自动描边 + 消除背景」的核心算法，独立成模块以便单测与阅读。
 //      纯算法，不依赖 Tauri / 窗口 / 配置锁。
 mod matting;
+// r80：AI 抠图。`aimodels` 管模型清单/下载，`aimatte` 管 ONNX 推理。
+//      两者都自包含（不依赖窗口/配置锁），方便单测；模型由用户按需下载，
+//      不随程序分发。运行时需要同目录的 onnxruntime.dll。
+mod aimodels;
+mod aimatte;
+// r80：AI 抠图与本地算法的**胶水** —— AI 出语义（哪些是主体），
+//      本地出边缘质量（逐像素背景色拟合 + 去色）。分开写是为了让
+//      `aimatte`（纯推理）与 `matting`（纯算法）各自保持可独立测试。
+mod iconedit_ai;
 mod webdav;
 mod win;
 
@@ -201,6 +210,14 @@ const OFFSCREEN: i32 = -20000;
 
 fn st() -> &'static AppState {
     STATE.get().expect("state not ready")
+}
+
+/// `st()` 的**不 panic** 版本：状态没就绪时返回 `None`。
+///
+/// 给"在测试里也会被调用"的代码用（如 `iconedit_ai::try_ai`）——
+/// 那些函数的契约是"永不报错、失败就回退"，不能用会在测试环境 panic 的 `st()`。
+pub(crate) fn try_st() -> Option<&'static AppState> {
+    STATE.get()
 }
 
 fn app() -> &'static AppHandle {
@@ -2791,6 +2808,9 @@ fn config_view() -> Value {
         "triggerCopy": cfg.trigger_copy,
         "autoStart": cfg.auto_start,
         "autoElevate": cfg.auto_elevate,
+        // r80：AI 抠图总开关。**模型选择不进这里** —— 它要走 ai_matting_status
+        //      命令才知道"文件在不在、运行时能不能加载"，纯配置项表达不了。
+        "aiMattingEnable": cfg.ai_matting_enable,
         "iconSize": cfg.icon_size,
         "alpha": cfg.alpha,
         // 待机（鼠标没悬停）时的横条不透明度。设成 100 就等于关掉这套行为。
@@ -2907,6 +2927,8 @@ fn apply_view(v: &Value, cfg: &mut config::Config) {
     if let Some(x) = b("triggerCopy") { cfg.trigger_copy = x; }
     if let Some(x) = b("autoStart") { cfg.auto_start = x; }
     if let Some(x) = b("autoElevate") { cfg.auto_elevate = x; }
+    // r80：AI 抠图开关（批量导入那条路）
+    if let Some(x) = b("aiMattingEnable") { cfg.ai_matting_enable = x; }
     if let Some(x) = n("iconSize") { cfg.icon_size = x.clamp(14, 96) as u32; }
     if let Some(x) = n("alpha") { cfg.alpha = x.clamp(30, 100) as u32; }
     // 待机透明度允许压得更低（最低 10%），但夹在 10-100：0% 会让横条直接
@@ -3363,6 +3385,9 @@ fn apply_one_setting(cfg: &mut config::Config, key: &str, value: Value) -> Resul
         "ocrKey" => cfg.ocr_key = value.as_str().unwrap_or("").trim().to_string(),
         "ocrSecret" => cfg.ocr_secret = value.as_str().unwrap_or("").trim().to_string(),
         "autoElevate" => cfg.auto_elevate = value.as_bool().unwrap_or(true),
+        // r80：AI 抠图开关。默认 false —— 不开时走本地算法，不该替用户默认开启
+        //      （它需要额外下载模型，见 config.rs 字段上的取舍说明）。
+        "aiMattingEnable" => cfg.ai_matting_enable = value.as_bool().unwrap_or(false),
         "webdavOnStart" => cfg.webdav_on_start = value.as_bool().unwrap_or(false),
         "webdavOnExit" => cfg.webdav_on_exit = value.as_bool().unwrap_or(false),
         "webdavUrl" => {
@@ -8819,6 +8844,243 @@ fn close_icon_editor() {
     iconedit::clear_session();
 }
 
+/* ══════════════════════════════════════════════════════════════════════════
+ * r80：AI 抠图（模型管理 + 推理）
+ *
+ * 设计口径（用户原话）：
+ *   「图标的编辑功能处于可选，在设置通用里面打开，打开之后就会验证本地有没有
+ *     这个模型，有的话就直接调用，没有的话那要下载，会弹出下载窗口以及下载
+ *     进度条，而这个（模型）本身不包含在安装包之内」
+ *   「模型分为多个版本，还有量化的版本，大小可选，在设置当中提供不同的量化版本」
+ *
+ * 所以：
+ *   · 开关默认关（`ai_matting_enable`，见 config.rs 的取舍说明）
+ *   · 模型**不入包**，由用户选版本后下载（4.4MB ~ 168MB）
+ *   · 下载有进度条、可取消、有 SHA256 校验
+ *   · 推理失败/模型缺失时**静默回退**本地颜色解混（用户不会拿到"点了没反应"）
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+/// AI 抠图的整体状态（设置页据此决定显示什么）。
+///
+/// 返回值设计成"一次调用拿到全部信息"：设置页打开时调一次就够了，
+/// 不用为了"有没有 dll / 有没有模型 / 选了哪个"分别调三次。
+#[tauri::command]
+fn ai_matting_status() -> Value {
+    let cfg = match st().cfg.lock() {
+        Ok(c) => c,
+        Err(_) => return json!({ "error": "配置锁被占用" }),
+    };
+    let enabled = cfg.ai_matting_enable;
+    // 用户没选过就用推荐项
+    let cur_id = if cfg.ai_matting_model.trim().is_empty() {
+        aimodels::default_id().to_string()
+    } else {
+        cfg.ai_matting_model.clone()
+    };
+    drop(cfg);
+
+    let runtime = aimatte::runtime_available();
+    let cur_ready = aimodels::is_ready(&cur_id);
+    json!({
+        "enable": enabled,
+        // 运行时（onnxruntime.dll）是否可用 —— 缺它的话 AI 路走不通
+        "runtime": runtime,
+        "current": cur_id,
+        "currentReady": cur_ready,
+        // 能不能真的用：开关开了 + 运行时有 + 模型就绪
+        "usable": enabled && runtime && cur_ready,
+        // 体积同时给"人类可读"版本：前端就不必再实现一套格式化
+        // （两处各写一份迟早会不一致）
+        "models": aimodels::downloaded_with_size(),
+    })
+}
+
+/// 选择当前使用哪个模型（已下载的直接生效；没下载的前端会引导去下载）。
+#[tauri::command]
+fn ai_matting_select(id: String) -> Result<Value, String> {
+    if aimodels::find(&id).is_none() {
+        return Err(format!("未知的模型：{id}"));
+    }
+    {
+        let mut cfg = match st().cfg.lock() {
+            Ok(c) => c,
+            Err(_) => return Err("配置锁被占用".to_string()),
+        };
+        cfg.ai_matting_model = id.clone();
+        config::save(&cfg);
+    }
+    broadcast();
+    win::log(&format!("ai_matting_select: {id}"));
+    Ok(ai_matting_status())
+}
+
+/// 切换 AI 抠图总开关。
+#[tauri::command]
+fn ai_matting_enable(on: bool) -> Result<Value, String> {
+    {
+        let mut cfg = match st().cfg.lock() {
+            Ok(c) => c,
+            Err(_) => return Err("配置锁被占用".to_string()),
+        };
+        cfg.ai_matting_enable = on;
+        config::save(&cfg);
+    }
+    broadcast();
+    win::log(&format!("ai_matting_enable: {on}"));
+    Ok(ai_matting_status())
+}
+
+/// 删除已下载的模型（腾空间）。
+#[tauri::command]
+fn ai_matting_remove(id: String) -> Result<Value, String> {
+    aimodels::remove(&id)?;
+    win::log(&format!("ai_matting_remove: {id}"));
+    Ok(ai_matting_status())
+}
+
+/// 下载一个模型（**后台线程**，通过事件推进度）。
+///
+/// 为什么必须异步：168MB 的模型在弱网下要十几分钟，同步命令会把
+/// WebView 的消息循环卡死（整个设置页点不动）。
+///
+/// 进度事件 `model-download` 的载荷：
+///   `{ "id": ..., "done": N, "total": M, "pct": 0..100, "phase": "downloading" }`
+///   完成时补一条 `{ "phase": "done" }`，失败/取消 `{ "phase": "error"|"canceled", "msg": ... }`
+#[tauri::command]
+fn ai_matting_download(app: AppHandle, id: String) -> Result<(), String> {
+    let Some(spec) = aimodels::find(&id) else {
+        return Err(format!("未知的模型：{id}"));
+    };
+    win::log(&format!("ai_matting_download: 开始 {}", spec.id));
+    std::thread::spawn(move || {
+        let ev = |payload: Value| {
+            let _ = app.emit(aimodels::EVENT_PROGRESS, payload);
+        };
+        ev(json!({ "id": spec.id, "phase": "downloading", "done": 0, "total": spec.bytes, "pct": 0 }));
+        let mut last = 0i64;
+        let r = aimodels::download(spec, &mut |done, total| {
+            let pct = (done.saturating_mul(100)).checked_div(total).unwrap_or(0) as i64;
+            if pct != last {
+                last = pct;
+                ev(json!({
+                    "id": spec.id, "phase": "downloading",
+                    "done": done, "total": total, "pct": pct,
+                }));
+            }
+        });
+        match r {
+            Ok((bytes, sha)) => {
+                win::log(&format!(
+                    "ai_matting_download: {} 完成 {} 字节 sha={}",
+                    spec.id,
+                    bytes,
+                    &sha[..8.min(sha.len())]
+                ));
+                ev(json!({
+                    "id": spec.id, "phase": "done",
+                    "done": bytes, "total": bytes, "pct": 100,
+                }));
+            }
+            Err(e) if e == "__CANCELED__" => {
+                win::log(&format!("ai_matting_download: {} 用户取消", spec.id));
+                ev(json!({ "id": spec.id, "phase": "canceled", "msg": "已取消" }));
+            }
+            Err(e) => {
+                win::log(&format!("ai_matting_download: {} 失败 {e}", spec.id));
+                ev(json!({ "id": spec.id, "phase": "error", "msg": e }));
+            }
+        }
+    });
+    Ok(())
+}
+
+/// 取消正在进行的下载。
+#[tauri::command]
+fn ai_matting_cancel() {
+    aimodels::request_cancel();
+}
+
+/// **导出处理结果到用户选定的文件**（「导出」按钮）。
+///
+/// 与 `icon_editor_save` 的区别：
+///   · `save` 是**应用**到横条（写 icons 目录 + overrideIcons + 广播）；
+///   · `export` 是**另存为一份文件**，不改任何配置、不动横条图标 ——
+///     用户想把抠好的图标拿到别处用（发出去、存进素材库、放到别的软件里）。
+///
+/// 为什么走主线程弹窗：`rfd` 的对话框要自己抽消息，从 Tauri 命令线程直接调
+/// 会把窗口一起拖死（项目里 8448 / 8527 行有同样的注释与教训）。
+///
+/// 返回：
+///   · `{"ok":true,"path":"...","bytes":N}` 导出成功
+///   · `{"ok":false,"cancel":true}` 用户取消（**不是错误**，前端不该报红）
+///   · `Err(...)` 真失败（写不进去 / 图读不出来）
+#[tauri::command]
+fn icon_editor_export(app: AppHandle, src: String, suggested: Option<String>) -> Result<Value, String> {
+    let (mime, bytes) = read_icon_src(&src)?;
+    let ext = match mime.rsplit('/').next().unwrap_or("") {
+        "jpeg" | "jpg" => "jpg",
+        "webp" => "webp",
+        "gif" => "gif",
+        "bmp" => "bmp",
+        "svg+xml" => "svg",
+        _ => "png",
+    };
+    // 默认文件名：优先用调用方给的（一般是图标名），否则用会话键，再不行用个通用名。
+    // 都要走一遍安全化 —— 引擎名里可能有 `（首页）`、`/`、`:` 之类不能做文件名的字符。
+    let raw_name = suggested
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| iconedit::load_session().map(|s| s.name))
+        .unwrap_or_else(|| "icon".to_string());
+    let safe: String = raw_name
+        .trim()
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' || c == ' ' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    // 去掉首尾的点和空格（Windows 不允许文件名以点/空格结尾），再兜个底
+    let safe = safe.trim_matches(|c| c == '.' || c == ' ').to_string();
+    let safe = if safe.is_empty() { "icon".to_string() } else { safe };
+    let default_name = format!("{safe}.{ext}");
+
+    let (tx, rx) = std::sync::mpsc::channel::<Option<std::path::PathBuf>>();
+    let dlg_name = default_name.clone();
+    let dlg_ext = ext.to_string();
+    let _ = app.run_on_main_thread(move || {
+        let picked = rfd::FileDialog::new()
+            .set_title("导出图标")
+            .set_file_name(&dlg_name)
+            .add_filter(dlg_ext.to_uppercase(), &[dlg_ext.as_str()])
+            .add_filter("所有文件", &["*"])
+            .save_file();
+        let _ = tx.send(picked);
+    });
+    let picked = match rx.recv_timeout(std::time::Duration::from_secs(180)) {
+        Ok(p) => p,
+        Err(_) => return Err("导出对话框超时未响应".to_string()),
+    };
+    let Some(path) = picked else {
+        // 用户取消 —— 不是错误
+        return Ok(json!({ "ok": false, "cancel": true }));
+    };
+
+    std::fs::write(&path, &bytes).map_err(|e| format!("写文件失败：{e}"))?;
+    win::log(&format!(
+        "icon_editor_export: {} 字节 -> {}",
+        bytes.len(),
+        path.display()
+    ));
+    Ok(json!({
+        "ok": true,
+        "path": path.to_string_lossy(),
+        "bytes": bytes.len(),
+    }))
+}
+
 /// 把图标 src 读成 `(mime, 字节)`。只认 data URL（base64）—— 编辑器链路里
 /// 所有 src 都是 data URL：挑的图、overrideIcons、dirIcons 本来就是，
 /// 内置 iconFile 由设置页 fetch 成 data URL 再传进来。
@@ -11264,7 +11526,15 @@ fn main() {
             icon_edit_ready,
             icon_remove_bg,
             icon_editor_save,
+            icon_editor_export,
             close_icon_editor,
+            // r80：AI 抠图（模型管理与状态）
+            ai_matting_status,
+            ai_matting_select,
+            ai_matting_enable,
+            ai_matting_remove,
+            ai_matting_download,
+            ai_matting_cancel,
             pick_app_at,
             pick_app_path_at,
             pick_app_file,

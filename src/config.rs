@@ -725,6 +725,22 @@ pub ocr_accurate: bool,
     /// 一个口径，但那个是为了"不用的人收干净"，这个是"新功能默认可见"）。
     #[serde(default = "default_true")]
     pub img_enable: bool,
+    /// **AI 抠图总开关**（r80）。用户原话：「图标的编辑功能处于可选，在设置通用
+    /// 里面打开」。
+    ///
+    /// 默认 **false**（与 `img_enable` 相反的取舍）：
+    ///   · 它需要额外**下载模型**（4.4MB~168MB），不能默认就替用户下；
+    ///   · 它依赖 `onnxruntime.dll`（11.8MB，随程序分发）；
+    ///   · 不开时图标编辑器走本地颜色解混算法（毫秒级、零依赖），功能不受影响。
+    /// 只有用户在设置里主动打开、且选好模型之后才会走 AI。
+    #[serde(default)]
+    pub ai_matting_enable: bool,
+    /// 用户选定的 AI 抠图模型 id（见 `aimodels::MODELS`）。
+    ///
+    /// 空串 = 还没选过，这时按 `aimodels::default_id()`（推荐项 u2netp）走。
+    /// 存 **id** 而不是文件名：换下载源/改名都不影响用户配置。
+    #[serde(default)]
+    pub ai_matting_model: String,
     /// 识图**默认引擎**。配了之后截图完成**直接**跳这个引擎，不再让用户选。
     ///
     /// 用户原话：「支持在设置中配置默认引擎，设置后截图完成即直接跳转浏览器
@@ -902,6 +918,10 @@ impl Default for Config {
             // r54 识图：默认开着、默认勾「框选完直接出结果」的两家、
             // 默认引擎 = Yandex（r70 起；r72 必应/搜狗/360 出册，见 imgsearch.rs）
             img_enable: true,
+            /* r80 AI 抠图：默认**关**（见字段上的取舍说明）。
+             * 模型选择留空 = 还没选过，运行时会落到 `aimodels::default_id()`。 */
+            ai_matting_enable: false,
+            ai_matting_model: String::new(),
             img_default_engine: imgsearch::DEFAULT_ENGINE.to_string(),
             img_engines: imgsearch::DEFAULT_ENGINES.iter().map(|s| s.to_string()).collect(),
             img_add_to_bar: true,

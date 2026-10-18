@@ -3271,3 +3271,33 @@ body.fav-item-dragging * { cursor: grabbing !important; }
 }
 .dep-btn.ghost:hover { color: var(--fg); border-color: var(--fg-dim); }
 
+
+/* ══════════════════════════════════════════════════════════════════════════
+   r80：AI 抠图模型选择 / 下载
+
+   每张模型卡是一行：左边名字+说明+体积，右边按钮（下载 / 删除 / 使用中）。
+   为什么要"每行独立按钮"而不是下拉框：模型体积差 40 倍（4.4MB vs 168MB），
+   用户必须先看清体积才好决定；下拉框藏起来会让人误下一个 168MB 的。
+   ══════════════════════════════════════════════════════════════════════════ */
+.ai-models { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }
+.ai-model {
+  display: flex; align-items: center; gap: 10px;
+  border: 1px solid var(--line); border-radius: 9px;
+  padding: 9px 11px; background: var(--bg2, rgba(0,0,0,.02));
+}
+.ai-model.on { border-color: var(--accent, #3b82f6); }
+.ai-model .am-i { flex: 1; min-width: 0; }
+.ai-model .am-n { font-weight: 600; font-size: 12.5px; display: flex; align-items: center; gap: 6px; }
+.ai-model .am-d { font-size: 11.5px; opacity: .68; margin-top: 2px; line-height: 1.5; }
+.ai-model .am-m { font-size: 11px; opacity: .55; margin-top: 3px; }
+.ai-model .am-tag {
+  font-size: 10px; padding: 1px 6px; border-radius: 20px;
+  background: var(--accent, #3b82f6); color: #fff; font-weight: 600;
+}
+.ai-model .am-b { display: flex; gap: 6px; flex-shrink: 0; }
+.ai-tip { font-size: 11.5px; opacity: .62; margin: 8px 0 0; line-height: 1.6; }
+
+/* 下载进度条：与"下载窗口"共用（那个窗口也在设置页里，用同一套样式） */
+.ai-dl { width: 100%; height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; margin-top: 6px; }
+.ai-dl > i { display: block; height: 100%; background: var(--accent, #3b82f6); width: 0; transition: width .18s linear; }
+.ai-dl-t { font-size: 11px; opacity: .7; margin-top: 4px; display: flex; justify-content: space-between; }

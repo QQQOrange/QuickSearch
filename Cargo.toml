@@ -39,6 +39,22 @@ ureq = "2"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "ico", "webp", "gif", "bmp"] }
 
 # ---------------------------------------------------------------------------
+# AI 抠图（r80）：跑 ONNX 模型做神经网络抠图。
+#
+# 为什么是这个组合：
+#   · `ort` 是 ONNX Runtime 的 Rust 绑定。ONNX Runtime 是**唯一**实测能加载
+#     这两个模型的推理引擎 —— 先用纯粹 Rust 的 `tract` 试过，它在两个模型上
+#     都卡在 `Resize` 算子（支持不完整，`FAIL: Building node Resize_42`）。
+#   · 关掉 `download-binaries`：那个 feature 会在**编译期**联网下载 ONNX Runtime
+#     动态库，国产网络下大概率失败（实测报 `failed to run custom build command
+#     for ort-sys`）。改为用 `ORT_SKIP_DOWNLOAD=1` + `ORT_LIB_LOCATION`
+#     指向本地已下好的官方库，编译期不再联网。
+#   · `copy-dylibs`：把 `onnxruntime.dll` 自动拷到产物目录（发布时随 exe 分发）。
+#     **模型不随包**：模型是用户数据，按需下载（4.4MB ~ 168MB 可选，见 aimodels.rs）。
+ort = { version = "=2.0.0-rc.10", features = ["ndarray", "copy-dylibs"] }
+ndarray = "0.16"
+
+# ---------------------------------------------------------------------------
 # 下面这行不是业务依赖，只是一个「feature 调和器」。
 # tauri-build / tauri-utils 会拉起 schemars 0.8，而 schemars 0.8 把 indexmap 1.9
 # 声明成 default-features = false + features = ["serde-1"]，于是 indexmap 编译时

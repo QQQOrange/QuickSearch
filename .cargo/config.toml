@@ -1,0 +1,22 @@
+# AI 抠图（r80）需要的构建期配置。
+#
+# # 为什么写在这里而不是让人每次敲环境变量
+#
+# `ort-sys` 在**编译期**要链接 ONNX Runtime 的导入库，靠两个环境变量找：
+#   · `ORT_LIB_LOCATION` —— 库目录
+#   · `ORT_SKIP_DOWNLOAD` —— 别联网下载（默认会去 GitHub 拉；实测国产网络下
+#     会失败并报 `failed to run custom build command for ort-sys`）
+# 写进这里之后 `cargo build` 直接可用，不必先设环境变量。
+#
+# # ⚠ 为什么必须 `relative = true`
+#
+# ort-sys 拿到**相对路径**时会当成空路径，报
+# `error: empty search path given via -L`（实测踩过）。
+# Cargo 的 `relative = true` 会把值按**本文件所在目录**解析成绝对路径再传给
+# 子进程 —— 于是仓库里不必写死任何机器路径，换机器也能直接编译。
+#
+# 库文件放哪、怎么更新：见 `vendor/ort/README.md`。
+# dll 由根目录的 `build.rs` 自动拷到产物目录（`copy_ort_runtime`）。
+[env]
+ORT_SKIP_DOWNLOAD = "1"
+ORT_LIB_LOCATION = { value = "vendor/ort/lib", relative = true }

@@ -203,6 +203,33 @@
             <label class="sw"><input type="checkbox" id="s-autoElevate"><i></i></label>
         </div>
     </section>
+
+    <!-- ==================== r80：AI 抠图（图标编辑器） ====================
+         用户要求：「图标的编辑功能处于可选，在设置通用里面打开，打开之后就会验证
+         本地有没有这个模型，有的话就直接调用，没有的话那要下载，会弹出下载窗口
+         以及下载进度条，而这个（模型）本身不包含在安装包之内」。
+         所以：开关默认关 → 开了之后列出可下载的模型（4.4MB ~ 168MB 可选）→
+         选中的那个若没下载就提示下载，下载走独立窗口 + 进度条。 -->
+    <section class="card" id="aiMatteCard">
+        <h2>AI 抠图 <small>用神经网络抠图标背景，适合主体与背景颜色接近的图</small></h2>
+        <div class="row">
+            <div class="rt"><b>启用 AI 抠图</b>
+                <small>图标编辑器里的「自动抠图」会先用 AI 模型；<b>关着也能用</b>（走本地算法，毫秒级、无需下载任何东西）</small>
+            </div>
+            <label class="sw"><input type="checkbox" id="s-aiMatting"><i></i></label>
+        </div>
+        <!-- 运行时缺失是硬阻塞（模型能下，但没有 onnxruntime.dll 就跑不了推理），
+             这条提示只在真的缺时才出现 -->
+        <div class="row" id="aiRuntimeRow" hidden>
+            <div class="rt"><b>⚠ 缺少推理运行时</b>
+                <small>程序目录里没有 <code>onnxruntime.dll</code>，AI 抠图无法运行。重新下载完整程序包可恢复</small>
+            </div>
+        </div>
+        <div id="aiModelWrap" hidden>
+            <div class="ai-models" id="aiModels"></div>
+            <p class="ai-tip" id="aiMatteTip"></p>
+        </div>
+    </section>
     </div>
 
     <!-- ============================ 引擎 ============================ -->
