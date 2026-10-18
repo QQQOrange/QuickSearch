@@ -7105,15 +7105,20 @@ function aiRenderModels() {
             '</div>';
         el.appendChild(info);
 
-        // 正在下载（运行库阶段或模型阶段）→ 进度条取代按钮
-        if (downloading && (downloading.phase === 'downloading' || downloading.phase === 'runtime')) {
+        // 正在下载（运行库 / 等运行库 / 下模型）→ 进度条取代按钮
+        if (downloading && (downloading.phase === 'downloading'
+            || downloading.phase === 'runtime' || downloading.phase === 'runtime-wait')) {
             const wrap = document.createElement('div');
             wrap.style.flex = '1';
-            /* r80g：运行库阶段要说清楚在下什么 —— 它是个 69MB 的 zip，
-             * 只显示"下载中"会让用户以为在下那个 4MB 的模型。 */
+            /* r80p：三个阶段分别说清楚 ——
+             *   runtime      正在下运行库（现在**直接下 11.84MB 的 dll**，不再下 69MB zip）
+             *   runtime-wait 别的下载正在取运行库，本模型在等它
+             *   downloading  正在下这个模型 */
             const label = downloading.phase === 'runtime'
-                ? '正在下载运行库（解出 11.8MB）'
-                : '正在下载模型';
+                ? '正在下载运行库（11.84MB）'
+                : (downloading.phase === 'runtime-wait'
+                    ? '等运行库下载完成…'
+                    : '正在下载模型');
             wrap.innerHTML =
                 '<div class="ai-dl"><i style="width:' + (downloading.pct || 0) + '%"></i></div>' +
                 '<div class="ai-dl-t"><span>' + label + '</span>' +
@@ -7205,8 +7210,11 @@ function aiRender() {
     if (wrap) wrap.hidden = !on;
     // 模型下拉框跟着状态走（哪些已下载会影响"可选但跑不了"的提示）
     if (on) aiCutFillModels();
-    if (rtRow) rtRow.hidden = !(on && AI_STATUS && !AI_STATUS.runtime);
+    /* r80p：运行库那一行 —— 缺它、或者正在下它，都要显示 */
+    const rtBusy = AI_DL.has('__runtime__');
+    if (rtRow) rtRow.hidden = !(on && AI_STATUS && (!AI_STATUS.runtime || rtBusy));
     if (on) aiRenderModels();
+    if (on) aiRenderRuntimeRow();
 }
 
 /** 拉一次状态并渲染。 */
@@ -7221,18 +7229,18 @@ async function aiRefresh() {
 
 /** 开始下载：先把本地状态标成"下载中"（立刻出进度条），再发命令。
  *
- *  ⚠ r80i：后端现在**同一时刻只允许一个下载**（拿不到锁会明确报错）。
- *  所以这里在发命令前先挡一道：已经有别的模型在下时，
- *  不去发起第二次（否则会拿到"已经有一个下载在进行中"的报错，
- *  而用户其实只是手快点了两个按钮）。
- *  挡完给一句说明 —— 静默不响应会被当成"按钮坏了"。 */
+ *  r80p：**允许并行下载** —— 用户明确要求
+ *  「运行库跟每一个模型都可以同时下载，也都要单独下」。
+ *
+ *  所以这里不再挡"已有别的下载在跑"。每个模型有自己的 `AI_DL` 条目与
+ *  自己的进度条，互不影响；后端那边运行库有门闩（只下一次），
+ *  模型各自用自己的临时文件，不会互相踩。
+ *
+ *  ⚠ 唯一还要挡的是**同一个模型重复点**：那样会开出两个线程下同一个文件。
+ */
 async function aiStartDownload(id) {
-    // 已经有下载在进行（不管是不是这个模型）→ 只提示，不再发命令
-    if (AI_DL.size > 0) {
-        const other = Array.from(AI_DL.keys())[0];
-        toast(other === id
-            ? '这个模型正在下载中，稍等一下'
-            : '已经有模型在下载了 —— 等它下完再点这个（同时下会互相打断）');
+    if (AI_DL.has(id)) {
+        toast('这个模型正在下载中，稍等一下');
         return;
     }
     AI_DL.set(id, { done: 0, total: 0, pct: 0, phase: 'downloading' });
@@ -7246,6 +7254,28 @@ async function aiStartDownload(id) {
     }
 }
 
+/** **单独下载运行库**（r80p 新增）。
+ *
+ *  用户要求：「这个运行库一直是没下下来，这个你也要优化一下具体的下载方式，
+ *  也要在设置通用 ai 抠图里面提供一个下载的选项」。
+ *
+ *  所以给运行库一个**独立的下载按钮** —— 不必非得点某个模型才触发。
+ *  用一个特殊的 id（`__runtime__`）复用它自己的进度条槽位。
+ */
+async function aiDownloadRuntime() {
+    const KEY = '__runtime__';
+    if (AI_DL.has(KEY)) { toast('运行库正在下载中'); return; }
+    AI_DL.set(KEY, { done: 0, total: 0, pct: 0, phase: 'runtime' });
+    aiRender();
+    try {
+        await invoke('ai_runtime_download');
+    } catch (e) {
+        AI_DL.delete(KEY);
+        aiRender();
+        toast('运行库下载启动失败：' + ((e && e.message) || e));
+    }
+}
+
 /* 进度事件：后端每 1% 推一次（按百分比节流，见 aimodels::download 的注释）。
  * done / error / canceled 三种收尾都要刷新列表 —— 用户需要看到
  * "下好了，现在能用了" 或 "失败了，为什么"。 */
@@ -7254,30 +7284,64 @@ function aiBindProgress() {
     listen('model-download', (ev) => {
         const p = (ev && ev.payload) || {};
         if (!p.id) return;
-        /* r80g：`runtime` 是"正在下运行库"（69MB 的 zip，解出 11.8MB 的 dll）。
-         * 它是**下载模型的前置步骤**，所以也走同一条进度条 —— 但要能把阶段
-         * 显示清楚，否则用户以为在下一个很小的模型却看到 70MB 的进度。 */
-        if (p.phase === 'runtime' || p.phase === 'downloading') {
+        /* r80p：阶段语义
+         *   `runtime`       —— 正在下运行库（**现在是直接下 11.84MB 的 dll**）
+         *   `runtime-wait`  —— 别的模型正在下运行库，本线程在等它（不要显示 0% 卡住）
+         *   `downloading`   —— 正在下模型
+         * 三种都塞进 AI_DL，让对应的那一行显示进度而不是按钮。 */
+        if (p.phase === 'runtime' || p.phase === 'downloading' || p.phase === 'runtime-wait') {
             AI_DL.set(p.id, {
                 done: p.done || 0, total: p.total || 0,
                 pct: p.pct || 0, phase: p.phase,
             });
             aiRenderModels();
+            aiRenderRuntimeRow();
             return;
         }
         // 收尾：清掉进度状态再刷新（刷新会拿到最新的 downloaded 标记）
         AI_DL.delete(p.id);
+        const isRuntime = p.id === '__runtime__';
         if (p.phase === 'done') {
-            toast('模型下载完成');
+            toast(isRuntime ? '运行库下载完成' : '模型下载完成');
             aiRefresh();
         } else if (p.phase === 'canceled') {
             toast('已取消下载');
             aiRefresh();
         } else {
-            toast('下载失败：' + (p.msg || '未知原因'));
+            toast((isRuntime ? '运行库下载失败：' : '下载失败：') + (p.msg || '未知原因'));
             aiRefresh();
         }
     });
+}
+
+/** 运行库那一行的进度显示（r80p）。
+ *
+ *  有下载在进行 → 进度条取代按钮；否则按"缺不缺"决定显示按钮还是整行隐藏。 */
+function aiRenderRuntimeRow() {
+    const row = $('aiRuntimeRow');
+    const btns = $('aiRuntimeBtns');
+    if (!row || !btns) return;
+    const dl = AI_DL.get('__runtime__');
+    if (dl) {
+        row.hidden = false;
+        const waiting = dl.phase === 'runtime-wait';
+        const label = waiting
+            ? '（另一个下载正在下运行库，等它完成）'
+            : '正在下载运行库';
+        btns.innerHTML = '<div style="flex:1">'
+            + '<div class="ai-dl"><i style="width:' + (dl.pct || 0) + '%"></i></div>'
+            + '<div class="ai-dl-t"><span>' + label + '</span>'
+            + (waiting ? '' : '<span>' + (dl.pct || 0) + '%</span>'
+                + '<span>' + aiSize(dl.done) + ' / ' + aiSize(dl.total) + '</span>')
+            + '</div></div>';
+        return;
+    }
+    // 没有进度 → 恢复按钮（行本身显不显示由 aiRender 决定）
+    if (!btns.querySelector('#btnAiRuntimeDl')) {
+        btns.innerHTML = '<button class="btn primary" id="btnAiRuntimeDl">下载运行库</button>';
+        const b = $('btnAiRuntimeDl');
+        if (b) b.addEventListener('click', () => aiDownloadRuntime());
+    }
 }
 
 /* 初始化：拉一次状态（模型列表 / 运行时 / 选中的模型）。

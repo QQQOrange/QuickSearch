@@ -44,7 +44,6 @@
 
 use std::io::Read;
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
 
 /// 模型清单的一项：够不够用、多大、从哪下、校验值。
 #[derive(Clone, Debug, serde::Serialize)]
@@ -134,6 +133,7 @@ pub const MODELS: &[ModelSpec] = &[
              * 都实测 206 + ONNX 文件头（`08 06 12 07 70 79` = protobuf 的
              * field1/field2 + "py"）验证过。
              * RMBG 那三个才有 modelscope 源（那是 briaai 的模型，魔搭有镜像）。 */
+            "https://gh-proxy.com/https://github.com/QQQOrange/QuickSearch/releases/download/v1.1.1/u2netp.onnx",
             "https://hf-mirror.com/tomjackson2023/rembg/resolve/main/u2netp.onnx",
             "https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2netp.onnx",
         ],
@@ -149,6 +149,7 @@ pub const MODELS: &[ModelSpec] = &[
         note: "42 MB，人像/产品照片效果好；图标上会把文字与底座当噪声删掉。",
         bytes: 44_403_226,
         urls: &[
+            "https://gh-proxy.com/https://github.com/QQQOrange/QuickSearch/releases/download/v1.1.1/rmbg-quantized.onnx",
             "https://www.modelscope.cn/models/AI-ModelScope/RMBG-1.4/resolve/master/onnx/model_quantized.onnx",
             "https://hf-mirror.com/briaai/RMBG-1.4/resolve/main/onnx/model_quantized.onnx",
             "https://huggingface.co/briaai/RMBG-1.4/resolve/main/onnx/model_quantized.onnx",
@@ -165,6 +166,7 @@ pub const MODELS: &[ModelSpec] = &[
         note: "84 MB，比量化版准一点、比全精度小一半。",
         bytes: 88_217_533,
         urls: &[
+            "https://gh-proxy.com/https://github.com/QQQOrange/QuickSearch/releases/download/v1.1.1/rmbg-fp16.onnx",
             "https://www.modelscope.cn/models/AI-ModelScope/RMBG-1.4/resolve/master/onnx/model_fp16.onnx",
             "https://hf-mirror.com/briaai/RMBG-1.4/resolve/main/onnx/model_fp16.onnx",
             "https://huggingface.co/briaai/RMBG-1.4/resolve/main/onnx/model_fp16.onnx",
@@ -181,6 +183,7 @@ pub const MODELS: &[ModelSpec] = &[
         note: "168 MB，官方原始精度。追求照片级效果时用，图标场景没必要。",
         bytes: 176_153_355,
         urls: &[
+            "https://gh-proxy.com/https://github.com/QQQOrange/QuickSearch/releases/download/v1.1.1/rmbg-full.onnx",
             "https://www.modelscope.cn/models/AI-ModelScope/RMBG-1.4/resolve/master/onnx/model.onnx",
             "https://hf-mirror.com/briaai/RMBG-1.4/resolve/main/onnx/model.onnx",
             "https://huggingface.co/briaai/RMBG-1.4/resolve/main/onnx/model.onnx",
@@ -440,7 +443,26 @@ pub fn cleanup_stale() -> (Vec<String>, u64) {
     let mut removed: Vec<String> = Vec::new();
     let mut bytes: u64 = 0;
 
-    // 1+2. 当前模型目录里的中间产物
+    /* ⚠ r80o：**别删正在下载的 .part**。
+     *
+     * 这个函数在每次启动时都会跑（也挂了个「清理残留」按钮）。而用户可能
+     * 一边下着 168MB 的模型、一边又去点那个按钮 —— 那样会把人家下到 90%
+     * 的临时文件删掉，白下。
+     *
+     * 判断依据用**修改时间**：正在写的文件 mtime 一直在更新，
+     * 所以"5 分钟内动过的 .part"一律跳过。这个阈值够宽松（真实下载
+     * 每 64KB 就会写一次），也够严格（中断的下载不会再更新 mtime）。 */
+    let now = std::time::SystemTime::now();
+    const ACTIVE_WINDOW: std::time::Duration = std::time::Duration::from_secs(300);
+    let is_active = |p: &std::path::Path| -> bool {
+        p.metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| now.duration_since(t).ok())
+            .map(|age| age < ACTIVE_WINDOW)
+            .unwrap_or(false)
+    };
+
     /* 先定义一个"这个文件是不是垃圾"的小判断，两处复用 ——
      * 免得同样的后缀列表写两遍（写两遍迟早会漏一处）。 */
     fn is_junk(name: &str) -> bool {
@@ -453,6 +475,7 @@ pub fn cleanup_stale() -> (Vec<String>, u64) {
     fn sweep(
         dir: &std::path::Path,
         pred: &dyn Fn(&str) -> bool,
+        skip_active: &dyn Fn(&std::path::Path) -> bool,
         removed: &mut Vec<String>,
     ) -> u64 {
         let mut freed = 0u64;
@@ -461,6 +484,10 @@ pub fn cleanup_stale() -> (Vec<String>, u64) {
             let p = e.path();
             let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
             if !pred(name) {
+                continue;
+            }
+            // 正在下的（.part 且 mtime 很新）跳过
+            if skip_active(&p) {
                 continue;
             }
             let sz = e.metadata().map(|m| m.len()).unwrap_or(0);
@@ -474,7 +501,7 @@ pub fn cleanup_stale() -> (Vec<String>, u64) {
 
     // 1+2. 当前模型目录里的中间产物（.part / zip）
     let cur = models_dir();
-    bytes += sweep(&cur, &is_junk, &mut removed);
+    bytes += sweep(&cur, &is_junk, &is_active, &mut removed);
 
     /* 3. 旧位置的模型（数据目录下的 models/）—— 连 .onnx 一起清，
      *    因为那是 r80g 改默认位置之前下的，现在已经用不上了。
@@ -484,6 +511,7 @@ pub fn cleanup_stale() -> (Vec<String>, u64) {
         bytes += sweep(
             &legacy,
             &|n| is_junk(n) || n.ends_with(".onnx"),
+            &is_active,
             &mut removed,
         );
         // 4. 旧目录空了就把目录也删掉（非空则留着，不碰用户自己放的东西）
@@ -537,34 +565,63 @@ static CANCEL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::ne
 ///   · 线程 C 写到一半，线程 D 去读 → "找不到 EOCD"（读到不完整的文件）
 ///   · 谁都没成功 → 界面看起来就是"下完了又下一遍"，而且每轮都失败
 ///
-/// 修法有两层：
-///   1. **这个锁**：同一时刻只让一个下载跑（后来的排队等，而不是齐头并进）
-///   2. 临时文件名带**唯一后缀**（见 `download_runtime`）——
-///      万一将来真的允许并行，也不会再互相踩
+/// 「运行库下载」的门闩 —— **只串行运行库，不串行模型**（r80o 按用户要求改）。
 ///
-/// 用 `compare_exchange` 而不是 `Mutex`：这里要的是"忙就等着"，
-/// 不需要锁保护共享数据（共享的只有环境变量与文件系统）。
-static BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// # 为什么不再用"全局只允许一个下载"
+///
+/// 用户明确要求：**「运行库跟每一个模型都可以同时下载，也都要单独下」**。
+/// 所以模型之间必须能并行。但运行库有个特殊性：它是**同一个文件**
+/// （`onnxruntime.dll`），多个模型同时下会重复下同一个 69MB —— 纯浪费。
+///
+/// 于是拆成两层：
+///   · **模型**：完全并行，各用各的 `.part`（文件名里带模型 id，天然不冲突）
+///   · **运行库**：同一时刻只让一个线程去下，其它线程**等它下完**再继续
+///
+/// 等待用 `Condvar` 而不是自旋：等多长时间取决于网速（可能几十秒），
+/// 自旋会白烧 CPU；`Condvar::wait_timeout` 还能定期复查"是不是已经下好了"。
+static RUNTIME_GATE: std::sync::Mutex<bool> = std::sync::Mutex::new(false);
+static RUNTIME_CV: std::sync::Condvar = std::sync::Condvar::new();
 
-/// 拿下载锁；已在下载就返回 `None`（让调用方给用户一句明确的话）。
-pub(crate) struct BusyGuard;
-
-impl BusyGuard {
-    pub(crate) fn try_acquire() -> Option<BusyGuard> {
-        if BUSY
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
-        {
-            Some(BusyGuard)
-        } else {
-            None
-        }
+/// 确保运行库就绪。已经在下了就**等**，不重复下。
+///
+/// `progress` 会在"正在等待别人下"时给一句提示（`phase = "runtime-wait"`），
+/// 否则用户看着进度条不动会以为卡死。
+pub fn ensure_runtime(
+    progress: &mut dyn FnMut(&str, u64, u64),
+) -> Result<std::path::PathBuf, String> {
+    if runtime_ready() {
+        return Ok(runtime_path());
     }
-}
-
-impl Drop for BusyGuard {
-    fn drop(&mut self) {
-        BUSY.store(false, Ordering::SeqCst);
+    // 抢"由我来下"的资格
+    let mut busy = match RUNTIME_GATE.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    loop {
+        if runtime_ready() {
+            return Ok(runtime_path());
+        }
+        if !*busy {
+            *busy = true;
+            drop(busy);
+            // 由本线程下载；结束后唤醒等待者
+            let r = download_runtime(progress);
+            let mut b2 = match RUNTIME_GATE.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            *b2 = false;
+            RUNTIME_CV.notify_all();
+            return r;
+        }
+        // 别人正在下 → 等 400ms 再看一眼（顺便给界面一句提示）
+        progress("runtime-wait", 0, RUNTIME_ZIP_BYTES);
+        let (g, _timeout) = match RUNTIME_CV.wait_timeout(busy, std::time::Duration::from_millis(400))
+        {
+            Ok(x) => x,
+            Err(p) => p.into_inner(),
+        };
+        busy = g;
     }
 }
 
@@ -590,15 +647,38 @@ fn take_cancel() -> bool {
  *   · 推理前把 `ORT_DYLIB_PATH` 指向那个目录（ort 支持这个环境变量，见它的 lib.rs）
  * ══════════════════════════════════════════════════════════════════════════ */
 
-/// 运行时文件的下载源（ONNX Runtime 1.22.0 官方 win-x64 包里的 dll）。
+/// **运行时 dll 的直接下载源**（r80p：优先走这条，不再下 69MB 的 zip）。
 ///
-/// 为什么不用 `ort-sys` 编译期下载的那个：那要求编译期联网（实测常失败），
-/// 而且会把 dll 打进程序目录。这里改成**运行期**下到模型目录，用户可以自己选位置。
+/// # 为什么改了
+///
+/// 用户报「有个运行库一直没下下来」「下载速度特别慢」。实测两个原因：
+///
+/// 1. **源太慢**：官方 GitHub 直连在本机 0 MB/s（20 秒收不到数据）；
+///    gh-proxy 加速后能到 10 MB/s，但要下 **69MB 的 zip** 才能拿到 11.84MB 的 dll
+///    —— 白下 57MB
+/// 2. **失败点多**：zip 要解压，一旦文件不完整就报"找不到 EOCD"
+///    （实测用户机器上留了个 71,529,644 字节的残缺 zip，比完整的小 0.8MB）
+///
+/// 所以现在**直接把 dll 当 release 资产传上去**，下载就是一次纯拷贝：
+/// 11.84MB、无解压、无中间文件。zip 那条路保留作为兜底（万一资产被删）。
+pub const RUNTIME_DLL_URLS: &[&str] = &[
+    // 自己的 release（gh-proxy 加速，实测 ~10 MB/s）
+    "https://gh-proxy.com/https://github.com/QQQOrange/QuickSearch/releases/download/v1.1.1/onnxruntime.dll",
+    "https://ghfast.top/https://github.com/QQQOrange/QuickSearch/releases/download/v1.1.1/onnxruntime.dll",
+    "https://github.com/QQQOrange/QuickSearch/releases/download/v1.1.1/onnxruntime.dll",
+];
+
+/// 运行时 dll 的期望大小（校验用：下少了/下成错误页会被拒）。
+///
+/// 12,418,080 字节 = 上传到 release 的那个 dll 的实测大小。
+pub const RUNTIME_DLL_BYTES: u64 = 12_418_080;
+
+/// **运行时文件的下载源**（ONNX Runtime 1.22.0 官方 win-x64 包里的 dll）—— **兜底路径**。
+///
+/// 只在 `RUNTIME_DLL_URLS` 全失败时才会走这里：下整个 zip 再解出 dll。
 ///
 /// ⚠ 从 zip 里取单个文件需要解压 —— 所以这里下的是**整个 zip**（69MB），
-/// 解压后只留 dll、把 zip 删掉。这样脚本最少（不用处理 zip 内偏移）。
-/// 国内镜像（同 GitHub 文件的加速）没有稳定可用的，所以这一步走官方源；
-/// 官方源实测可达（69MB / 189 秒）。
+/// 解压后只留 dll、把 zip 删掉。
 pub const RUNTIME_ZIP_URLS: &[&str] = &[
     // 国内加速镜像优先（实测 206 + 1.7 秒响应）；官方源兜底
     "https://gh-proxy.com/https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-win-x64-1.22.0.zip",
@@ -609,10 +689,123 @@ pub const RUNTIME_ZIP_URLS: &[&str] = &[
 /// 下完 zip 后，里面这个相对路径就是我们要的 dll。
 pub const RUNTIME_ZIP_INNER: &str = "onnxruntime-win-x64-1.22.0/lib/onnxruntime.dll";
 
-/// 运行库的体积（zip，字节）。界面进度条要用。
+/// 运行库的体积（zip，字节）。界面进度条要用（兜底路径才用到）。
 pub const RUNTIME_ZIP_BYTES: u64 = 72_368_545;   // 官方 Content-Length 实测值
 
+/// **直接下载 dll**（r80p：首选路径）。返回落盘路径。
+///
+/// 比"下 zip 再解压"好在三点：
+///   · **小 57MB**：11.84MB vs 69MB
+///   · **没有解压**：少一个失败点（实测"找不到 EOCD"就是解压那步报的）
+///   · **没有中间文件**：不会再留 `onnxruntime.zip` 残骸
+///
+/// 校验方式：下完比**大小**（`RUNTIME_DLL_BYTES`）。为什么不比 SHA256：
+/// 这个 dll 是我们自己 release 的资产、传输链是 TLS，大小对不上（下成错误页 /
+/// 下了一半）是**唯一现实的风险**，而 SHA256 要多读一遍 11.84MB。
+fn download_dll_direct(progress: &mut dyn FnMut(&str, u64, u64)) -> Result<PathBuf, String> {
+    use std::io::Read;
+
+    let dst = runtime_path();
+    if let Some(p) = dst.parent() {
+        std::fs::create_dir_all(p).map_err(|e| format!("建目录失败（{}）：{e}", p.display()))?;
+    }
+    /* 临时文件名唯一（进程 id + 纳秒）—— 虽然运行库有门闩保证单线程，
+     * 但万一有第二个程序实例也在下，不共用名字就不会互相踩。 */
+    let tmp = dst.with_extension(format!(
+        "dll.{}.{}.part",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+
+    let mut failures: Vec<String> = Vec::new();
+    for url in RUNTIME_DLL_URLS {
+        let host = url_host(url);
+        if take_cancel() {
+            let _ = std::fs::remove_file(&tmp);
+            return Err("__CANCELED__".to_string());
+        }
+        let mut reader = match agent().get(url).call() {
+            Ok(r) => r.into_reader(),
+            Err(e) => {
+                failures.push(format!("{host}: {e}"));
+                continue;
+            }
+        };
+        let mut file = match std::fs::File::create(&tmp) {
+            Ok(f) => f,
+            Err(e) => return Err(format!("写临时文件失败（磁盘满？）：{e}")),
+        };
+        let mut buf = vec![0u8; 64 * 1024];
+        let mut done: u64 = 0;
+        let mut last: i64 = -1;
+        let mut broke = false;
+        loop {
+            if take_cancel() {
+                drop(file);
+                let _ = std::fs::remove_file(&tmp);
+                return Err("__CANCELED__".to_string());
+            }
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if let Err(e) = std::io::Write::write_all(&mut file, &buf[..n]) {
+                        let _ = std::fs::remove_file(&tmp);
+                        return Err(format!("写文件失败：{e}"));
+                    }
+                    done += n as u64;
+                    let pct = (done.saturating_mul(100))
+                        .checked_div(RUNTIME_DLL_BYTES)
+                        .unwrap_or(0) as i64;
+                    if pct != last {
+                        last = pct;
+                        progress("runtime", done, RUNTIME_DLL_BYTES);
+                    }
+                }
+                Err(e) => {
+                    failures.push(format!("{host}: 中断 {e}"));
+                    broke = true;
+                    break;
+                }
+            }
+        }
+        let _ = std::io::Write::flush(&mut file);
+        drop(file);
+        if broke {
+            let _ = std::fs::remove_file(&tmp);
+            continue;
+        }
+        // 大小校验：少了说明没下完，多了/差太多说明下成了别的（比如 HTML 错误页）
+        if done != RUNTIME_DLL_BYTES {
+            failures.push(format!(
+                "{host}: 大小不对（期望 {RUNTIME_DLL_BYTES}，实际 {done}）"
+            ));
+            let _ = std::fs::remove_file(&tmp);
+            continue;
+        }
+        progress("runtime", done, done);
+        let _ = std::fs::remove_file(&dst);
+        std::fs::rename(&tmp, &dst).map_err(|e| format!("落盘失败：{e}"))?;
+        crate::win::log(&format!(
+            "download_dll_direct: 从 {host} 下完 {}（{}）",
+            human_size(done),
+            dst.display()
+        ));
+        return Ok(dst);
+    }
+    let _ = std::fs::remove_file(&tmp);
+    Err(if failures.is_empty() {
+        "没有可用的运行库下载源".to_string()
+    } else {
+        failures.join("\n")
+    })
+}
+
 /// 下载并解出运行库到模型目录。返回落盘的 dll 路径。
+///
+/// **先试直下 dll**（11.84MB，无解压），全失败才退回"下 zip 再解压"。
 ///
 /// `progress`：`(阶段, 已下, 总)`。阶段是 "runtime"，让界面能显示
 /// "正在下载运行库" 而不是笼统的"下载中"。
@@ -622,16 +815,27 @@ pub fn download_runtime(progress: &mut dyn FnMut(&str, u64, u64)) -> Result<Path
     if runtime_ready() {
         return Ok(runtime_path());
     }
+    take_cancel();
+
+    /* ---- 首选：直接下 dll ---- */
+    match download_dll_direct(progress) {
+        Ok(p) => return Ok(p),
+        Err(e) if e == "__CANCELED__" => return Err(e),
+        Err(e) => {
+            crate::win::log(&format!("download_runtime: 直下 dll 失败，改走 zip。原因：{e}"));
+        }
+    }
+
+    /* ---- 兜底：下 zip 再解压 ---- */
     let dir = models_dir();
     std::fs::create_dir_all(&dir).map_err(|e| format!("建目录失败（{}）：{e}", dir.display()))?;
 
     /* ⚠ r80i：临时文件带**唯一后缀**，不再叫固定的 `onnxruntime.zip`。
      *
      * 为什么：原来四个下载并发跑时共用这一个文件名，互相删、互相读到半个文件，
-     * 结果是"每个源都报解压失败、界面看着像重复下载"（实测日志见 `BUSY` 的注释）。
-     * 现在加了下载锁（并发已被挡住），但文件名仍然不共用 ——
-     * 这是**第二层保险**：万一将来放开了并行、或者有别的进程在同一个目录里下，
-     * 也不会再互相踩。进程 id + 纳秒时间戳足够唯一。 */
+     * 结果是"每个源都报解压失败、界面看着像重复下载"。
+     * 现在运行库有门闩（同一时刻只有线程在下），但文件名仍然不共用 ——
+     * 这是**第二层保险**。进程 id + 纳秒时间戳足够唯一。 */
     let zip_path = dir.join(format!(
         "onnxruntime-{}-{}.zip.part",
         std::process::id(),

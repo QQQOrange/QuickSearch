@@ -218,11 +218,19 @@
             </div>
             <label class="sw"><input type="checkbox" id="s-aiMatting"><i></i></label>
         </div>
-        <!-- 运行时缺失是硬阻塞（模型能下，但没有 onnxruntime.dll 就跑不了推理），
-             这条提示只在真的缺时才出现 -->
+        <!-- 运行时缺失是硬阻塞（模型能下，但没有 onnxruntime.dll 就跑不了推理）。
+             这条只在真的缺时才出现。
+             r80p：给一个**独立下载按钮** —— 用户要求
+             「这个运行库一直没下下来，也要在设置里提供一个下载的选项」。
+             以前写的是"重新下载完整程序包"，那是 r80g 之前的口径（dll 随包），
+             现在是按需下载，文案一起改。 -->
         <div class="row" id="aiRuntimeRow" hidden>
             <div class="rt"><b>⚠ 缺少推理运行时</b>
-                <small>程序目录里没有 <code>onnxruntime.dll</code>，AI 抠图无法运行。重新下载完整程序包可恢复</small>
+                <small>还没有 <code>onnxruntime.dll</code>（11.84MB），AI 抠图无法运行。
+                    点右边「下载运行库」即可，会存到模型目录里。</small>
+            </div>
+            <div class="am-b" id="aiRuntimeBtns">
+                <button class="btn primary" id="btnAiRuntimeDl">下载运行库</button>
             </div>
         </div>
         <div id="aiModelWrap" hidden>

@@ -9024,37 +9024,35 @@ fn ai_matting_download(app: AppHandle, id: String) -> Result<(), String> {
     let Some(spec) = aimodels::find(&id) else {
         return Err(format!("未知的模型：{id}"));
     };
-    /* r80i：**在这里就拿下载锁**（同步、进入命令时），拿不到就直接报错 ——
-     * 不能让两个下载同时跑。
+    /* r80o：**允许并行下载** —— 用户明确要求
+     * 「运行库跟每一个模型都可以同时下载，也都要单独下」。
      *
-     * ⚠ 锁的位置很关键：必须在 **spawn 之前**、且覆盖 **运行库 + 模型两段**。
-     * 我第一版把锁放在 `aimodels::download()` 里面，结果盖不住它前面的
-     * "下运行库"那一段 —— 两个线程照样并发下同一个 `onnxruntime.zip`，
-     * 互相删、互相读到半个文件，日志里每个源都报"解压失败 找不到 EOCD"。
-     * 探针 r80j 的 1a/1b 就是抓这个的。 */
-    let Some(guard) = aimodels::BusyGuard::try_acquire() else {
-        return Err("已经有一个下载在进行中，请等它结束（或点「取消」）再试".to_string());
-    };
+     * 所以这里**不再有全局下载锁**。并行的安全性由两件事保证：
+     *   1. 每个模型用自己的 `.part`（文件名里带模型 id），互不覆盖
+     *   2. 运行库是同一个文件，由 `aimodels::ensure_runtime` 做"只让一个线程下、
+     *      其它线程等它下完"的门闩 —— 不会重复下 69MB
+     *
+     * ⚠ 历史教训（r80i）：曾经并发下同一个 `onnxruntime.zip`，互相删文件、
+     * 读到半个 zip，日志里每个源都报"解压失败 找不到 EOCD"。
+     * 现在 zip 用唯一文件名，运行库又有门闩，这个坑堵死了。 */
     win::log(&format!("ai_matting_download: 开始 {}", spec.id));
     std::thread::spawn(move || {
-        // 锁跟着线程走（`guard` 被 move 进来），线程结束自动释放
-        let _guard = guard;
         let ev = |payload: Value| {
             let _ = app.emit(aimodels::EVENT_PROGRESS, payload);
         };
 
-        /* ---- 第 1 步：运行库（不在就先下）----
-         *
-         * 单独给一个 `phase: "runtime"`：界面上要能显示"正在下载运行库（69MB）"
-         * 而不是笼统的"下载中" —— 第一次点下载的用户看到进度条从 0 开始涨、
-         * 却不知道在下什么大文件，体验很差。 */
+        /* ---- 第 1 步：运行库（不在就先下；已有别的线程在下就等它）---- */
         if !aimodels::runtime_ready() {
-            ev(json!({
-                "id": spec.id, "phase": "runtime",
-                "done": 0, "total": aimodels::RUNTIME_ZIP_BYTES, "pct": 0,
-            }));
             let mut last_rt = 0i64;
-            let r = aimodels::download_runtime(&mut |_stage, done, total| {
+            let r = aimodels::ensure_runtime(&mut |stage, done, total| {
+                if stage == "runtime-wait" {
+                    // 别的线程正在下运行库 —— 告诉界面"在等"，别让它看着像卡死
+                    ev(json!({
+                        "id": spec.id, "phase": "runtime-wait",
+                        "done": 0, "total": total, "pct": 0,
+                    }));
+                    return;
+                }
                 let pct = (done.saturating_mul(100)).checked_div(total).unwrap_or(0) as i64;
                 if pct != last_rt {
                     last_rt = pct;
@@ -9065,7 +9063,7 @@ fn ai_matting_download(app: AppHandle, id: String) -> Result<(), String> {
                 }
             });
             match r {
-                Ok(p) => win::log(&format!("ai_matting_download: 运行库就绪 {}", p.display())),
+                Ok(_) => win::log(&format!("ai_matting_download: {} 运行库就绪", spec.id)),
                 Err(e) if e == "__CANCELED__" => {
                     ev(json!({ "id": spec.id, "phase": "canceled", "msg": "已取消" }));
                     return;
@@ -9111,6 +9109,55 @@ fn ai_matting_download(app: AppHandle, id: String) -> Result<(), String> {
             Err(e) => {
                 win::log(&format!("ai_matting_download: {} 失败 {e}", spec.id));
                 ev(json!({ "id": spec.id, "phase": "error", "msg": e }));
+            }
+        }
+    });
+    Ok(())
+}
+
+/// **单独下载运行库**（r80p 新增）。
+///
+/// 用户要求：「这个运行库一直是没下下来，这个你也要优化一下具体的下载方式，
+/// 也要在设置通用 ai 抠图里面提供一个下载的选项」。
+///
+/// 所以给运行库一个独立入口，不必非点某个模型才触发。
+/// 进度事件的 `id` 用固定值 `__runtime__`，前端据此定位到运行库那一行。
+#[tauri::command]
+fn ai_runtime_download(app: AppHandle) -> Result<(), String> {
+    if aimodels::runtime_ready() {
+        return Ok(()); // 已经在，不必再下
+    }
+    win::log("ai_runtime_download: 开始");
+    std::thread::spawn(move || {
+        let ev = |payload: Value| {
+            let _ = app.emit(aimodels::EVENT_PROGRESS, payload);
+        };
+        let mut last = -1i64;
+        let r = aimodels::ensure_runtime(&mut |stage, done, total| {
+            if stage == "runtime-wait" {
+                ev(json!({ "id": "__runtime__", "phase": "runtime-wait", "done": 0, "total": total, "pct": 0 }));
+                return;
+            }
+            let pct = (done.saturating_mul(100)).checked_div(total).unwrap_or(0) as i64;
+            if pct != last {
+                last = pct;
+                ev(json!({
+                    "id": "__runtime__", "phase": "runtime",
+                    "done": done, "total": total, "pct": pct,
+                }));
+            }
+        });
+        match r {
+            Ok(p) => {
+                win::log(&format!("ai_runtime_download: 完成 {}", p.display()));
+                ev(json!({ "id": "__runtime__", "phase": "done", "done": 1, "total": 1, "pct": 100 }));
+            }
+            Err(e) if e == "__CANCELED__" => {
+                ev(json!({ "id": "__runtime__", "phase": "canceled", "msg": "已取消" }));
+            }
+            Err(e) => {
+                win::log(&format!("ai_runtime_download: 失败 {e}"));
+                ev(json!({ "id": "__runtime__", "phase": "error", "msg": e }));
             }
         }
     });
@@ -11912,6 +11959,8 @@ fn main() {
             ai_matting_remove,
             ai_matting_download,
             ai_matting_cancel,
+            // r80p：单独下载运行库（用户要求提供独立下载入口）
+            ai_runtime_download,
             // r80g：模型存放位置（直达 / 更换 / 迁移）
             ai_model_dir_info,
             ai_model_dir_pick,
