@@ -35,6 +35,54 @@
     var conf = null;
     var raf = 0;
     var liveRaf = 0;              // 实时模式的 rAF 循环句柄（0 = 没在跑）
+    /** 帧率上限（r84）。
+     *
+     *  # 为什么要限帧（实测数据）
+     *
+     *  横条显示期间，`raf`（重绘链）与 `liveRaf`（实时抓屏链）是**两条独立的
+     *  requestAnimationFrame 循环**，各自按显示器刷新率跑。在探针里数过：
+     *
+     *  | 配置 | 显示期间 rAF 调用频率 |
+     *  |---|---|
+     *  | 实时折射关 | **≈94 次/秒**（本该 60） |
+     *  | 实时折射开 | **≈182 次/秒**（两条链叠加） |
+     *
+     *  这直接体现为空闲 CPU：同一份配置，只把 `bar_glass_live` 从 true 改成 false，
+     *  空闲 CPU 从 **27% 掉到 0.5%**（严格清场、单变量的 A/B，见
+     *  `qs_audit/idle_cpu_ab.py`）。
+     *
+     *  但对横条这种**静止的小 UI**来说，90~180fps 完全没有意义：
+     *  画面只在三件事上变 —— 弹出时的淡入（180ms）、鼠标靠近的光斑、
+     *  以及实时模式下背景被抓屏刷新。30fps 已经看不出任何区别，
+     *  却能把这条常驻开销砍到原来的 1/3 ~ 1/6。
+     *
+     *  # 为什么不用 setInterval
+     *
+     *  rAF 仍是驱动（它跟显示器 vsync 对齐、标签页隐藏时自动暂停 ——
+     *  这是 setInterval 给不了的）。限帧只在回调**入口**做一个时间判断：
+     *  距上一帧不足 `MIN_FRAME_MS` 就直接排下一帧返回。
+     */
+    var MIN_FRAME_MS = 1000 / 30;   // 30fps 上限
+    var lastFrameAt = 0;
+    /** 实时抓屏链的帧间隔（比重绘更宽）。
+     *
+     *  抓屏一次要 BitBlt 一块 852×176 的区域、编码成 600KB 再走 IPC，
+     *  开销比"重画一帧着色器"大一个量级；而它的作用是让**背景**跟上
+     *  桌面变化（比如背后在放视频），15fps 已经完全看不出滞后。
+     *  再叠加上"在途去重"，实际不会真按这个频率抓到屏。 */
+    var LIVE_FRAME_MS = 1000 / 15;
+    var lastLiveAt = 0;
+    /** 这一帧该不该跳过（限帧判据）。
+     *
+     *  ⚠ `force` 用于**必须立刻生效**的那些帧：淡入动画的头几帧、
+     *  抓屏刚落地要立刻换纹理 —— 那些帧如果被限掉，用户会看到
+     *  "横条弹出来先卡一下"或"玻璃晚半拍才跟上"。 */
+    function frameTooSoon(now, force) {
+        if (force) { lastFrameAt = now; return false; }
+        if (now - lastFrameAt < MIN_FRAME_MS) return true;
+        lastFrameAt = now;
+        return false;
+    }
     var liveStarting = false;     // 正在异步开启（等 glass_exclude 回执）
     var excluded = false;         // 横条已对抓屏隐身（WDA_EXCLUDEFROMCAPTURE 生效中）
     var captureBusy = false;      // 一次抓屏在途（去重，杜绝叠加隐藏）
@@ -505,6 +553,13 @@ var barGhost = false;
         if (reveal < 1) {
             reveal = Math.min(1, (now - revealT0) / 180);
         }
+        /* 限帧（r84）：淡入还没走完时**不跳帧**（那 180ms 是用户唯一盯着看的
+         * 动画，跳帧会看出顿挫）；淡入完成后按 30fps 跑就够。 */
+        var force = reveal < 1;
+        if (frameTooSoon(now, force)) {
+            raf = requestAnimationFrame(frame);
+            return;
+        }
         draw(now);
         if (shown && (reveal < 1 || pointer[0] >= 0 || (conf && conf.barGlassLive))) {
             raf = requestAnimationFrame(frame);
@@ -535,10 +590,16 @@ var barGhost = false;
         liveRaf = requestAnimationFrame(liveTick);
     }
 
-    function liveTick() {
+    function liveTick(now) {
         liveRaf = 0;
         if (!shown || !glassOn(conf) || conf.barGlassLive !== true || !gl) return;  // 链条到此为止
         liveRaf = requestAnimationFrame(liveTick);
+        /* 限帧（r84）：实时抓屏这条链和 `raf` 那条是**各自独立的 rAF 循环**，
+         * 两条都按刷新率跑时叠加出 180+ 次/秒（实测数据见 MIN_FRAME_MS 那段）。
+         * 抓屏这一路限得更宽：它每次都要 BitBlt + 传 600KB，本来就没必要
+         * 跟显示刷新率同频；而且抓屏在途时（captureBusy）下面本来就会跳过。 */
+        if (now - lastLiveAt < LIVE_FRAME_MS) return;
+        lastLiveAt = now;
         if (captureBusy) return;                    // 上一轮抓屏还没回，等下一帧
         if (excluded) {
             captureOnce(false);                    // 主路：直抓，横条不用躲
