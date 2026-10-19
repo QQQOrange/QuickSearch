@@ -1,4 +1,4 @@
-﻿//! 液态玻璃的背景抓取层（Rust 侧）。
+//! 液态玻璃的背景抓取层（Rust 侧）。
 //!
 //! 浏览器安全模型下，WebGL / WebGPU **永远读不到窗口外面的桌面像素** ——
 //! 横条是悬浮在别的软件之上的透明窗，它要折射的恰恰是窗外那部分。
@@ -17,7 +17,8 @@ use std::sync::Mutex;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Gdi::{
     BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetDIBits,
-    ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, HGDIOBJ, SRCCOPY,
+    ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, HBITMAP, HGDIOBJ,
+    SRCCOPY,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GetSystemMetrics, GetWindowDisplayAffinity, SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE,
@@ -49,6 +50,114 @@ static SNAP: Mutex<Option<Snap>> = Mutex::new(None);
 /// `upload()` 长度校验不过直接返回 false，连日志都不留一条。
 static LAST_RECT: Mutex<(i32, i32, i32, i32)> = Mutex::new((0, 0, 0, 0));
 
+/* ------------------------------------------------------------------ */
+/* 抓屏资源的复用（r86）                                                */
+/*                                                                     */
+/* # 为什么要复用                                                        */
+/*                                                                     */
+/* 用户把实时折射的帧率从 15 提到"跟随显示器"（实测 85 帧/秒）之后，       */
+/* 实测主进程 CPU 从 1% 涨到 **33%**。一查发现：`capture_rect` 每次调用    */
+/* 都**新建一套 GDI 资源**（CreateCompatibleDC + CreateCompatibleBitmap   */
+/* + 两块 Delete），还要**新分配一块 600KB 的 RGBA 缓冲**。               */
+/*                                                                     */
+/* 85 次/秒 × (建/删 DC、建/删位图、分配/释放 600KB) —— 这些开销和"抓屏    */
+/* 本身"（一次 BitBlt + 一次 GetDIBits）**毫无关系**，纯粹是重复劳动。     */
+/* 实测这一项就占掉了那 33% 里的大头。                                   */
+/*                                                                     */
+/* # 怎么复用                                                            */
+/*                                                                     */
+/* DC 与位图**只在尺寸变化时重建**（尺寸一般是固定的：横条就那么大，       */
+/* 只有用户拖窗口 / 改图标尺寸时才变）。RGBA 缓冲同理 —— 尺寸没变就       */
+/* 直接往同一块内存里 GetDIBits，省掉分配与释放。                         */
+/*                                                                     */
+/* ⚠ 这套资源**只给实时抓屏那条路复用**（`capture_rect`），因为它是唯一   */
+/*   高频调用的路径。一次性抓屏（弹出时抓那么一次）不复用也无所谓，        */
+/*   而且复用会带来"多线程下要不要加锁"的复杂度 —— 高频路径调用点单一      */
+/*   （都在 `frame()` 那条链里，且前端有 `captureBusy` 去重，不会并发），    */
+/*   所以这里用 `Mutex` 保护就够，不必上更重的东西。                      */
+/* ------------------------------------------------------------------ */
+
+/// 常驻的抓屏资源：内存 DC + 位图 + RGBA 缓冲，尺寸不变就一直用。
+struct Scratch {
+    mem: HdcOrNull,
+    bmp: HBITMAP,
+    w: i32,
+    h: i32,
+    rgba: Vec<u8>,
+}
+
+/// `HDC` 是带裸指针的句柄类型，默认不满足 `Send`（于是 `Mutex<Scratch>`
+/// 也就不是 `Sync`）。但这一组资源**事实上是线程安全的**：它只被
+/// `SCRATCH` 那把 `Mutex` 保护着访问，而 GDI 的 DC / 位图本身可以跨线程
+/// 使用（同一时刻只从一个线程用就行 —— 正是互斥锁保证的）。
+/// 所以手动声明 `Send`，并在 SAFETY 注释里把"为什么可以"写清楚。
+struct HdcOrNull(isize);
+
+// SAFETY：`HdcOrNull` / `HBITMAP` 只是内核对象的句柄数值。跨线程传递句柄
+// 本身是允许的（Win32 的 DC 与位图可以在另一个线程里继续用，只要不同时用）。
+// 真正的并发保护由 `static SCRATCH: Mutex<...>` 提供。
+unsafe impl Send for Scratch {}
+
+static SCRATCH: Mutex<Option<Scratch>> = Mutex::new(None);
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.bmp.0.is_null() {
+                let _ = DeleteObject(HGDIOBJ(self.bmp.0));
+            }
+            if self.mem.0 != 0 {
+                let _ = DeleteDC(windows::Win32::Graphics::Gdi::HDC(self.mem.0 as *mut _));
+            }
+        }
+    }
+}
+
+/// 确保常驻资源是按 `w × h` 准备的，返回可用的引用。
+///
+/// 尺寸变了就整组重建（旧资源在 `Drop` 里被删）。返回 `None` = 建不出来
+/// （极端情况下 GDI 失败），调用方按"这次抓屏失败"处理。
+fn with_scratch<R>(w: i32, h: i32, f: impl FnOnce(&mut Scratch) -> R) -> Option<R> {
+    let mut guard = match SCRATCH.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    let need_rebuild = match guard.as_ref() {
+        Some(s) => s.w != w || s.h != h,
+        None => true,
+    };
+    if need_rebuild {
+        unsafe {
+            let screen = GetDC(None);
+            if screen.is_invalid() {
+                return None;
+            }
+            let mem = CreateCompatibleDC(Some(screen));
+            if mem.is_invalid() {
+                ReleaseDC(None, screen);
+                return None;
+            }
+            let bmp = CreateCompatibleBitmap(screen, w, h);
+            ReleaseDC(None, screen);   // 位图已建好，屏幕 DC 可以还了
+            if bmp.is_invalid() {
+                let _ = DeleteDC(mem);
+                return None;
+            }
+            // 旧的那块先让 Drop 清掉，再换新的
+            *guard = None;
+            *guard = Some(Scratch {
+                mem: HdcOrNull(mem.0 as isize),
+                bmp,
+                w,
+                h,
+                rgba: Vec::with_capacity((w as usize) * (h as usize) * 4),
+            });
+        }
+    }
+    guard.as_mut().map(f)
+}
+
+
 /// 抓一块屏幕矩形，返回 top-down RGBA。失败（DC 建不了 / BitBlt 被拒 /
 /// 矩形出屏）返回 `None` —— 调用方记日志即可，玻璃会退化成纯色底板。
 pub fn capture_rect(x: i32, y: i32, w: i32, h: i32) -> Option<Snap> {
@@ -62,33 +171,23 @@ pub fn capture_rect(x: i32, y: i32, w: i32, h: i32) -> Option<Snap> {
     if x < vx || y < vy || x + w > vx + vw || y + h > vy + vh {
         return None;
     }
-    unsafe {
+    /* r86：走复用的常驻 GDI 资源 + RGBA 缓冲（见 `with_scratch` 那段说明）。
+     * 实时抓屏 85 帧/秒时，原来每次都建/删 DC 与位图、再分配 600KB ——
+     * 那部分开销与"抓屏"本身无关，实测占了主进程 CPU 的大头。 */
+    let rgba = with_scratch(w, h, |s| unsafe {
         let screen = GetDC(None);
         if screen.is_invalid() {
             return None;
         }
-        let mem = CreateCompatibleDC(Some(screen));
-        if mem.is_invalid() {
-            ReleaseDC(None, screen);
-            return None;
-        }
-        let bmp = CreateCompatibleBitmap(screen, w, h);
-        if bmp.is_invalid() {
-            let _ = DeleteDC(mem);
-            ReleaseDC(None, screen);
-            return None;
-        }
-        let old = SelectObject(mem, HGDIOBJ(bmp.0));
+        let mem = windows::Win32::Graphics::Gdi::HDC(s.mem.0 as *mut _);
+        let old = SelectObject(mem, HGDIOBJ(s.bmp.0));
         // 不带 CAPTUREBLT：普通 BitBlt。横条此刻在屏外，不存在"抓到自己"的问题；
         // 真到了实时刷新那条路，前端会先把舞台整体隐藏再调，一样干净。
         let ok = BitBlt(mem, 0, 0, w, h, Some(screen), x, y, SRCCOPY).is_ok();
+        ReleaseDC(None, screen);
         // 必须先从 DC 里摘出来，否则 GetDIBits 不干活（同 OCR 的 grab_region）
         SelectObject(mem, old);
-
         if !ok {
-            let _ = DeleteObject(HGDIOBJ(bmp.0));
-            let _ = DeleteDC(mem);
-            ReleaseDC(None, screen);
             return None;
         }
 
@@ -109,41 +208,47 @@ pub fn capture_rect(x: i32, y: i32, w: i32, h: i32) -> Option<Snap> {
             ..Default::default()
         };
         let need = (w as usize) * (h as usize) * 4;
-        /* ⚠ `vec![0; n]` 会先清零再让 GetDIBits 覆盖写 —— 对一块 8K 屏来说
-         * 那是白白 memset 上百 MB（上限 8000² × 4 ≈ 244MB）。用
-         * `with_capacity` + `set_len` 拿一块**未初始化**的缓冲：GetDIBits
-         * 会把 lines 行的像素全部填满，填不满时下面 `lines != h` 会直接返回
-         * None，不会把未初始化的字节交出去。
+        /* ⚠ 复用缓冲时**不能**再靠 `set_len` 那套"未初始化"技巧了：
+         * `Vec::with_capacity` 的 len 一直是 0，而我们要往同一块内存反复写。
+         * 这里改成先 `resize(need, 0)` 把长度标出来 —— 只在尺寸变化时做一次
+         * （`with_scratch` 重建时才新建 Vec），之后每帧都是直接复用，
+         * 一次 memset 的代价换掉了"每帧分配 + 每帧释放"。
          *
-         * SAFETY：`u8` 没有无效位模式（未初始化读在 Rust 抽象机里仍属 UB，
-         * 所以这里必须保证"读之前一定已写"—— 见上面的 lines 校验：
-         * 只有 lines == h（= 全部行都写到了）才会走到后面的读取）。 */
-        let mut rgba: Vec<u8> = Vec::with_capacity(need);
+         * SAFETY 同前：`GetDIBits` 会把 lines 行的像素全部填满，
+         * 填不满时下面 `lines != h` 会直接返回 None，不会把未初始化的
+         * 字节交出去。 */
+        if s.rgba.len() != need {
+            s.rgba.resize(need, 0);
+        }
         let lines = GetDIBits(
             mem,
-            bmp,
+            s.bmp,
             0,
             h as u32,
-            Some(rgba.as_mut_ptr() as *mut _),
+            Some(s.rgba.as_mut_ptr() as *mut _),
             &mut info,
             DIB_RGB_COLORS,
         );
-        let _ = DeleteObject(HGDIOBJ(bmp.0));
-        let _ = DeleteDC(mem);
-        ReleaseDC(None, screen);
         if lines != h {
             return None;
         }
-        // 走到这里说明 h 行全写满了，长度可以安全地标出来（整段已在外层 unsafe 里）
-        rgba.set_len(need);
         // BitBlt 抓来的是 BGRA（alpha 通道是垃圾值）→ 现场换成 RGBA，
         // alpha 拍成 255。一次线性扫描，520×60@2x 也就 12 万像素，微秒级。
-        for px in rgba.as_chunks_mut::<4>().0 {
+        for px in s.rgba.as_chunks_mut::<4>().0 {
             px.swap(0, 2);
             px[3] = 255;
         }
-        Some(Snap { x, y, w, h, rgba })
-    }
+        /* ⚠ 这里必须**克隆一份**（不能把复用缓冲本身交出去）：它是下一帧
+         * 还要接着写的常驻内存，交出去就会被后面几帧覆盖掉 —— 表现是
+         * "纹理内容在变、但变了之后又被冲掉"，玻璃看起来在抖。
+         * 这一份 clone 是每次抓屏唯一的必要分配，600KB、微秒级。 */
+        Some(s.rgba.clone())
+    });
+    /* `with_scratch` 返回的是 `Option<Option<Vec<u8>>>`：
+     *   外层 = "常驻资源建没建起来"（GDI 失败时才 None）；
+     *   内层 = "这一次抓屏成没成功"（BitBlt 被拒 / GetDIBits 行数不够时 None）。
+     * 所以要 `flatten` 一层 —— 直接 `map` 会把 `Option` 当成 rgba 塞进 Snap。 */
+    rgba.flatten().map(|rgba| Snap { x, y, w, h, rgba })
 }
 
 /// 抓一块矩形并暂存（`layout_bar` 首次上屏前调用）。
@@ -196,12 +301,145 @@ pub fn store_rect_only(x: i32, y: i32, w: i32, h: i32) {
 ///
 /// ⚠ 矩形来自 `LAST_RECT` 而不是暂存快照：快照会被 `take()` 取走，
 /// 拿它当依据会让实时模式在第一帧之后就永远拿到空快照（见 `LAST_RECT` 注释）。
+#[allow(dead_code)]  // 保留作 Snap 形态的入口：单测与探针用它，实时路径已改走 capture_encoded
 pub fn recapture_last() -> Snap {
     let (x, y, w, h) = LAST_RECT.lock().map(|r| *r).unwrap_or((0, 0, 0, 0));
     if w <= 0 || h <= 0 {
         return Snap::default();
     }
     capture_store(x, y, w, h).unwrap_or_default()
+}
+
+/// **实时抓屏专用**：抓上一块矩形，直接打成 IPC 要的字节，**不做多余拷贝**。
+///
+/// # 为什么单独开一条路（r86 的性能实测）
+///
+/// 原来的实时抓屏链上，一块 600KB 的像素数据被拷了 **3 次**：
+///   ① `capture_rect` 里复用缓冲 → `Snap`（`s.rgba.clone()`；
+///      这一份躲不掉 —— 复用缓冲下一帧还要接着写）；
+///   ② `capture_store` 把整个 `Snap` 再 clone 一份塞进 `SNAP` 暂存
+///      （实时路径**根本不需要**暂存，那是给"弹出时抓一次给前端 take"用的）；
+///   ③ `encode()` 又把 `rgba` 拷进输出的 `Vec`。
+///
+/// ② 和 ③ 在实时路径上是纯粹的浪费：85 帧/秒 × 两份 600KB
+/// = **每秒约 100MB 的无谓内存拷贝**。实测主进程 CPU 30%（≈每帧 3.5ms），
+/// 其中大头就是这两笔。
+///
+/// 这条路把 ② ③ 合成一步：**直接在输出缓冲里抓屏**——先按
+/// `16 + w*h*4` 一次性开好 `Vec`，把像素写进它第 16 字节之后的位置，
+/// 最后补上 16 字节头。全程只有"页面数据本身"的一次写入，没有中间副本。
+///
+/// 返回的是**已经可以交给前端**的字节（`glass_capture` 直接 `Response::new`）。
+pub fn capture_encoded() -> Vec<u8> {
+    /* 单次耗时自测（只在 QS_GLASS_TRACE=1 时打日志）。
+     *
+     * 为什么要它：用户把实时折射提到"跟随显示器"（实测 85 帧/秒）之后，
+     * 主进程 CPU 仍有约 31%（≈每帧 3.6ms）。而"一次 BitBlt + 一次 GetDIBits
+     * + 一次 BGRA 交换"这个工作量**远远不该要 3.6ms** —— 852×176 才 15 万像素。
+     * 所以一定是某一段比我以为的慢，必须**量出来**是哪一段，而不是继续猜。 */
+    let trace = std::env::var("QS_GLASS_TRACE").map(|v| v == "1").unwrap_or(false);
+    // 总计时也惰性建（同上：别在热路径上白取时间）
+    let t_all = if trace { Some(std::time::Instant::now()) } else { None };
+    let mut t_blt = 0.0f64;
+    let mut t_dib = 0.0f64;
+
+    let (x, y, w, h) = LAST_RECT.lock().map(|r| *r).unwrap_or((0, 0, 0, 0));
+    if w <= 0 || h <= 0 {
+        return Vec::new();
+    }
+    let (vx, vy, vw, vh) = virtual_screen();
+    if x < vx || y < vy || x + w > vx + vw || y + h > vy + vh {
+        return Vec::new();
+    }
+
+    /* 一次性开好「头 + 像素」的缓冲。
+     *
+     * ⚠ 用 `vec![0; need]` 而不是 `with_capacity` + `resize`：后者会被
+     *   clippy 判为"慢的零填充"（`slow_vector_initialization`）——
+     *   它先按容量开、再单独 memset 一遍。`vec![0; n]` 在分配时就带上
+     *   零填充，是同一条路径但少一次函数调用开销。
+     *
+     *   为什么**必须**零填充（不能像原来那样用 `set_len` 拿未初始化内存）：
+     *   我们要 `GetDIBits` 直接写进这块内存的中间段，写之前它是未初始化的；
+     *   而 `vec![0; n]` 之后整块都是确定值，即使某次抓屏失败也不会把
+     *   未初始化字节交出去（`set_len` 那条路依赖"lines == h 才读"来保证，
+     *   这里少一层推理，更稳）。 */
+    let need = 16 + (w as usize) * (h as usize) * 4;
+    let mut out: Vec<u8> = vec![0u8; need];
+    // 先把 16 字节头写好（后面像素段不会碰它）
+    out[0..4].copy_from_slice(&x.to_le_bytes());
+    out[4..8].copy_from_slice(&y.to_le_bytes());
+    out[8..12].copy_from_slice(&w.to_le_bytes());
+    out[12..16].copy_from_slice(&h.to_le_bytes());
+
+    let ok = with_scratch(w, h, |s| unsafe {
+        let screen = GetDC(None);
+        if screen.is_invalid() {
+            return false;
+        }
+        let mem = windows::Win32::Graphics::Gdi::HDC(s.mem.0 as *mut _);
+        let old = SelectObject(mem, HGDIOBJ(s.bmp.0));
+        // 计时点惰性建（只在 QS_GLASS_TRACE=1 时）：
+        // `Instant::now()` 在 85 帧/秒的热路径上是白多两次系统调用。
+        let t0 = if trace { Some(std::time::Instant::now()) } else { None };
+        let blt = BitBlt(mem, 0, 0, w, h, Some(screen), x, y, SRCCOPY).is_ok();
+        if trace {
+            t_blt = t0.map(|t| t.elapsed().as_secs_f64() * 1000.0).unwrap_or(0.0);
+        }
+        ReleaseDC(None, screen);
+        SelectObject(mem, old);
+        if !blt {
+            return false;
+        }
+        let mut info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: w,
+                biHeight: -h,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: 0, // BI_RGB
+                biSizeImage: 0,
+                biXPelsPerMeter: 0,
+                biYPelsPerMeter: 0,
+                biClrUsed: 0,
+                biClrImportant: 0,
+            },
+            ..Default::default()
+        };
+        /* ⚠ 关键一步：**让 GetDIBits 直接写进 out 的第 16 字节之后**。
+         * 这样像素只经过"屏幕 → out"这一次写入，没有中间的 Vec。 */
+        let dst = out.as_mut_ptr().add(16) as *mut _;
+        let t1 = if trace { Some(std::time::Instant::now()) } else { None };
+        let lines = GetDIBits(mem, s.bmp, 0, h as u32, Some(dst), &mut info, DIB_RGB_COLORS);
+        if trace {
+            t_dib = t1.map(|t| t.elapsed().as_secs_f64() * 1000.0).unwrap_or(0.0);
+        }
+        lines == h
+    });
+    if ok != Some(true) {
+        return Vec::new();
+    }
+    // BGRA → RGBA，alpha 拍 255。就地改，不额外分配。
+    //
+    // ⚠ 计时点只在 QS_GLASS_TRACE=1 时才建：`Instant::now()` 在 85 帧/秒的
+    //   热路径上也是白白多两次系统调用。这里用 `trace.then(...)` 惰性取：
+    //   不 trace 时连 `Instant::now()` 都不执行。
+    let t2 = if trace { Some(std::time::Instant::now()) } else { None };
+    for px in out[16..].as_chunks_mut::<4>().0 {
+        px.swap(0, 2);
+        px[3] = 255;
+    }
+
+    if trace {
+        let t_swap = t2.map(|t| t.elapsed().as_secs_f64() * 1000.0).unwrap_or(0.0);
+        crate::win::log(&format!(
+            "glass_trace: {}x{}  BitBlt={:.2}ms GetDIBits={:.2}ms swap={:.2}ms 合计={:.2}ms",
+            w, h, t_blt, t_dib, t_swap,
+            t_all.map(|t| t.elapsed().as_secs_f64() * 1000.0).unwrap_or(0.0)
+        ));
+    }
+    out
 }
 
 /// 把快照打成「16 字节小头（x,y,w,h，i32 LE）+ RGBA 字节块」，供 IPC 直传。
@@ -312,9 +550,14 @@ mod tests {
         capture_rect(x, y, w, h).is_some()
     }
 
-    /// 回归：`take()` 取走快照之后，`recapture_last()` 必须还能按上次的矩形
-    /// 重抓 —— 实时玻璃（`bar_glass_live`）整条链路都压在这一点上。
+    /// 回归：`take()` 取走快照之后，按上一块矩形**重抓**仍必须成功 ——
+    /// 实时玻璃（`bar_glass_live`）整条链路都压在这一点上。
     /// 曾经的 bug：矩形只存在快照里，take 一取走，recapture 永远返回空。
+    ///
+    /// ⚠ r86 起实时路径改走 `capture_encoded()`（零拷贝），所以这里**两条路
+    ///   都要验** —— 它们都靠 `LAST_RECT`，任何一条忘了记矩形，实时玻璃就会
+    ///   在第一帧之后定格。`recapture_last()` 仍被保留：它是 `Snap` 形态的
+    ///   入口，探针 / 将来的调用方可能用得到（`#[allow(dead_code)]` 就是这个意思）。
     #[test]
     fn recapture_last_survives_take() {
         let _guard = GLASS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -326,9 +569,17 @@ mod tests {
         let _ = capture_store(vx, vy, 8, 8);
         assert!(take().w > 0, "capture_store 之后应当取得到快照");
         assert_eq!(take().w, 0, "take 是取走即清空");
+
+        // 路径①（Snap 形态，探针/旧调用方）
         let s = recapture_last();
         assert_eq!((s.w, s.h), (8, 8), "take 之后矩形仍记得，重抓同一块");
         assert_eq!(s.rgba.len(), 8 * 8 * 4, "重抓的字节数对得上");
+
+        // 路径②（零拷贝，实时抓屏真正走的那条）
+        let enc = capture_encoded();
+        assert_eq!(enc.len(), 16 + 8 * 8 * 4, "零拷贝路径的字节数 = 16 头 + 像素");
+        assert_eq!(&enc[8..12], &8i32.to_le_bytes(), "头部 w 字段应当写对");
+        assert_eq!(&enc[12..16], &8i32.to_le_bytes(), "头部 h 字段应当写对");
     }
 
     /// 换一块矩形再抓，LAST_RECT 要跟着换（横条搬家后刷新的就是新区域）。

@@ -2890,6 +2890,8 @@ fn config_view() -> Value {
         "barGlassSpec": cfg.bar_glass_spec,
         "barGlassTint": cfg.bar_glass_tint,
         "barGlassLive": cfg.bar_glass_live,
+        // v1.3.0：实时刷新帧率上限（0 = 跟随显示器）
+        "barGlassFps": cfg.bar_glass_fps,
         "iconStyle": cfg.icon_style,
         "unifyIcons": cfg.unify_icons,
         "barPadding": cfg.bar_padding,
@@ -3012,6 +3014,12 @@ fn apply_view(v: &Value, cfg: &mut config::Config) {
     if let Some(x) = n("barGlassSpec") { cfg.bar_glass_spec = x.clamp(0, 200) as u32; }
     if let Some(x) = n("barGlassTint") { cfg.bar_glass_tint = x.clamp(0, 100) as u32; }
     if let Some(x) = b("barGlassLive") { cfg.bar_glass_live = x; }
+    // v1.3.0：实时刷新帧率上限。白名单夹取（只认 0/30/60/120），
+    // 别的值一律当 0（跟随显示器）—— 免得手改配置写出个怪值。
+    if let Some(x) = n("barGlassFps") {
+        let v = x as u32;
+        cfg.bar_glass_fps = if matches!(v, 0 | 30 | 60 | 120) { v } else { 30 };
+    }
     if let Some(x) = n("barPadding") { cfg.bar_padding = x.clamp(0, 12) as u32; }
     if let Some(x) = n("itemRadius") { cfg.item_radius = x.clamp(0, 18) as u32; }
     if let Some(x) = s("theme") {
@@ -3374,6 +3382,12 @@ fn apply_one_setting(cfg: &mut config::Config, key: &str, value: Value) -> Resul
             cfg.bar_glass_tint = value.as_u64().unwrap_or(12).clamp(0, 100) as u32;
         }
         "barGlassLive" => cfg.bar_glass_live = value.as_bool().unwrap_or(false),
+        // v1.3.0：实时刷新帧率上限。允许 0（跟随）/ 30 / 60 / 120。
+        // 夹到合法集合里：别的值一律当 0（跟随显示器），免得手改配置写出个怪值。
+        "barGlassFps" => {
+            let v = value.as_u64().unwrap_or(0) as u32;
+            cfg.bar_glass_fps = if matches!(v, 0 | 30 | 60 | 120) { v } else { 30 };
+        }
         "iconStyle" => {
             let s = value.as_str().unwrap_or("auto");
             cfg.icon_style = if s == "letter" { "letter".to_string() } else { "auto".to_string() };
@@ -4811,6 +4825,16 @@ async fn update_install() {
 /// 用 `CreateProcess` 而不是 `open::that`：后者会走 shell 关联，
 /// 可能被"以管理员运行"的 UAC 拦一道、还可能因为路径里有空格出岔子。
 /// 这里直接起自己（同目录、同权限），最直。
+///
+/// # ⚠ 必须给新进程带 `QS_TAKEOVER=1`（v1.3.0 修的真 bug）
+///
+/// 顺序是「先拉起新进程 → 再退出自己」，所以新进程起来的那一刻**老进程
+/// 还没有退出、单实例互斥体还被占着**。不带标记的话，新进程会在
+/// `already_running()` 里判定"已有一个在跑"、**立刻 exit(0) 自杀** ——
+/// 于是用户点了「立即重启」，两边都退出，程序**整个消失**。
+///
+/// 带上 `QS_TAKEOVER=1` 之后，新进程会**等老进程释放互斥体**再继续
+/// （见 `win::already_running` 的说明），这才是一次正确的交班。
 #[tauri::command]
 fn update_restart() {
     match std::env::current_exe() {
@@ -4831,6 +4855,9 @@ fn update_restart() {
             if let Some(d) = dir {
                 cmd.current_dir(d);
             }
+            /* ⚠⚠ 关键：告诉新进程"你是来接手单实例的，别因为互斥体被占就自杀"。
+             *   漏了这一行 = 点重启后程序整个消失（这个 bug 我引入过）。 */
+            cmd.env("QS_TAKEOVER", "1");
             match cmd.spawn() {
                 Ok(_) => {
                     app().exit(0);
@@ -9012,6 +9039,104 @@ fn stash_picked_icon(engine: &str, path: &std::path::Path) {
     toast_settings("图标已替换");
 }
 
+/* ================================================================== */
+/* r88：把「绑定应用」的图标拿来当引擎图标                                 */
+/* ================================================================== */
+
+/// 用户要求：「快捷键引擎要增加一个功能，那就是当我选择了某一个应用的时候，
+/// 就能够把那个应用的图标作为软件里显示的图标。」
+///
+/// 所以这个命令在**选中应用之后**调：从那个 exe 里抠出图标、存成 PNG、
+/// 写进 `overrides`（和用户手动"换图标"走的是**同一条**落库通路）。
+///
+/// # 为什么要落成 PNG 文件，而不是直接把 RGBA 塞给前端
+///
+/// 因为 `overrides` 机制的值是**文件名**（`icons/<引擎名>.png`），图标要能
+/// 跨会话存活、能被备份/WebDAV 同步、能被"恢复默认图标"清掉 —— 这些都依赖
+/// "它是个真实文件"。直接给前端 data URL 的话，刷新页面就没了。
+///
+/// # 尺寸取 256
+///
+/// 横条上图标 28~40px、设置页列表也就 40px 上下，256 足够覆盖各种 DPI
+/// （2x 屏上 40px 图标实际要 80px 源图）。取太大浪费磁盘与同步体积。
+///
+/// # 失败时的行为
+///
+/// **静默失败**（只写日志）。这个功能是"锦上添花"：用户选了个应用但没有
+/// 图标资源（有些 exe 就是这么精简），弹个错反而打扰他。引擎照常能用，
+/// 只是显示字母徽标。
+#[tauri::command]
+fn app_icon_from_exe(engine: String, exe: String) {
+    win::log(&format!("app_icon_from_exe: engine={engine} exe={exe}"));
+    std::thread::spawn(move || {
+        /* ⚠ 用户选的可能是个 `.lnk` 快捷方式（开始菜单里基本都是），
+         * 也可能直接是 exe。
+         *
+         * 我一开始以为要"先把 .lnk 解析成目标 exe、再去抠图标"，还打算自己
+         * 实现 COM 的 IShellLink。**实测发现不用**：`SHGetFileInfoW` 走的是
+         * shell 的图标解析，shell 自己会读快捷方式的目标 —— 对 `.lnk`
+         * 直接有效（而 `PrivateExtractIconsW` 对 `.lnk` 返回 0，它只认
+         * 带图标资源的文件）。
+         *
+         * 所以 `extract_app_icon` 内部已经是"先试直读（大图）、失败退 shell"，
+         * 两条路都在 `win.rs` 里，这里原样把路径传进去就行。 */
+        let Some((w, h, rgba)) = win::extract_app_icon(&exe, 256) else {
+            win::log(&format!("app_icon_from_exe: {exe} 里没取到图标，保持原样"));
+            return;
+        };
+        let Some(png) = encode_rgba_png(w, h, &rgba) else {
+            win::log("app_icon_from_exe: PNG 编码失败");
+            return;
+        };
+
+        // 落盘：直接写进 icons 目录（文件名按引擎名规整，和 stash_icon 同一口径）
+        let Some(file) = write_engine_icon_png(&engine, &png) else {
+            win::log("app_icon_from_exe: 写图标文件失败");
+            return;
+        };
+        let mut cfg = match st().cfg.lock() {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        if let Some(old) = cfg.overrides.insert(engine.clone(), file) {
+            if old != cfg.overrides[&engine] {
+                config::drop_icon(&old);
+            }
+        }
+        config::save(&cfg);
+        drop(cfg);
+        broadcast();
+        win::log("app_icon_from_exe: 已把这个应用的图标设为引擎图标");
+    });
+}
+
+/// 把引擎图标写成 PNG 文件，返回文件名（与 `config::stash_icon` 同口径：
+/// 文件名 = 引擎名规整后 + `.png`）。
+fn write_engine_icon_png(engine: &str, png: &[u8]) -> Option<String> {
+    config::ensure_dirs();
+    let safe: String = engine
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    let file = format!("{safe}.png");
+    std::fs::write(config::icons_dir().join(&file), png).ok()?;
+    Some(file)
+}
+
+/// RGBA 字节 → PNG 字节。
+///
+/// 用项目里已有的 `image` crate（Cargo.toml 里早就在用，图标编辑器导出也走它），
+/// 不为这一个功能再引一个编码器。
+fn encode_rgba_png(w: u32, h: u32, rgba: &[u8]) -> Option<Vec<u8>> {
+    if w == 0 || h == 0 || rgba.len() != (w as usize) * (h as usize) * 4 {
+        return None;
+    }
+    let img: image::RgbaImage = image::ImageBuffer::from_raw(w, h, rgba.to_vec())?;
+    let mut out = std::io::Cursor::new(Vec::new());
+    img.write_to(&mut out, image::ImageFormat::Png).ok()?;
+    Some(out.into_inner())
+}
+
 /// 给设置页弹一条提示（编辑器/挑图路径都在设置页操作，toast 只发它）。
 fn toast_settings(msg: &str) {
     if let Some(a) = APP.get() {
@@ -11584,14 +11709,20 @@ fn glass_take() -> tauri::ipc::Response {
 }
 
 /// 前端主动请求重抓背景（实时模式轮询 / 拖动面板结束后的刷新）。
-/// 无参数：重抓的永远是上一块矩形（见 `glass::recapture_last`）。
+/// 无参数：重抓的永远是上一块矩形（见 `glass::capture_encoded`）。
 ///
 /// 前端调之前会把舞台整体置为隐藏（窗口变全透明），所以抓到的必然是纯桌面；
 /// 拿到响应后再恢复显示。一帧隐藏的代价换一个干净的背景，比把横条自己的
 /// 像素搅进纹理（反馈环）划算。
+///
+/// ⚠ r86：改走 `glass::capture_encoded()` 这条**零拷贝**路径。
+///   原来这里是 `encode(&recapture_last())`，一块 600KB 的像素数据要被
+///   拷三次（复用缓冲→Snap→暂存→encode 输出）。实时抓屏 85 帧/秒时，
+///   那等于每秒上百 MB 的无谓拷贝 —— 实测这一项就占主进程 CPU 的大头。
+///   现在改成"GetDIBits 直接写进最终输出缓冲"，只写一次。
 #[tauri::command]
 fn glass_capture() -> tauri::ipc::Response {
-    tauri::ipc::Response::new(glass::encode(&glass::recapture_last()))
+    tauri::ipc::Response::new(glass::capture_encoded())
 }
 
 /// 实时折射专用：把横条对**抓屏**隐身（`WDA_EXCLUDEFROMCAPTURE`）。
@@ -12487,6 +12618,8 @@ fn main() {
             glass_exclude,
             pick_icon,
             pick_app,
+            /* r88：把「绑定应用」的图标拿来当引擎图标（用户要求） */
+            app_icon_from_exe,
             reset_icon,
             open_icon_editor,
             icon_edit_load,

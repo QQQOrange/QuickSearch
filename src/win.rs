@@ -1,4 +1,4 @@
-﻿//! Win32 底层封装：输入模拟、光标定位、提权、开机自启。
+//! Win32 底层封装：输入模拟、光标定位、提权、开机自启。
 #![allow(dead_code)]
 #![allow(non_snake_case)]
 
@@ -423,11 +423,59 @@ pub fn launch_start_menu(name: &str) -> bool {
 /// ⚠ `QS_INSTANCE_TAG` 是**仅测试用**的逃生口：带上它时互斥体名字里会多一段 tag，
 ///   于是自动化探针可以在「用户自己的实例正开着（而且是管理员权限、脚本关不掉）」
 ///   的情况下另起一份来跑验证。不带这个环境变量时行为与以前完全一致。
+///
+/// # `QS_TAKEOVER=1`：更新后重启的"交班"（v1.3.0 修）
+///
+/// **这是我引入的一个真 bug**：`update_restart()`（v1.2.0 加的"立即重启"）
+/// 的顺序是「先 `spawn()` 新进程 → 再 `exit()` 自己」。而新进程一起来就会
+/// 走到这里 —— 此刻**老进程还没退、互斥体还被它占着**，于是新进程判定
+/// "已有一个在跑"、**立刻 `exit(0)` 自杀**；老进程那边也退出了。
+/// 结果：用户点了「立即重启」，程序**两个都没了**（或时序恰巧时两个都在）。
+///
+/// 修法：`update_restart()` 在拉起新进程时给它带一个 `QS_TAKEOVER=1`。
+/// 带这个标记的进程走到这里时**不会自杀**，而是等老进程真的退出
+/// （互斥体被内核释放）之后才继续 —— 这就是一次正常的"交班"。
+///
+/// 为什么用"等"而不是"用不同的互斥体名字"：换个名字的话，交班期间
+/// **两个互斥体同时存在**，别的路径（托盘单例、用户双击）可能各占一个，
+/// 反而漏出多实例。用同一个名字 + 等，语义最简单：任何时刻只有一个持有者。
 pub fn already_running() -> bool {
     static ONCE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ONCE.get_or_init(|| unsafe {
         let tag = std::env::var("QS_INSTANCE_TAG").unwrap_or_default();
         let name = wide(&format!("Local\\QuickSearch-8F42A1C6-SingleInstance{tag}"));
+        let takeover = std::env::var("QS_TAKEOVER").map(|v| v == "1").unwrap_or(false);
+
+        /* 交班模式：老进程正在退出，等它把互斥体让出来。
+         *
+         * 上限 10 秒：老进程退出前可能要做一次云同步（`exit_sync_if_needed`
+         * 最多 6 秒），加上它自己的收尾，10 秒足够。
+         * 超时还是拿不到的话**返回 false**（当作"没在跑"继续启动）——
+         * 宁可冒一次多实例的风险，也不能让用户卡在一个永远起不来的程序上；
+         * 而且那种情况下"两个实例"至少还能用，比"一个都没有"强。 */
+        if takeover {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                match CreateMutexW(None, false, PCWSTR(name.as_ptr())) {
+                    Ok(h) => {
+                        if GetLastError() != ERROR_ALREADY_EXISTS {
+                            let _ = h;
+                            crate::win::log("takeover: 已接手单实例互斥体（老进程已退出）");
+                            return false;
+                        }
+                        // 还是老进程占着 —— 等一小会儿再看
+                        let _ = h;
+                    }
+                    Err(_) => return false,
+                }
+                if std::time::Instant::now() >= deadline {
+                    crate::win::log("takeover: 等了 10 秒老进程仍未退出，按新实例继续启动");
+                    return false;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+
         match CreateMutexW(None, false, PCWSTR(name.as_ptr())) {
             Ok(h) => {
                 if GetLastError() == ERROR_ALREADY_EXISTS {
@@ -1999,6 +2047,131 @@ pub fn send_hotkey(spec: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// r88：从 exe 里提取图标 —— 用户要求「选择某个应用时把它的图标
+    /// 作为软件里显示的图标」。
+    ///
+    /// 用系统自带的 `notepad.exe` 当样本（Windows 每个版本都有，且它的
+    /// 图标是**带 alpha 的彩色图标**，正好能验证"透明通道有没有保住"）。
+    ///
+    /// ⚠ 这个测试**必须跑在真实 Windows 会话里**：`PrivateExtractIconsW`
+    ///   要读 PE 资源、还要建 DC 画图，无桌面会话里会失败。失败时按"跳过"
+    ///   处理（和 glass 那边 `can_capture` 的套路一致），不当作产品缺陷。
+    #[test]
+    fn 从_exe_提取图标并且保住透明通道() {
+        let path = r"C:\Windows\System32\notepad.exe";
+        if !std::path::Path::new(path).exists() {
+            eprintln!("没有 notepad.exe，跳过");
+            return;
+        }
+        let Some((w, h, rgba)) = extract_app_icon(path, 256) else {
+            eprintln!("这个环境取不到图标（无桌面会话？），跳过");
+            return;
+        };
+
+        // ① 尺寸与字节数要对得上
+        assert!(w > 0 && h > 0, "尺寸不能是 0");
+        assert_eq!(w, h, "图标应当是正方形（拿到的 {w}x{h}）");
+        assert_eq!(
+            rgba.len(),
+            (w as usize) * (h as usize) * 4,
+            "RGBA 字节数必须 = 宽×高×4"
+        );
+
+        // ② 必须有**内容** —— 不能是一整块全 0（那说明根本没画上）
+        let non_zero = rgba.as_chunks::<4>().0.iter().filter(|p| p[3] > 0).count();
+        let total = (w as usize) * (h as usize);
+        assert!(
+            non_zero * 100 / total >= 20,
+            "不透明的像素太少（{non_zero}/{total}）—— 图标可能没画上"
+        );
+
+        // ③ 必须有**透明**区域 —— 这是"alpha 通道真的被用上了"的证据。
+        //    丢了 alpha 的典型症状是整张 255 + 四角变黑，这条断言正抓它。
+        let transparent = rgba.as_chunks::<4>().0.iter().filter(|p| p[3] == 0).count();
+        assert!(
+            transparent > 0,
+            "没有任何全透明像素 —— alpha 通道丢了？(notepad 图标四角是透明的)"
+        );
+
+        // ④ 颜色要有变化（不是纯黑/纯白一块）
+        let mut colors = std::collections::HashSet::new();
+        for p in rgba.as_chunks::<4>().0.iter().filter(|p| p[3] > 128) {
+            colors.insert((p[0] / 32, p[1] / 32, p[2] / 32));
+        }
+        assert!(colors.len() >= 3, "颜色种类太少（{}）—— 图标可能没画对", colors.len());
+    }
+
+    /// 容量不足的路径不该 panic、也不该编出假数据。
+    #[test]
+    fn 取不存在的文件返回_none() {
+        assert!(extract_app_icon(r"C:\不存在的目录\nope.exe", 256).is_none());
+    }
+
+    /// **`.lnk` 快捷方式也要能取到图标**（r88）。
+    ///
+    /// 用户选应用时挑的多半是开始菜单里的快捷方式，所以这条不是冷门分支、
+    /// 是主路径之一。它走的是 `SHGetFileInfoW`（shell 会解析快捷方式目标），
+    /// 而不是 `PrivateExtractIconsW`（**实测对 .lnk 返回 0**，快捷方式里
+    /// 没有图标资源）。
+    ///
+    /// 这里从开始菜单里找一个真实 `.lnk` 当样本；找不到就跳过
+    /// （干净容器里可能没有开始菜单项）。
+    #[test]
+    fn 从_lnk_快捷方式也能取到图标() {
+        let mut roots = Vec::new();
+        for k in ["APPDATA", "ProgramData"] {
+            if let Ok(base) = std::env::var(k) {
+                roots.push(format!(r"{base}\Microsoft\Windows\Start Menu"));
+            }
+        }
+        // 递归找一个 .lnk（最多找 200 个，别在大目录里爬太久）
+        let mut found: Option<String> = None;
+        for root in roots {
+            if !std::path::Path::new(&root).exists() {
+                continue;
+            }
+            let mut stack = vec![std::path::PathBuf::from(&root)];
+            let mut seen = 0;
+            while let Some(dir) = stack.pop() {
+                let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+                for e in rd.flatten() {
+                    seen += 1;
+                    if seen > 200 {
+                        break;
+                    }
+                    let p = e.path();
+                    if p.is_dir() {
+                        stack.push(p);
+                    } else if p.extension().map(|x| x.eq_ignore_ascii_case("lnk")).unwrap_or(false) {
+                        found = Some(p.to_string_lossy().to_string());
+                        break;
+                    }
+                }
+                if found.is_some() {
+                    break;
+                }
+            }
+            if found.is_some() {
+                break;
+            }
+        }
+        let Some(lnk) = found else {
+            eprintln!("这台机器上找不到开始菜单 .lnk，跳过");
+            return;
+        };
+        let Some((w, h, rgba)) = extract_app_icon(&lnk, 256) else {
+            panic!("快捷方式取不到图标：{lnk}");
+        };
+        assert!(w > 0 && h > 0, "尺寸不能是 0");
+        assert_eq!(rgba.len(), (w as usize) * (h as usize) * 4, "RGBA 字节数要对");
+        // 得有真的内容（不能是空图）
+        let non_zero = rgba.as_chunks::<4>().0.iter().filter(|p| p[3] > 0).count();
+        assert!(
+            non_zero * 100 / ((w as usize) * (h as usize)) >= 10,
+            "快捷方式的图标几乎是空的（{w}x{h}，{non_zero} 个不透明像素）"
+        );
+    }
+
     fn vk_of(spec: &str) -> Option<(Vec<u16>, u16)> {
         let h = parse_hotkey(spec)?;
         Some((
@@ -3090,5 +3263,253 @@ pub fn grab_region(x: i32, y: i32, w: i32, h: i32) -> Option<(u32, u32, Vec<u8>)
             px[3] = 255;
         }
         Some((w as u32, h as u32, buf))
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* 从可执行文件 / 快捷方式里取图标（r88）                                 */
+/* ------------------------------------------------------------------ */
+
+/// 从一个 exe（或 `.lnk` / `.ico`）里取出图标，返回 (宽, 高, RGBA)。
+///
+/// # 用途
+///
+/// 用户要求：「快捷键引擎要增加一个功能，当我选择了某一个应用的时候，
+/// 就能够把那个应用的图标作为软件里显示的图标。」
+///
+/// # 两条来源，各有各的适用面（**实测**结论，不是猜的）
+///
+///  ① **`PrivateExtractIconsW`** —— 直接读 exe 的图标资源，能点名要
+///     **256×256**（资源管理器"大图标"那张）。横条/设置页要显示 28~40px，
+///     2x 屏上实际要 80px 源图，所以大图有意义（小图放大发糊）。
+///     ⚠ **实测：它对 `.lnk` 无效**（返回 0）—— 快捷方式里没有图标资源，
+///       图标在它的**目标**身上。
+///
+///  ② **`SHGetFileInfoW`** —— 走 shell 的图标解析，**对 `.lnk` 有效**
+///     （shell 自己去读快捷方式的目标），但只给 shell 的默认档尺寸
+///     （`SHGFI_LARGEICON` = 32×32）。
+///
+/// 所以顺序是：先试 ①（能拿大图就拿大图），失败再退 ②（至少拿得到）。
+/// 用户选应用时大多是选 `.lnk`（开始菜单里就是快捷方式），所以 ② 不是
+/// 冷门分支，是主路径之一。
+pub fn extract_app_icon(path: &str, want: i32) -> Option<(u32, u32, Vec<u8>)> {
+    if let Some(v) = extract_icon_big(path, want) {
+        return Some(v);
+    }
+    extract_icon_via_shell(path)
+}
+
+/// ① 直读 exe 图标资源（能拿大图，但对 `.lnk` 无效）。
+fn extract_icon_big(path: &str, want: i32) -> Option<(u32, u32, Vec<u8>)> {
+    /* ⚠ 这两个 API 都在 `WindowsAndMessaging` 里，**不在** `UI::Shell` ——
+     * 名字带 "Extract" 很容易以为在 Shell 模块（我第一次就 import 错了）。 */
+    use windows::Win32::UI::WindowsAndMessaging::{DestroyIcon, PrivateExtractIconsW};
+
+    let mut wpath = [0u16; 260];
+    {
+        let w = wide(path);
+        let n = w.len().min(259);
+        wpath[..n].copy_from_slice(&w[..n]);
+    }
+    for size in [want, 48, 32] {
+        unsafe {
+            /* ⚠ 签名与直觉不同（我第一次写错了）：
+             *   · 第 1 个参数是 `&[u16; 260]`，**不是** PCWSTR；
+             *   · `phicon` 是 `Option<&mut [HICON]>`（一个**切片**），
+             *     一次可以要多个图标，所以这里给一个长度 1 的数组；
+             *   · 一共 **7 个**参数（没有单独的"个数"参数 ——
+             *     个数是从切片长度推的，所以那个 8 参的写法编译不过）。 */
+            let mut icons = [windows::Win32::UI::WindowsAndMessaging::HICON::default(); 1];
+            let got = PrivateExtractIconsW(&wpath, 0, size, size, Some(&mut icons), None, 0);
+            let hicon = icons[0];
+            if got == 0 || hicon.0.is_null() {
+                continue;   // 这一档没有，退下一档
+            }
+            let out = hicon_to_rgba_sized(hicon, size);
+            let _ = DestroyIcon(hicon);
+            if let Some(v) = out {
+                return Some(v);
+            }
+        }
+    }
+    None
+}
+
+/// ② 走 shell 的图标解析（对 `.lnk` 有效，只给 shell 默认档尺寸）。
+fn extract_icon_via_shell(path: &str) -> Option<(u32, u32, Vec<u8>)> {
+    use windows::Win32::UI::Shell::{SHGetFileInfoW, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON};
+
+    let mut wpath = [0u16; 260];
+    {
+        let w = wide(path);
+        let n = w.len().min(259);
+        wpath[..n].copy_from_slice(&w[..n]);
+    }
+    unsafe {
+        let mut fi = SHFILEINFOW::default();
+        let r = SHGetFileInfoW(
+            PCWSTR(wpath.as_ptr()),
+            windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES(0),
+            Some(&mut fi),
+            std::mem::size_of::<SHFILEINFOW>() as u32,
+            SHGFI_ICON | SHGFI_LARGEICON,
+        );
+        if r == 0 || fi.hIcon.0.is_null() {
+            return None;
+        }
+        // ⚠ `SHGFI_ICON` 给的 HICON **要自己 DestroyIcon**（shell 不会回收）
+        let out = hicon_to_rgba_sized(fi.hIcon, 32);
+        let _ = windows::Win32::UI::WindowsAndMessaging::DestroyIcon(fi.hIcon);
+        out
+    }
+}
+
+/// 把 `HICON` 转成「(宽, 高, RGBA)」，按 `expect` 尺寸建画布。
+///
+/// `expect` 是"我以为它会多大"；实际尺寸由 `icon_size` 问出来，
+/// 两者取较大的那个当画布（避免把大图标塞进小画布被裁掉）。
+fn hicon_to_rgba_sized(
+    hicon: windows::Win32::UI::WindowsAndMessaging::HICON,
+    expect: i32,
+) -> Option<(u32, u32, Vec<u8>)> {
+    let actual = icon_size(hicon).unwrap_or(0);
+    let size = if actual > 0 { actual.max(1) } else { expect.max(1) };
+    hicon_to_rgba_at(hicon, size)
+}
+
+/// 把 `HICON` 转成「(宽, 高, RGBA)」，画布边长 `size`。
+///
+/// 手法：建一块 32 位 DIB，用 `DrawIconEx` 把图标画上去（alpha 直接落在
+/// DIB 里），再把像素读出来。**不用 `GetIconInfo` + 位图直接读** —— 那条路
+/// 拿到的是"颜色位图 + 掩码位图"两份，还得自己按掩码合成 alpha，而且新版
+/// （带 32 位 alpha 的）图标又不用掩码，两条逻辑要并存。`DrawIconEx` 一把
+/// 画完，对两代图标都对。
+fn hicon_to_rgba_at(
+    hicon: windows::Win32::UI::WindowsAndMessaging::HICON,
+    size: i32,
+) -> Option<(u32, u32, Vec<u8>)> {
+    use windows::Win32::Graphics::Gdi::{
+        CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, SelectObject, BITMAPINFO,
+        BITMAPINFOHEADER, DIB_RGB_COLORS, HBITMAP,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{DrawIconEx, DI_NORMAL};
+
+    unsafe {
+        /* ⚠ 这里**不能**再 `let size = icon_size(...)` ——
+         * `size` 现在是从参数传进来的（调用方已经问过 `icon_size` 并取了
+         * 较大值）。我第一版把老的这行留下了，于是参数被同名变量覆盖，
+         * 编译能过但语义错了（画布尺寸又变回"图标自己多大就多大"）。 */
+        let dc = CreateCompatibleDC(None);
+        if dc.is_invalid() {
+            return None;
+        }
+
+        let info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: size,
+                biHeight: -size,          // 负数 = 自上而下
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: 0,         // BI_RGB
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
+        let dib: HBITMAP = match CreateDIBSection(Some(dc), &info, DIB_RGB_COLORS, &mut bits, None, 0)
+        {
+            Ok(b) => b,
+            Err(_) => {
+                let _ = DeleteDC(dc);
+                return None;
+            }
+        };
+        if bits.is_null() {
+            let _ = DeleteObject(HGDIOBJ(dib.0));
+            let _ = DeleteDC(dc);
+            return None;
+        }
+        let old = SelectObject(dc, HGDIOBJ(dib.0));
+
+        /* 整块先清成 0（全透明 + 全黑）。`DrawIconEx` 只写图标覆盖到的像素，
+         * 不清的话没覆盖的地方是内存里的随机值 —— 那会变成"图标周围一圈
+         * 彩色噪点"。 */
+        let px_count = (size as usize) * (size as usize);
+        std::ptr::write_bytes(bits as *mut u8, 0, px_count * 4);
+
+        let drawn = DrawIconEx(dc, 0, 0, hicon, size, size, 0, None, DI_NORMAL).is_ok();
+
+        SelectObject(dc, old);
+
+        /* ⚠⚠ 顺序是**硬性**的：必须**先**把像素拷出来，**再**删 DIB。
+         *
+         * `bits` 指向的是 DIB 段内部的内存，它**随 `DeleteObject(dib)` 一起失效**。
+         * 我第一版就是先删对象、后读 `bits` —— 典型的 **use-after-free**，
+         * 直接 `STATUS_ACCESS_VIOLATION`（0xc0000005）把整个测试进程打挂。
+         * 这类错误在调试构建里未必每次都崩，但正式构建的优化下必崩。 */
+        let mut rgba = vec![0u8; px_count * 4];
+        std::ptr::copy_nonoverlapping(bits as *const u8, rgba.as_mut_ptr(), px_count * 4);
+
+        // 拷贝完了，现在才可以放心释放
+        let _ = DeleteObject(HGDIOBJ(dib.0));
+        let _ = DeleteDC(dc);
+
+        if !drawn {
+            return None;
+        }
+
+        // 还原预乘 alpha（`DrawIconEx` 写进来的是预乘值）
+        for p in rgba.as_chunks_mut::<4>().0 {
+            // DIB 里是 BGRA
+            p.swap(0, 2);
+            let a = p[3];
+            if a == 0 {
+                // 全透明 → 值留着无意义，清成黑避免"透明处有脏色"
+                p[0] = 0; p[1] = 0; p[2] = 0;
+            } else if a != 255 {
+                /* 直通 = 预乘 * 255 / a。不还原的话半透明边缘会偏暗、
+                 * 图标像蒙了一层灰。 */
+                for c in p.iter_mut().take(3) {
+                    let v = (*c as u32 * 255 + a as u32 / 2) / a as u32;
+                    *c = v.min(255) as u8;
+                }
+            }
+        }
+        Some((size as u32, size as u32, rgba))
+    }
+}
+
+/// 问 `HICON` 自己的尺寸（`GetIconInfo` 里的位图宽高）。
+///
+/// 为什么要问：`PrivateExtractIconsW` 可能给一张**比你要求的尺寸更小**的
+/// 图标（它没有那一档时就给次小的）。我们按实际尺寸建 DIB，
+/// 免得把 48×48 画进 256×256 的画布里（那样周围一大圈全是空的）。
+fn icon_size(hicon: windows::Win32::UI::WindowsAndMessaging::HICON) -> Option<i32> {
+    use windows::Win32::UI::WindowsAndMessaging::{GetIconInfo, ICONINFO};
+    unsafe {
+        let mut ii = ICONINFO::default();
+        if GetIconInfo(hicon, &mut ii).is_err() {
+            return None;
+        }
+        let mut bm = windows::Win32::Graphics::Gdi::BITMAP::default();
+        let w = if !ii.hbmColor.0.is_null() {
+            let ok = windows::Win32::Graphics::Gdi::GetObjectW(
+                HGDIOBJ(ii.hbmColor.0),
+                std::mem::size_of::<windows::Win32::Graphics::Gdi::BITMAP>() as i32,
+                Some(&mut bm as *mut _ as *mut core::ffi::c_void),
+            );
+            if ok > 0 && bm.bmWidth > 0 { bm.bmWidth } else { 0 }
+        } else {
+            0
+        };
+        // GetIconInfo 给的这两张位图**要自己删**（系统不会替你回收）
+        if !ii.hbmColor.0.is_null() {
+            let _ = windows::Win32::Graphics::Gdi::DeleteObject(HGDIOBJ(ii.hbmColor.0));
+        }
+        if !ii.hbmMask.0.is_null() {
+            let _ = windows::Win32::Graphics::Gdi::DeleteObject(HGDIOBJ(ii.hbmMask.0));
+        }
+        if w > 0 { Some(w) } else { None }
     }
 }

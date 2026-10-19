@@ -34,53 +34,49 @@
     var texW = 0, texH = 0;
     var conf = null;
     var raf = 0;
-    var liveRaf = 0;              // 实时模式的 rAF 循环句柄（0 = 没在跑）
-    /** 帧率上限（r84）。
+    var liveRaf = 0;              // （保留字段：旧代码里 stopLive 会清它，见下）
+    /** 抓屏帧率上限（r86 重构）。
      *
-     *  # 为什么要限帧（实测数据）
+     *  # 背景：用户报"滚动网页时玻璃不跟随，像卡住了"
      *
-     *  横条显示期间，`raf`（重绘链）与 `liveRaf`（实时抓屏链）是**两条独立的
-     *  requestAnimationFrame 循环**，各自按显示器刷新率跑。在探针里数过：
+     *  根因是我在 r84 把**抓屏**这一路限到 15fps（66ms 一轮）。滚动时背景
+     *  每 66ms 才更新一次，肉眼就是"滞后/卡住"。
      *
-     *  | 配置 | 显示期间 rAF 调用频率 |
-     *  |---|---|
-     *  | 实时折射关 | **≈94 次/秒**（本该 60） |
-     *  | 实时折射开 | **≈182 次/秒**（两条链叠加） |
+     *  # r84 那个判断错在哪（值得记下来）
      *
-     *  这直接体现为空闲 CPU：同一份配置，只把 `bar_glass_live` 从 true 改成 false，
-     *  空闲 CPU 从 **27% 掉到 0.5%**（严格清场、单变量的 A/B，见
-     *  `qs_audit/idle_cpu_ab.py`）。
+     *  r84 的理由是"抓屏要 BitBlt + 传 600KB，开销比重画一帧大一个量级，
+     *  15fps 看不出滞后"。这段话**有两处错**：
+     *    · 实测开销：主进程（Rust 抓屏 + 编码）只占 **0.2%**；真正烧 26% 的
+     *      是 **WebView2 的着色器重绘**。抓屏根本不是瓶颈。
+     *    · "看不出滞后"是坐在静止页面上得出的一一**滚动网页**时，66ms 的
+     *      滞后一眼就看出来了（用户就是这么发现的）。
      *
-     *  但对横条这种**静止的小 UI**来说，90~180fps 完全没有意义：
-     *  画面只在三件事上变 —— 弹出时的淡入（180ms）、鼠标靠近的光斑、
-     *  以及实时模式下背景被抓屏刷新。30fps 已经看不出任何区别，
-     *  却能把这条常驻开销砍到原来的 1/3 ~ 1/6。
+     *  # 现在的原则：省在**没用的重绘**上，花在**跟手的抓屏**上
      *
-     *  # 为什么不用 setInterval
+     *  用户的原话是"能够接受为了美观而增加的合理开销，但一定要合理"。
+     *  所以：
+     *    · **抓屏**默认跟显示器刷新率走（`barGlassFps = 0`），跟手优先；
+     *    · **重绘**只在"画面真的会变"的那些帧跑 —— 静止时一次都不跑。
+     *  这才是"合理"：花的钱换到了体验，没花在空转上。
      *
-     *  rAF 仍是驱动（它跟显示器 vsync 对齐、标签页隐藏时自动暂停 ——
-     *  这是 setInterval 给不了的）。限帧只在回调**入口**做一个时间判断：
-     *  距上一帧不足 `MIN_FRAME_MS` 就直接排下一帧返回。
-     */
-    var MIN_FRAME_MS = 1000 / 30;   // 30fps 上限
-    var lastFrameAt = 0;
-    /** 实时抓屏链的帧间隔（比重绘更宽）。
-     *
-     *  抓屏一次要 BitBlt 一块 852×176 的区域、编码成 600KB 再走 IPC，
-     *  开销比"重画一帧着色器"大一个量级；而它的作用是让**背景**跟上
-     *  桌面变化（比如背后在放视频），15fps 已经完全看不出滞后。
-     *  再叠加上"在途去重"，实际不会真按这个频率抓到屏。 */
-    var LIVE_FRAME_MS = 1000 / 15;
+     *  用户可以在设置里把上限降到 30/60/120（省电），见 `barGlassFps`。 */
+    var liveIntervalMs = 0;       // 0 = 不限（跟随显示器）
     var lastLiveAt = 0;
-    /** 这一帧该不该跳过（限帧判据）。
+    /** "有内容变了、下一帧必须画一次"（r86）。
      *
-     *  ⚠ `force` 用于**必须立刻生效**的那些帧：淡入动画的头几帧、
-     *  抓屏刚落地要立刻换纹理 —— 那些帧如果被限掉，用户会看到
-     *  "横条弹出来先卡一下"或"玻璃晚半拍才跟上"。 */
-    function frameTooSoon(now, force) {
-        if (force) { lastFrameAt = now; return false; }
-        if (now - lastFrameAt < MIN_FRAME_MS) return true;
-        lastFrameAt = now;
+     *  这是合并循环之后**省 CPU 的关键**：抓屏是异步的，多数帧并没有新纹理
+     *  落地；每帧都无脑画一遍相同的纹理，就是 r84 里那 26% CPU 的来处。
+     *  所以只有真实变化（新纹理 / 主题切换 / 面板尺寸变了 / 淡入）才置上它，
+     *  `frame()` 里画完即清。静止横条在没有它时一次都不画。 */
+    var dirty = false;
+    /** 由配置（`barGlassFps`）换算抓屏间隔。0/非法值 → 0（不限速）。 */
+    function setLiveFps(fps) {
+        liveIntervalMs = (fps && fps > 0) ? (1000 / fps) : 0;
+    }
+    /** 这一帧该不该抓屏（按用户设的上限节流）。 */
+    function liveTooSoon(now) {
+        if (liveIntervalMs <= 0) return false;      // 跟随显示器：每帧都抓
+        if (now - lastLiveAt < liveIntervalMs) return true;
         return false;
     }
     var liveStarting = false;     // 正在异步开启（等 glass_exclude 回执）
@@ -548,27 +544,76 @@ var barGhost = false;
         return [nx, ny];
     }
 
+    /* ---------------------------------------------------------------- */
+    /* 统一的 rAF 循环：一帧里同时做「重绘」和「抓屏」（r86 合并）            */
+    /*                                                                  */
+    /* # 为什么要合并（r84 的 182 次/秒就是这么来的）                        */
+    /*                                                                  */
+    /* r84 时 `raf`（重绘）与 `liveRaf`（抓屏）是**两条独立的 rAF 循环**，   */
+    /* 各自按刷新率跑 → 探针数出 180+ 次/秒的调用。两条链做的是同一件事    */
+    /* 的两个阶段（先抓背景、再拿新纹理重绘），分开跑等于互相催、谁也不知   */
+    /* 道对方的状态。                                                      */
+    /*                                                                  */
+    /* 现在合成一条：每帧按顺序做「该抓就抓 → 该画就画」，一个 `busy` 状态   */
+    /* 管住整条链。好处是三件：                                            */
+    /*   · 调用次数从 180+/秒 降到刷新率本身（60/120/144）；                 */
+    /*   · 抓屏频率可以独立调到"跟显示器"而不影响重绘次数；                  */
+    /*   · 抓屏与重绘的先后关系确定了（抓到新纹理的那一帧就画出来），        */
+    /*     不会再出现"纹理换了但这一帧没画"的错拍。                          */
+    /*                                                                  */
+    /* ⚠ 停止条件仍是"画面还会不会变"：静止的横条（不在淡入、鼠标不在上面、  */
+    /*   没开实时模式）时循环**必须停**，否则就是白烧 CPU。这条是 r84 修     */
+    /*   那个 27% 的关键，不能丢。                                          */
+    /* ---------------------------------------------------------------- */
+
     function frame(now) {
+        raf = 0;
+        if (!shown) return;                       // 收起后链条到此为止
+
         // 淡入动画：约 180ms
         if (reveal < 1) {
             reveal = Math.min(1, (now - revealT0) / 180);
         }
-        /* 限帧（r84）：淡入还没走完时**不跳帧**（那 180ms 是用户唯一盯着看的
-         * 动画，跳帧会看出顿挫）；淡入完成后按 30fps 跑就够。 */
-        var force = reveal < 1;
-        if (frameTooSoon(now, force)) {
-            raf = requestAnimationFrame(frame);
-            return;
+
+        var liveOn = !!(conf && conf.barGlassLive) && glassOn(conf) && !!gl;
+        /* 这一帧要不要继续跑下去？
+         *   · 淡入中 → 要（那 180ms 是用户唯一盯着的动画）
+         *   · 鼠标在条上 → 要（光斑跟着动）
+         *   · 开了实时模式 → 要（背景要跟桌面走）
+         *  三者都不成立就停 —— 这是静止横条的零开销档。 */
+        var keepGoing = reveal < 1 || pointer[0] >= 0 || liveOn;
+
+        /* ---- 阶段①：该抓屏就抓（按用户设的帧率上限节流）---- */
+        if (liveOn && !captureBusy && !liveTooSoon(now)) {
+            lastLiveAt = now;
+            if (excluded) {
+                captureOnce(false);               // 主路：横条对抓屏隐身，直抓
+            } else if ((++liveThrottle & 3) === 0) {
+                captureOnce(true);                // 兜底（旧系统）：每 4 帧隐藏抓一次
+            }
         }
-        draw(now);
-        if (shown && (reveal < 1 || pointer[0] >= 0 || (conf && conf.barGlassLive))) {
-            raf = requestAnimationFrame(frame);
-        } else {
-            raf = 0;
+
+        /* ---- 阶段②：重绘 ----
+         * ⚠ 决定"要不要真的画"：
+         *   · 淡入中 → 画（每帧都要，否则动画顿）；
+         *   · 鼠标在条上 → 画；
+         *   · 实时模式 → **只有抓到新纹理时才画**（`dirty`）。
+         *     抓屏是异步的，多数帧并没有新纹理；每帧都画一遍相同的纹理
+         *     就是 r84 里那 26% CPU 的来源。 */
+        var want = reveal < 1 || pointer[0] >= 0 || (liveOn && dirty);
+        if (want) {
+            draw(now);
+            dirty = false;
         }
+
+        if (keepGoing) raf = requestAnimationFrame(frame);
     }
 
     function kick() {
+        /* 唤醒统一循环。`dirty` 表示"有内容变了、下一帧必须画一次"——
+         * 它只在有真实变化时被置上（新纹理落地、主题切换、面板尺寸变了…），
+         * 所以静止时循环根本不会因为 kick 而常驻。 */
+        dirty = true;
         if (!raf && shown) {
             // ⚠ revealT0 只在淡入还没走完时才重置：曾经无条件置现值，
             // 而 frame() 里 reveal = min(1, (now-revealT0)/180) —— 已淡入完成
@@ -581,32 +626,25 @@ var barGhost = false;
     }
 
     /* ---------------------------------------------------------------- */
-    /* 实时抓屏循环（rAF 驱动）                                           */
+    /* 实时抓屏：起停 + 单次抓取                                            */
     /* ---------------------------------------------------------------- */
 
-    /** 起实时循环（只在「配置要实时 + 横条在屏上」时被调）。 */
+    /** 起实时循环（只在「配置要实时 + 横条在屏上」时被调）。
+     *
+     *  ⚠ r86 起抓屏和重绘共用同一个 `frame()` 循环，所以这里不再自己起一条
+     *  rAF，只需要"把循环叫起来"（kick 会置 dirty 并排帧）。
+     *  `liveRaf` 字段保留为 **0**：旧代码/旧探针会读它判断"实时在不在跑"，
+     *  现在那个语义改由 `frame()` 里的 `liveOn` 决定，字段恒为 0 表示
+     *  "没有独立的抓屏循环"——这正是 r86 之后的事实。 */
     function startLiveLoop() {
-        if (liveRaf) return;
-        liveRaf = requestAnimationFrame(liveTick);
+        liveRaf = 0;
+        kick();
     }
 
-    function liveTick(now) {
-        liveRaf = 0;
-        if (!shown || !glassOn(conf) || conf.barGlassLive !== true || !gl) return;  // 链条到此为止
-        liveRaf = requestAnimationFrame(liveTick);
-        /* 限帧（r84）：实时抓屏这条链和 `raf` 那条是**各自独立的 rAF 循环**，
-         * 两条都按刷新率跑时叠加出 180+ 次/秒（实测数据见 MIN_FRAME_MS 那段）。
-         * 抓屏这一路限得更宽：它每次都要 BitBlt + 传 600KB，本来就没必要
-         * 跟显示刷新率同频；而且抓屏在途时（captureBusy）下面本来就会跳过。 */
-        if (now - lastLiveAt < LIVE_FRAME_MS) return;
-        lastLiveAt = now;
-        if (captureBusy) return;                    // 上一轮抓屏还没回，等下一帧
-        if (excluded) {
-            captureOnce(false);                    // 主路：直抓，横条不用躲
-        } else if ((++liveThrottle & 3) === 0) {
-            captureOnce(true);                     // 兜底：隐藏抓取，每 4 帧一次
-        }
-    }
+    /** 旧的独立抓屏 tick —— r86 已并入 `frame()`。
+     *
+     *  ⚠ **不留死代码**：直接删掉它，下面 `captureOnce` 里那段"在途去重"
+     *  的说明仍然有效（去重逻辑本身没变）。 */
 
     /** 抓一次屏并上传。`hideStage` = 先把舞台整体隐藏（ BitBlt 抓的是合成后
      *  屏幕，舞台要真的消失一帧才抓得到纯桌面）。
@@ -694,6 +732,10 @@ var barGhost = false;
         applyConf: function (c) {
             if (c) conf = Object.assign({}, conf || {}, c);
             var on = glassOn(conf);
+            /* 抓屏帧率上限跟着配置走（r86）。
+             * 用户在设置里把上限从"跟随显示器"改成 30/60/120，要**立刻**生效，
+             * 不能等到下次重开横条。`setLiveFps(0)` = 不限速。 */
+            setLiveFps(conf && conf.barGlassFps);
             var bar = document.getElementById(BAR_ID);
             if (bar) bar.classList.toggle('qs-glass', on && this.ready);
             // ⚠ 类也要挂到 stage 上：画布 2026-10-16 搬到了 stage（需求 6，
@@ -813,7 +855,7 @@ var barGhost = false;
          *  · 兜底（旧系统没有 WDA_EXCLUDEFROMCAPTURE）：隐藏抓取，每 4 帧
          *    一次，把「横条不可见」的时间占比压到约 1/6。 */
         startLive: function () {
-            if (liveRaf || liveStarting) return;
+            if (liveStarting) return;
             liveStarting = true;
             this.exclSet(true).then(function () {
                 liveStarting = false;
@@ -821,7 +863,10 @@ var barGhost = false;
             });
         },
         stopLive: function () {
-            if (liveRaf) { cancelAnimationFrame(liveRaf); liveRaf = 0; }
+            /* r86：抓屏已并入统一的 `frame()` 循环，这里**不再有独立的 rAF
+             * 要取消**。`frame()` 自己会在 `liveOn` 为 false 时停止抓屏、
+             * 并在"画面不会再变"时退出循环 —— 那才是停的正主。
+             * 这里只做两件事：清"在途"占位、解除抓屏隐身。 */
             liveStarting = false;
             /* 只放开"在途占位"，**不碰代次、不碰 stageHideOwner**。
              *
@@ -863,8 +908,18 @@ var barGhost = false;
                     radius: conf && conf.itemRadius,
                 },
                 live: {
-                    loop: !!liveRaf, starting: liveStarting, excluded: excluded,
+                    /* ⚠ `loop` 字段的语义在 r86 变了：抓屏已并入统一的
+                     *   `frame()` 循环，**没有独立的抓屏 rAF 了**，所以这里
+                     *   报的是"重绘循环在不在跑"（`raf !== 0`）。
+                     *   旧探针按 `loop` 判断"实时模式在不在工作"会误读 ——
+                     *   现在要判断实时是否生效请看 `liveOn` 与 `fps`。 */
+                    loop: !!raf, starting: liveStarting, excluded: excluded,
                     busy: captureBusy,
+                    /* r86 新增：实时抓屏的当前状态，供探针验证"跟手" */
+                    liveOn: !!(conf && conf.barGlassLive) && glassOn(conf) && !!gl,
+                    fps: conf && conf.barGlassFps,          // 0 = 跟随显示器
+                    intervalMs: liveIntervalMs,             // 0 = 不限速
+                    dirty: dirty,
                 },
                 stats: stats,
                 pointer: pointer.slice(),

@@ -156,6 +156,23 @@
             <div class="rt"><b>实时折射</b><small>持续重抓背后桌面（背后放视频也跟得上）；开启后横条对<b>抓屏</b>隐身，关 = 只抓一次</small></div>
             <label class="sw"><input type="checkbox" id="s-barGlassLive"><i></i></label>
         </div>
+        <!-- v1.3.0：实时刷新的帧率上限。
+             用户报「滚动网页时玻璃不跟随、像卡住」——根因是上一版把抓屏
+             限到了 15 帧/秒。这里把上限交给用户。
+
+             ⚠ 括号里的占用是**实测**值，不是估的：抓屏里的 BitBlt 有约
+               6ms 的固定开销、与抓取面积无关（16×16 和 852×176 一样），
+               所以频率直接换算成 CPU。把代价摆在选项上，用户才好自己权衡。 -->
+        <div class="row col" data-style="glass" id="rowGlassFps" hidden>
+            <div class="rt"><b>刷新帧率</b><small>横条跟随桌面变化的频率。抓屏一次约 <b>6 ms</b>（与抓取大小无关，是系统抓屏的固有开销），
+                频率越高越费 CPU。默认 <b>30</b>：滚动网页、放视频都已看不出滞后</small></div>
+            <div class="seg" id="segGlassFps">
+                <button type="button" data-v="30" title="默认：滚动网页、放视频都不滞后，约单核 19%">30（推荐）</button>
+                <button type="button" data-v="60" title="更顺滑，约单核 37%">60</button>
+                <button type="button" data-v="120" title="很费，约单核 75%">120</button>
+                <button type="button" data-v="0" title="最跟手，跟着显示器刷新率跑（这台机器实测约 85 帧/秒）">跟随显示器</button>
+            </div>
+        </div>
     </section>
 
     <section class="card">

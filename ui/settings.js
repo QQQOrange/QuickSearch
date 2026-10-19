@@ -1831,6 +1831,8 @@ function bindCeBind() {
                 if (p) {
                     $('w-ceAppPath').value = p;
                     if (hint) hint.textContent = '';
+                    /* r88：选完应用顺带把它的图标拿来当引擎图标 */
+                    adoptAppIcon(p);
                 } else if (hint) {
                     hint.textContent = '';
                 }
@@ -1870,9 +1872,67 @@ listen('qs://picked-app-path', (ev) => {
         box.value = p;
         const hint = $('ceHint');
         if (hint) hint.textContent = '已选中：' + p;
+        /* r88：十字准星点选这条路同样顺带取图标 */
+        adoptAppIcon(p);
         syncCeBind();
     }
 });
+
+/// 记下"选了应用但名字还没定"时那次选择，等表单提交时补上。
+///
+/// ⚠ 声明必须**在所有使用点之前**（模块级 `let` 有 TDZ）：`adoptAppIcon`
+///   在运行时可能先于这行被调，而它里面会读这个变量。我第一版把声明放在
+///   函数**后面**，靠"反正是模块级、函数调用晚于声明"侥幸 —— 但
+///   `bindCeBind()` 里的监听是**用户交互时**才跑，那时确实已经过了声明，
+///   看起来能用；然而 `adoptAppIcon` 若被更早的路径调用就会抛
+///   "Cannot access before initialization"。放在这里没有歧义。
+let pendingAppIcon = '';
+
+/* r88：把「选中的那个应用」的图标拿来当这个快捷键引擎的图标。
+ *
+ * # 用户要求
+ *
+ * 「快捷键引擎要增加一个功能，那就是当我选择了某一个应用的时候，就能够把
+ *  那个应用的图标作为软件里显示的图标。」
+ *
+ * # 什么时候**不**做
+ *
+ *   · 没在编辑快捷键类引擎时（这个编辑区根本不存在）→ 直接不调；
+ *   · **用户已经手动换过图标**时 → 不覆盖。这是个取舍：自动取图标是
+ *     "省事"，而用户手动挑一张是"明确表达"。抢他的手动选择是错的 ——
+ *     所以只在 `overrides` 里**没有**这个引擎时才自动填。
+ *     想换回应用图标，用「恢复默认图标」清掉之后再选一次应用即可。
+ *
+ * # 为什么是 fire-and-forget
+ *
+ * 后端那条路要读 exe / 建 DC / 编码 PNG，几十毫秒级；而且**可能失败**
+ * （有些 exe 就是没有图标资源）——失败时后端只写日志、不打扰用户，
+ * 引擎照常显示字母徽标。这里 don't await 也不报错，和它的语义一致。 */
+function adoptAppIcon(path) {
+    /* ⚠ 拿"引擎名"要从**名字输入框**读，不是从索引 ——
+     * 这个表单的编辑态用 `ceEditIndex`（一个索引），而 overrides 的键是
+     * **引擎名**。我第一版顺手写了个 `editingEngineName`，那个变量在这个
+     * 项目里压根不存在（静默 undefined → 整条功能失效，还不报错）。 */
+    const box = $('w-ceName');
+    const name = box ? String(box.value || '').trim() : '';
+    /* 名字还没填（用户在"先选应用、后起名"）：**把请求记下来**，
+     * 等保存时再取 —— 见 `pendingAppIcon`。不这么做的话，这次选应用就白选了，
+     * 用户还得重新点一次。 */
+    if (!name) {
+        pendingAppIcon = path;
+        return;
+    }
+    applyAppIcon(name, path);
+}
+
+/** 真正去后端取图标（名字已经确定时调）。 */
+function applyAppIcon(name, path) {
+    if (!name || !path) return;
+    // 已有手动图标 → 不覆盖（理由见上面 adoptAppIcon 的注释）
+    const ov = (CONF && CONF.overrides) || {};
+    if (ov[name]) return;
+    invoke('app_icon_from_exe', { engine: name, exe: path }).catch(() => {});
+}
 
 function bindCeKind() {    const seg = $('s-ceKind');
     if (!seg) return;
@@ -2107,6 +2167,10 @@ function resetCeForm() {
     $('w-ceAppAdmin').checked = false;
     // r76：启动延迟拨回默认 900（不是 0 —— 见 submitCeForm 里的同款注释）
     $('w-ceAppDelay').value = 900;
+    /* r88：表单清空时也要把"待取图标"那个待办清掉 ——
+     * 不然用户取消/重置之后，下一次提交会把**上一条**引擎选的图标挂到
+     * 新引擎上（串味，而且界面上看不出来）。 */
+    pendingAppIcon = '';
     // 新增默认搜索类（历史行为：自定义引擎一直是要带 %s 的搜索入口）
     ceKind = 'search';
     applyCeKind();
@@ -2168,6 +2232,14 @@ async function submitCeForm() {
         ? Math.max(0, Math.min(60000, Math.round(Number($('w-ceAppDelay').value) || 900)))
         : 0;
     const editing = ceEditIndex >= 0;
+    /* r88：如果用户是"先选应用、后起名字"，那份取图标的请求记在
+     * `pendingAppIcon` 里 —— 现在名字确定了，补上它。
+     * ⚠ 只对快捷键类做：非快捷键类没有"绑定应用"这回事，那个路径框
+     *   本来也不会被填。 */
+    if (isHot && pendingAppIcon && name.trim()) {
+        applyAppIcon(name.trim(), pendingAppIcon);
+        pendingAppIcon = '';
+    }
     try {
         if (editing) {
             await invoke('update_custom_engine', {
@@ -2759,6 +2831,59 @@ const SEGS = [
  * 四档与后端 normalize_recent_max 的白名单一一对应（5/10/15/20），
  * 改一边另一边要跟着改 —— 那边注释里写着了。 */
 const RECENT_MAX_CHOICES = [5, 10, 15, 20];
+
+/* v1.3.0：实时折射的**刷新帧率上限**。
+ *
+ * # 为什么要单独写而不进 SEGS
+ *
+ * 和 `recentMax` 同一个理由：SEGS 的泛型通路把 `data-v` 当**字符串**发给后端，
+ * 而 `barGlassFps` 在 Rust 那边是 u32（走 `value.as_u64()`），收到 "30" 这种
+ * 字符串会解析失败、静默退回默认值 —— 用户选了「30」结果还是跟着显示器。
+ * 所以这里自己发**数字**。
+ *
+ * # 各档位的代价（**实测**，详见 config.rs 里那段表）
+ *
+ * 抓屏里的 BitBlt 有约 6ms 的**固定开销、与抓取面积无关**（实测 16×16 与
+ * 852×176 都是 6.24ms），所以频率直接换算成单核占用：
+ *   30 → 19%    60 → 37%    120 → 75%    跟随显示器(实测85) → 53%
+ *
+ * 默认 30（后端 config.rs 里也是 30）：够跟手，又压在合理范围。
+ *
+ * ⚠ 后端 `set_setting` 对 barGlassFps 做了白名单夹取（只认 0/30/60/120），
+ *   这里列的档位必须和那边一致，改一边要改另一边。 */
+const GLASS_FPS_CHOICES = [0, 30, 60, 120];
+function bindGlassFps() {
+    const seg = $('segGlassFps');
+    if (!seg) return;
+    for (const b of seg.querySelectorAll('button')) {
+        b.addEventListener('click', () => {
+            const v = Number(b.dataset.v);
+            for (const x of seg.querySelectorAll('button')) x.classList.toggle('on', x === b);
+            CONF.barGlassFps = v;
+            window.CONF.barGlassFps = v;
+            /* 发数字（不是字符串）。后端白名单夹取会再兜一层。 */
+            invoke('set_setting', { key: 'barGlassFps', value: v }).catch(() => {});
+        });
+    }
+}
+
+/** 把帧率档位的高亮同步到当前配置，并决定那一行的显隐。
+ *  ⚠ 必须**容错**：配置里可能是老版本没有这个键（undefined），
+ *    也可能是个白名单外的值（手改配置）。两种都当 30（默认档）。 */
+function syncGlassFpsUI() {
+    const seg = $('segGlassFps');
+    if (!seg) return;
+    const raw = Number(CONF && CONF.barGlassFps);
+    const cur = GLASS_FPS_CHOICES.includes(raw) ? raw : 30;
+    for (const b of seg.querySelectorAll('button')) {
+        b.classList.toggle('on', Number(b.dataset.v) === cur);
+    }
+    /* 这一行只在「实时折射」开着时才有意义 —— 关着的时候实时链根本不跑，
+     * 帧率设多少都不起作用，露出来只会让用户困惑。 */
+    const row = $('rowGlassFps');
+    if (row) row.hidden = !(CONF && CONF.barGlassLive);
+}
+
 function bindRecentMax() {
     const seg = $('s-recentMax');
     if (!seg) return;
@@ -3089,6 +3214,10 @@ function qsSetText(id, s) {
 function bindSwitches() {
     applyTheme();
     syncStyleUI();
+    /* v1.3.0：帧率档位的高亮 + 那一行的显隐。必须排在 syncStyleUI 之后 ——
+     * syncStyleUI 会按 data-style 设那一行的 hidden，而这一行还要叠一个
+     * "实时折射开着吗"的条件，顺序反了会被它改回去。 */
+    syncGlassFpsUI();
     renderPreview();
     // r56：「最近使用」摆几个。每次广播都重建一遍（幂等）——
     // 广播可能来自别处改了 recentMax，这边得跟上。
@@ -3143,6 +3272,11 @@ function bindSwitches() {
                 renderBarList();
                 renderCustomList();
                 renderAppList();
+            }
+            /* v1.3.0："实时折射"决定 "刷新帧率"那一行显不显示 —— 关着时
+             * 实时链不跑，帧率设多少都没用。先改本地 CONF（上面已做）再刷 UI。 */
+            if (key === 'barGlassLive') {
+                syncGlassFpsUI();
             }
         });
     }
@@ -3293,6 +3427,7 @@ function bindSwitches() {
     }
 
     if (!bound) bindBarStyle();
+    if (!bound) bindGlassFps();
     if (!bound) bindGlassPreset();
 
     bound = true;
@@ -6356,6 +6491,22 @@ function webviewLabel() {
  *  但日志内容没跟着走）。现在**每条都写死自己的版本号**，
  *  发新版时**同时**加一条，对不上就是漏了。 */
 const CHANGELOG = [
+    {
+        ver: 'v1.3.0',
+        items: [
+            '<b>横条的"实时折射"可以调刷新率了</b>（新）：上一版把背景刷新限到了 15 帧/秒，<b>滚动网页或放视频时玻璃会慢半拍、看着像卡住</b>。现在改成可调 —— 「液态玻璃」那一组里多了一行「刷新帧率」，默认 <b>30</b>（滚动、放视频都已看不出滞后），嫌费电可以调低，想最跟手就选「跟随显示器」跟着屏幕刷新率跑。每一档后面都标了实测的 CPU 占用，方便你按机器情况挑。',
+            '<b>快捷键引擎：选中应用就自动用它的图标</b>（新）：给快捷键引擎「绑定应用」时，选完那个程序，<b>软件会自动把它的图标抠出来当作这个引擎的图标</b>，横条上一眼就能认出来 —— 不用再自己去截图、裁剪、上传。开始菜单里的快捷方式同样管用。<b>如果你已经手动换过图标，它不会覆盖你的选择</b>；想换回应用图标，用「恢复默认图标」清掉后再选一次应用即可。',
+            '<b>修：点「立即重启」可能把程序整个关掉</b> —— 自动更新装好后点重启，新程序启动的那一瞬间会撞上"旧程序还没退干净"，于是它以为自己重复启动、直接退出；旧的那个也退了，结果<b>桌面上一个都不剩</b>。现在新程序会等旧程序让位再接手。',
+            '<b>玻璃渲染快了不少</b>：把两条各自跑满刷新率的绘制循环合并成一条（原来实测每秒 180 多次，其中一半是白跑的），抓屏用上了常驻资源、不再每帧重建，一块 600KB 的画面也从"拷三次"减到"拷一次"。',
+            '<b>设置页回到你熟悉的样子</b>：上一版试做的两种新皮肤没有保留，界面<b>和你一直在用的那个版本完全一致</b>。',
+        ],
+    },
+    {
+        ver: 'v1.2.2',
+        items: [
+            '<b>修：待机时 CPU 占用偏高</b> —— 上一版为了让玻璃更跟手，开了两条各自跟着屏幕刷新率跑的绘制循环，实测每秒被调用 180 多次（本该 60）。对一条静止的横条来说，多出来的那些帧全是白烧的。现在按需绘制，空闲时<b>基本不占 CPU</b>。',
+        ],
+    },
     {
         ver: 'v1.2.1',
         items: [
