@@ -12867,6 +12867,71 @@ mod tests {
         config::Config::default()
     }
 
+    /// **横条圆角与图标外框圆角必须同心**（用户报的"外框圆角和横条不一致"）。
+    ///
+    /// # 这条测试防的是什么
+    ///
+    /// 修之前：横条 `calc(--qs-radius + 4px)`、图标 `--qs-radius` —— 那 4px 是
+    /// 老的硬编码补偿，两者因此永远差 4px。圆角滑到 3px 时是 **7 vs 3**，
+    /// 图标外框相对横条几乎是方的，一眼就不协调。
+    ///
+    /// 正确关系（同心圆）：图标贴着横条的内边距边缘，所以
+    /// **横条外圆角 = 图标圆角 + 内边距**。
+    ///
+    /// 这条测试只在 CSS 文本上做断言，不启动浏览器 —— 这正是它存在的价值：
+    /// 谁要是哪天又把横条那行改回"拍一个常数"，或者把 `--qs-bar-r` 的定义改掉，
+    /// `cargo test` 立刻会红，不用等到用户发现"看着别扭"。
+    #[test]
+    fn 横条圆角与图标外框同心() {
+        let css = include_str!("../ui/bar.css");
+
+        // ① 图标外框用的是 `--qs-icon-r`（滑块值本身）
+        assert!(
+            css.contains("border-radius: var(--qs-icon-r, var(--qs-radius, 9px));"),
+            "图标外框的圆角必须走 --qs-icon-r（滑块值）"
+        );
+
+        // ② 横条用的是 `--qs-bar-r`（由图标圆角 + 内边距推出）
+        assert!(
+            css.contains("border-radius: var(--qs-bar-r);"),
+            "横条的圆角必须走 --qs-bar-r（同心推导），不能写常数"
+        );
+
+        // ③ 同心关系本身：--qs-bar-r = --qs-icon-r + --qs-bar-pad
+        assert!(
+            css.contains("--qs-bar-r: calc(var(--qs-icon-r) + var(--qs-bar-pad, 5px));"),
+            "同心的推导式必须是「图标圆角 + 内边距」"
+        );
+        assert!(
+            css.contains("--qs-icon-r: var(--qs-radius, 9px);"),
+            "--qs-icon-r 必须直接取滑块值"
+        );
+
+        // ④ 字母徽标比外框内缩 3px（.ico 的 padding），圆角也要跟着少 3px；
+        //    老的 `* .72` 系数会让它比外框更方。
+        assert!(
+            !css.contains("calc(var(--qs-radius, 9px) * .72)"),
+            "字母徽标不能用 .72 系数 —— 它比外框内缩 3px，圆角应减 3px 才同心"
+        );
+        assert!(
+            css.contains("calc(var(--qs-icon-r, var(--qs-radius, 9px)) - 3px)"),
+            "字母徽标的圆角应为「图标圆角 - 3px」"
+        );
+
+        // ⑤ 体量校验：设成用户实际用的 3px 圆角 + 2px 内边距时，
+        //    横条 5px、图标 3px、徽标 0px —— 三者单调递减且不打架。
+        //    （这里只做"关系"断言，真实像素由浏览器算。）
+        let r: f64 = 3.0;
+        let pad: f64 = 2.0;
+        let bar = r + pad;
+        let icon = r;
+        let letter = (icon - 3.0).max(0.0);
+        assert!(bar > icon, "横条圆角必须大于图标圆角（差一个内边距）");
+        assert!(icon >= letter, "图标圆角不能小于字母徽标（它是内层）");
+        assert_eq!(bar, 5.0);
+        assert_eq!(letter, 0.0);
+    }
+
     /// 需求 8：「选中的文本里含多个链接 → 点一次按钮分别在多个标签页打开」。
     ///
     /// 这条路的前半段（把一段文字里的链接**全**找出来）就是

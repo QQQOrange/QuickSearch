@@ -2081,13 +2081,20 @@ body.idx-on .to-top { bottom: 56px; }
     /* 浮层投影：默认值和 bar.css 的 .stage 一样给**合法占位**
      * （不开就没有外影，真值由 renderPreview 按「浮层阴影」开关写）。 */
     --pv-shadow: 0 0 0 0 rgba(0, 0, 0, 0);
+    /* 同心圆角（v1.2.1）—— 和 bar.css 完全同一套推导，见那边的说明。
+     * 预览是"横条真身的替身"，它的圆角口径必须跟真身一模一样，
+     * 否则用户在设置页里调好了、用到真身上又不对（原来就是这么错的）。 */
+    --pv-icon-r: var(--pv-radius, 9px);
+    --pv-bar-r: calc(var(--pv-radius, 9px) + var(--pv-pad, 5px));
     display: flex;
     align-items: center;
     gap: 6px;
     padding: var(--pv-pad);
-    /* 和横条真身同一个口径：radius + 4（原来是 +6 且带 1px 描边，
-     * 预览跟真身差着 3px，用户对着预览调圆角会调不对） */
-    border-radius: calc(var(--pv-radius) + 4px);
+    /* ⚠ 原来是 `calc(var(--pv-radius) + 4px)` —— 那个 4px 是和真身一起留下的
+     * 硬编码补偿（真身以前也写 +4px）。真身改成"图标圆角 + 内边距"之后，
+     * 预览若继续 +4px 就会和真身对不上（内边距不是 4 的用户尤其明显）。
+     * 现在两边用同一个推导式。 */
+    border-radius: var(--pv-bar-r);
     border: none;
     background-color: var(--pv-card, var(--card));
     color: var(--pv-fg, var(--fg));
@@ -2188,7 +2195,10 @@ body.idx-on .to-top { bottom: 56px; }
     justify-content: center;
     width: var(--pv-size);
     height: var(--pv-size);
-    border-radius: var(--pv-radius);
+    /* 预览里的图标格子 = 真身的 `.ico`（鼠标压上去高亮的就是它）。
+     * 圆角走 `--pv-icon-r`（滑块值），和真身同一个口径 —— 见 .qs-preview 里
+     * 那段"同心圆角"的说明。 */
+    border-radius: var(--pv-icon-r, var(--pv-radius, 9px));
     background: transparent;
     flex: none;
     transition: background-color .12s ease;
@@ -2207,7 +2217,10 @@ body.idx-on .to-top { bottom: 56px; }
     justify-content: center;
     width: 100%;
     height: 100%;
-    border-radius: var(--pv-radius);
+    /* 字母徽标比格子内缩 4px（img 是 size-8），所以圆角 = 格子圆角 - 4px。
+     * 和 bar.css 里 `.ico .letter`（减 3px，因为那边 padding 是 3px）同一条
+     * 同心规则，只是内缩量不同。 */
+    border-radius: max(0px, calc(var(--pv-icon-r, var(--pv-radius, 9px)) - 4px));
     color: #fff;
     font-weight: 600;
     background: var(--lt-color, #4E6EF2);
@@ -2221,7 +2234,7 @@ body.idx-on .to-top { bottom: 56px; }
     min-width: calc(var(--pv-size) - 6px);
     height: calc(var(--pv-size) - 12px);
     padding: 0 4px;
-    border-radius: calc(var(--pv-radius) - 2px);
+    border-radius: max(0px, calc(var(--pv-icon-r, var(--pv-radius, 9px)) - 2px));
     background: color-mix(in srgb, var(--accent) 16%, transparent);
     color: var(--accent);
     font-size: 10.5px;
