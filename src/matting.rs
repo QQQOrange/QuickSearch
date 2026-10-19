@@ -933,12 +933,6 @@ pub fn encode_png(img: &image::RgbaImage) -> Result<Vec<u8>, String> {
     Ok(buf)
 }
 
-/// 测试用：把图编码成 PNG 字节（走与生产同一条 `image` 编码路径）。
-#[cfg(test)]
-fn png_of(img: &image::RgbaImage) -> Vec<u8> {
-    encode_png(img).expect("测试图编码不该失败")
-}
-
 /// 一张"明确有背景"的测试图：白底 + 深色圆。
 #[cfg(test)]
 fn white_bg_with_circle(size: u32) -> image::RgbaImage {

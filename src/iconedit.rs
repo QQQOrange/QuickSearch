@@ -108,6 +108,12 @@ pub fn remove_background_ex(
     params: &crate::aimatte::Params,
     model_id: Option<&str>,
 ) -> Result<(Vec<u8>, usize, bool), String> {
+    /* ⚠ 这里**只解码一次**。
+     *
+     * 以前是 `matting::prepare(bytes)` 解一遍（只为拿 w/h），然后把原始 bytes
+     * 传给 `try_ai_with`，它内部又 `prepare` 一次 —— 一张 4000px 的原图被完整
+     * 解码 + 缩放两遍（用户感知就是"点抠图要等一下"）。
+     * 现在把解好的图直接递下去。 */
     let prepared = crate::matting::prepare(bytes)?;
     let (w, h) = prepared.dimensions();
     let keep_mask: Option<Vec<bool>> = keep.and_then(|m| {
@@ -130,7 +136,12 @@ pub fn remove_background_ex(
         }
         if any { Some(outv) } else { None }
     });
-    crate::iconedit_ai::try_ai_with(bytes, keep_mask.as_deref(), params, model_id)
+    crate::iconedit_ai::try_ai_prepared(
+        prepared,
+        keep_mask.as_deref(),
+        params,
+        model_id,
+    )
 }
 
 #[cfg(test)]

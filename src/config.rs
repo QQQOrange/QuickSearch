@@ -716,8 +716,20 @@ pub ocr_accurate: bool,
     pub webdav_on_start: bool,
     /// 退出时同步：把本机配置推到云端
     pub webdav_on_exit: bool,
-    /// OCR 结果窗口的宽 / 高（逻辑像素）。
+    /// **自动更新开关**（v1.2.0 新增）。
     ///
+    /// 用户口径：「自动更新它应该是一个选项……我打勾之后它才会开始自动更新」。
+    /// 所以它是一个**显式的勾选框**，勾上之后：
+    ///   · 每次启动时后台查一次 GitHub 上的最新版本；
+    ///   · 发现比当前新 → 弹一句"有新版，要下吗"；
+    ///   · 用户点了下载 → 在**程序内部**下好、校验、替换掉旧程序，不跳浏览器。
+    ///
+    /// 默认 **true**（勾上）：功能名就叫"自动更新"，默认不勾等于默认没这功能；
+    /// 用户取消勾选后**彻底不检测** —— 不再产生任何网络请求（含启动那次）。
+    /// 未勾选时「检查更新」按钮仍然可用（那是一次手动动作，不受开关限制）。
+    #[serde(default = "default_true")]
+    pub auto_update: bool,
+    /// OCR 结果窗口的宽 / 高（逻辑像素）。
     /// 用户拖过窗口大小之后记下来，下次识别就按这个尺寸开 —— 免得每次都要
     /// 重新拉一遍。0 表示「还没记录过」，这时用默认的 760×620。
     ///
@@ -933,6 +945,7 @@ impl Default for Config {
             webdav_pass: String::new(),
             webdav_on_start: false,
             webdav_on_exit: false,
+        auto_update: true,
             ocr_win_w: 0,
             ocr_win_h: 0,
             backup_dir: String::new(),
@@ -1521,7 +1534,19 @@ fn load_backup_of(path: &std::path::Path) -> Option<Config> {
     //   完全可能把数据目录那份排到最后（Temp 的盘符/路径恰好更小），
     //   于是「同目录优先」名存实亡。
     let local_roll = scan(&parent);
-    let bdir = backup_dir_of(&Config::default());
+    /* ⚠ 自定义备份目录也要扫。
+     *
+     * 旧代码这里是 `backup_dir_of(&Config::default())` —— 默认配置的
+     * `backup_dir` 是空串，于是它恒等于"数据目录"，**永远扫不到用户自己设的
+     * 备份目录**。而 `save_to` 写滚动备份时用的是 `backup_dir_of(cfg)`，
+     * 也就是真按用户设的目录落盘。后果：用户设过备份目录之后，主文件一坏，
+     * 候选位置全是空的，直接落回默认配置（用户的引擎排序/密钥/收藏全没了）。
+     *
+     * 正确做法：先把主文件里能读到的 `backup_dir` 抠出来（哪怕整份 JSON
+     * 已经坏了，只要那个字符串还在就能救），再按它扫一遍。 */
+    let bdir = configured_backup_dir(path)
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| backup_dir_of(&Config::default()));
     let bdir_roll = if bdir != parent { scan(&bdir) } else { Vec::new() };
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Some(newest) = local_roll.last() {
@@ -1546,6 +1571,38 @@ fn load_backup_of(path: &std::path::Path) -> Option<Config> {
         }
     }
     None
+}
+
+/// 从**可能已经损坏**的 config.json 里抠出 `backup_dir`。
+///
+/// 为什么单独写一个"只读一个字段"的函数：`load_backup_of` 被调用的前提就是
+/// 整份文件已经解析不了（严重损坏），这时候 `serde_json::from_str::<Config>`
+/// 必然失败 —— 但用户设的备份目录只是一段普通字符串，多半还完好地躺在文件里。
+/// 只解析成 `serde_json::Value`（对多余/缺失字段宽容得多），取一个键即可。
+///
+/// 取不到（文件读不出、不是 JSON、字段为空）→ None，调用方回落默认目录。
+fn configured_backup_dir(path: &std::path::Path) -> Option<String> {
+    let s = std::fs::read_to_string(path).ok()?;
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
+        if let Some(d) = v.get("backup_dir").and_then(|x| x.as_str()) {
+            let d = d.trim();
+            if !d.is_empty() {
+                return Some(d.to_string());
+            }
+        }
+    }
+    // 截断 / 半损：退回字符串搜索，"backup_dir"\s*:\s*"..." 的第一处
+    let key = "\"backup_dir\"";
+    let i = s.find(key)?;
+    let rest = s[i + key.len()..].trim_start().strip_prefix(':')?.trim_start();
+    let rest = rest.strip_prefix('"')?;
+    let end = rest.find('"')?;
+    let d = rest[..end].trim();
+    if d.is_empty() {
+        None
+    } else {
+        Some(d.to_string())
+    }
 }
 
 /// 是不是「滚动备份」—— save_to 每次保存时留下的那一份。
@@ -1621,17 +1678,12 @@ pub fn save_to(path: &std::path::Path, cfg: &Config) {
     // 代价是多一次几十 KB 的写入，换来的是任何时刻都有一份可用的完整副本。
     //
     // ⚠ 只保留**一份**：save_to 调用非常频繁（横条尺寸之类的小改动都会存一次），
-    // 每次保存都新写一个带时间戳的文件，一天就能攒出几百个垃圾。所以写新的
-    // 之前先把同目录里旧的滚动备份删掉。
+    // 每次保存都新写一个带时间戳的文件，一天就能攒出几百个垃圾。
+    //
+    // ⚠ 但"先删旧的、再写新的"顺序是错的：主文件写失败时这里会 return，
+    //   那时旧的滚动备份已经被删干净、新的还没写 —— 备份族一份不剩。
+    //   正确顺序是**先写新备份、成功了再删旧的**（下面就是这么排的）。
     let bdir = backup_dir_of(cfg);
-    if let Ok(rd) = std::fs::read_dir(&bdir) {
-        for e in rd.filter_map(|e| e.ok()) {
-            let p = e.path();
-            if p.is_file() && is_rolling_backup(&p) {
-                let _ = std::fs::remove_file(&p);
-            }
-        }
-    }
     let bak = bdir.join(rolling_backup_name(&backup_stamp()));
     let tmp = path.with_extension("json.tmp");
     // ⚠ 换名失败（杀软实时扫描 / 网盘占用 / 权限）时**绝不能直接往目标文件写**。
@@ -1661,7 +1713,28 @@ pub fn save_to(path: &std::path::Path, cfg: &Config) {
         ));
         return;
     }
-    let _ = std::fs::write(bak, s.as_bytes());
+    /* 新备份也走"临时文件 + rename"（以前是裸 fs::write，写一半被杀就只剩
+     * 半截文件，而它恰恰是主文件坏掉时唯一的退路）。写成功之后再清旧的。 */
+    let bak_tmp = bak.with_extension("tmp");
+    let bak_ok = std::fs::write(&bak_tmp, s.as_bytes()).is_ok()
+        && std::fs::rename(&bak_tmp, &bak).is_ok();
+    if !bak_ok {
+        let _ = std::fs::remove_file(&bak_tmp);
+        crate::win::log(&format!(
+            "config: 滚动备份写入失败（{}），保留旧的备份不删",
+            bak.display()
+        ));
+        return;
+    }
+    if let Ok(rd) = std::fs::read_dir(&bdir) {
+        for e in rd.filter_map(|e| e.ok()) {
+            let p = e.path();
+            // 只删**不是刚刚写下的那份**的旧滚动备份
+            if p.is_file() && p != bak && is_rolling_backup(&p) {
+                let _ = std::fs::remove_file(&p);
+            }
+        }
+    }
 }
 
 /// 把用户挑的图片复制进 icons 目录，返回落地后的文件名

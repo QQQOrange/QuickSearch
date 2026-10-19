@@ -1,6 +1,6 @@
 [package]
 name = "quicksearch"
-version = "1.1.1"
+version = "1.2.0"
 edition = "2021"
 description = "Quick Search 桌面版 —— 任意软件里选中文字即可弹出搜索横条"
 build = "build.rs"
@@ -110,6 +110,9 @@ features = [
     "Win32_System_DataExchange",
     "Win32_System_Memory",
     "Win32_System_LibraryLoader",
+    # v1.2.0：自动更新要用 MoveFileExW 替换正在运行的 exe（先给自己改名、
+    # 再把新的搬进来）。这条 API 在 Win32_Storage_FileSystem 里。
+    "Win32_Storage_FileSystem",
     "Win32_System_Registry",
     "Win32_System_ProcessStatus",
     "Win32_System_Com",

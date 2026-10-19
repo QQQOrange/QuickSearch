@@ -7,7 +7,7 @@
    "url": "https://www.baidu.com/s?wd=%s&ie=utf-8",
    "icon": "https://api.iconify.design/simple-icons:baidu.svg?color=%234E6EF2",
    "inset": 1,
-   "iconFile": "百度.svg",
+   "iconFile": "百度.png",
    "kind": "search"
   },
   {
@@ -15,7 +15,7 @@
    "url": "https://www.google.com/search?q=%s&ie=utf-8&oe=utf-8",
    "icon": "https://api.iconify.design/logos:google-icon.svg",
    "inset": 0.84,
-   "iconFile": "Google.svg",
+   "iconFile": "Google.png",
    "kind": "search"
   },
   {
@@ -39,7 +39,7 @@
    "url": "https://www.zhihu.com/search?q=%s",
    "icon": "https://api.iconify.design/tabler:brand-zhihu.svg?color=%230084FF",
    "inset": 1,
-   "iconFile": "知乎.svg",
+   "iconFile": "知乎.png",
    "kind": "search"
   },
   {
@@ -55,7 +55,7 @@
    "url": "https://s.taobao.com/search?q=%s",
    "icon": "data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%3E%3Cg%20fill%3D%22none%22%20stroke%3D%22%23FF5000%22%20stroke-width%3D%222.8%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%20transform%3D%22translate(12%2012)%20scale(.98)%20translate(-12%20-12)%22%3E%3Cpath%20d%3D%22M2%205c.968.555%201.335%201.104%202%202m-2%203c5.007%203.674%202.85%206.544%200%2010m8-16c-.137%204.137-2.258%205.286-3.709%206.684M10%206c2.194-.8%203.736-.852%206.056-.993c4.206-.158%205.523%202.264%205.803%205.153c.428%204.396-.077%207.186-2.117%209.298c-1.188%201.23-3.238%202.62-7.207.259M11%2010h6m-4%200v6.493M8%2013h10m-2%202.512l.853%201.72%22%2F%3E%3Cpath%20d%3D%22M16.5%2017c-1.145.361-7%203-8.5-.5m3.765-7.961L10%2011%22%2F%3E%3C%2Fg%3E%3C%2Fsvg%3E",
    "inset": 1,
-   "iconFile": "淘宝.svg",
+   "iconFile": "淘宝.png",
    "kind": "search"
   }
  ],
@@ -68,7 +68,7 @@
      "url": "https://www.google.com/search?q=%s&ie=utf-8&oe=utf-8",
      "icon": "https://api.iconify.design/logos:google-icon.svg",
      "inset": 0.84,
-     "iconFile": "Google.svg",
+     "iconFile": "Google.png",
      "kind": "search"
     },
     {
@@ -76,7 +76,7 @@
      "url": "https://www.baidu.com/s?wd=%s&ie=utf-8",
      "icon": "https://api.iconify.design/simple-icons:baidu.svg?color=%234E6EF2",
      "inset": 1,
-     "iconFile": "百度.svg",
+     "iconFile": "百度.png",
      "kind": "search",
      "alias": [
       "baidu",
@@ -276,7 +276,7 @@
      "icon": "https://api.iconify.design/simple-icons:baidu.svg?color=%234E6EF2",
      "inset": 1,
      "kind": "open",
-     "iconFile": "百度.svg",
+     "iconFile": "百度.png",
      "alias": [
       "baidu",
       "Baidu",
@@ -303,7 +303,7 @@
      "icon": "https://api.iconify.design/logos:google-icon.svg",
      "inset": 0.84,
      "kind": "open",
-     "iconFile": "Google.svg",
+     "iconFile": "Google.png",
      "alias": [
       "Google",
       "google",
@@ -997,7 +997,7 @@
      "url": "https://www.zhihu.com/search?q=%s",
      "icon": "https://api.iconify.design/tabler:brand-zhihu.svg?color=%230084FF",
      "inset": 1,
-     "iconFile": "知乎.svg",
+     "iconFile": "知乎.png",
      "kind": "search",
      "alias": [
       "zhihu",
@@ -1087,7 +1087,7 @@
      "url": "https://search.douban.com/book/subject_search?search_text=%s",
      "icon": "https://api.iconify.design/simple-icons:douban.svg?color=%232D963D",
      "inset": 1,
-     "iconFile": "豆瓣读书.svg",
+     "iconFile": "豆瓣.png",
      "kind": "search",
      "alias": [
       "豆瓣读书",
@@ -1292,7 +1292,7 @@
      "icon": "https://api.iconify.design/tabler:brand-zhihu.svg?color=%230084FF",
      "inset": 1,
      "kind": "open",
-     "iconFile": "知乎.svg",
+     "iconFile": "知乎.png",
      "alias": [
       "zhihu",
       "ZhiHu",
@@ -2678,7 +2678,7 @@
      "icon": "https://api.iconify.design/logos:google-icon.svg",
      "inset": 0.84,
      "kind": "open",
-     "iconFile": "Google.svg",
+     "iconFile": "Google.png",
      "alias": [
       "Google Maps",
       "google maps"
@@ -2743,7 +2743,7 @@
      "url": "https://www.google.com/search?q=%s&tbm=isch",
      "icon": "https://api.iconify.design/logos:google-icon.svg",
      "inset": 0.84,
-     "iconFile": "Google.svg",
+     "iconFile": "Google.png",
      "kind": "search",
      "alias": [
       "Google图片",
@@ -3039,7 +3039,7 @@
      "icon": "https://api.iconify.design/logos:google-icon.svg",
      "inset": 0.84,
      "kind": "open",
-     "iconFile": "Google.svg",
+     "iconFile": "Google.png",
      "alias": [
       "Google图片",
       "google images"
@@ -3626,7 +3626,7 @@
      "url": "https://search.douban.com/movie/subject_search?search_text=%s",
      "icon": "https://api.iconify.design/simple-icons:douban.svg?color=%232D963D",
      "inset": 1,
-     "iconFile": "豆瓣读书.svg",
+     "iconFile": "豆瓣.png",
      "kind": "search",
      "alias": [
       "豆瓣",
@@ -4110,7 +4110,7 @@
      "url": "https://s.taobao.com/search?q=%s",
      "icon": "data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%3E%3Cg%20fill%3D%22none%22%20stroke%3D%22%23FF5000%22%20stroke-width%3D%222.8%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%20transform%3D%22translate(12%2012)%20scale(.98)%20translate(-12%20-12)%22%3E%3Cpath%20d%3D%22M2%205c.968.555%201.335%201.104%202%202m-2%203c5.007%203.674%202.85%206.544%200%2010m8-16c-.137%204.137-2.258%205.286-3.709%206.684M10%206c2.194-.8%203.736-.852%206.056-.993c4.206-.158%205.523%202.264%205.803%205.153c.428%204.396-.077%207.186-2.117%209.298c-1.188%201.23-3.238%202.62-7.207.259M11%2010h6m-4%200v6.493M8%2013h10m-2%202.512l.853%201.72%22%2F%3E%3Cpath%20d%3D%22M16.5%2017c-1.145.361-7%203-8.5-.5m3.765-7.961L10%2011%22%2F%3E%3C%2Fg%3E%3C%2Fsvg%3E",
      "inset": 1,
-     "iconFile": "淘宝.svg",
+     "iconFile": "淘宝.png",
      "kind": "search",
      "alias": [
       "taobao",
@@ -4123,7 +4123,7 @@
      "url": "https://search.jd.com/Search?keyword=%s&enc=utf-8",
      "icon": "data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%3E%3Ccircle%20cx%3D%2212%22%20cy%3D%2212.6%22%20r%3D%226.05%22%20fill%3D%22%23E1251B%22%2F%3E%3Cpath%20d%3D%22M7.6%208.4C6.2%206.2%204.0%206.0%203.3%208.1c-.8%202.4-.3%205.9.7%207.7.7%201.3%202.2%201.2%202.7-.2.5-1.5%201.1-4.7.9-7.2Z%22%20fill%3D%22%23E1251B%22%2F%3E%3Cpath%20d%3D%22M16.4%208.4c1.4-2.2%203.6-2.4%204.3-.3.8%202.4.3%205.9-.7%207.7-.7%201.3-2.2%201.2-2.7-.2-.5-1.5-1.1-4.7-.9-7.2Z%22%20fill%3D%22%23E1251B%22%2F%3E%3Ccircle%20cx%3D%229.7%22%20cy%3D%2211.2%22%20r%3D%221.1%22%20fill%3D%22%23FFFFFF%22%2F%3E%3Ccircle%20cx%3D%2214.3%22%20cy%3D%2211.2%22%20r%3D%221.1%22%20fill%3D%22%23FFFFFF%22%2F%3E%3Cpath%20d%3D%22M12%2013.4c1.05%200%201.8.55%201.8%201.2%200%20.62-.6%201.05-1.3%201.28l-.5.42-.5-.42c-.7-.23-1.3-.66-1.3-1.28%200-.65.75-1.2%201.8-1.2Z%22%20fill%3D%22%23FFFFFF%22%2F%3E%3C%2Fsvg%3E",
      "inset": 1,
-     "iconFile": "京东.svg",
+     "iconFile": "京东.png",
      "kind": "search",
      "alias": [
       "JD",
@@ -4137,7 +4137,7 @@
      "url": "https://list.tmall.com/search_product.htm?q=%s",
      "icon": "data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%3E%3Cpath%20d%3D%22M12%206.4C10%204.8%208.7%203.4%207.6%202.3c-.4%202.2-.8%204.1-.9%205.8-1.9%201.6-2.9%203.6-2.9%205.8%200%203.4%203.7%206%208.2%206s8.2-2.6%208.2-6c0-2.2-1-4.2-2.9-5.8-.1-1.7-.5-3.6-.9-5.8-1.1%201.1-2.4%202.5-4.4%204.1Z%22%20fill%3D%22%23FF0036%22%2F%3E%3Ccircle%20cx%3D%229.4%22%20cy%3D%2213.2%22%20r%3D%221.15%22%20fill%3D%22%23FFFFFF%22%2F%3E%3Ccircle%20cx%3D%2214.6%22%20cy%3D%2213.2%22%20r%3D%221.15%22%20fill%3D%22%23FFFFFF%22%2F%3E%3Cpath%20d%3D%22M12%2015.4l1.15%201.5h-2.3z%22%20fill%3D%22%23FFFFFF%22%2F%3E%3C%2Fsvg%3E",
      "inset": 1,
-     "iconFile": "天猫.svg",
+     "iconFile": "天猫.png",
      "kind": "search",
      "alias": [
       "tmall",
@@ -6023,7 +6023,7 @@
      "url": "https://www.zhihu.com/search?q=%s",
      "icon": "https://api.iconify.design/tabler:brand-zhihu.svg?color=%230084FF",
      "inset": 1,
-     "iconFile": "知乎.svg",
+     "iconFile": "知乎.png",
      "kind": "search",
      "alias": [
       "zhihu",
@@ -6036,7 +6036,7 @@
      "url": "https://www.douban.com/search?q=%s",
      "icon": "https://api.iconify.design/simple-icons:douban.svg?color=%232D963D",
      "inset": 1,
-     "iconFile": "豆瓣读书.svg",
+     "iconFile": "豆瓣.png",
      "kind": "search",
      "alias": [
       "douban",
@@ -6077,7 +6077,7 @@
      "url": "https://www.xiaohongshu.com/search_result?keyword=%s",
      "icon": "https://api.iconify.design/simple-icons:xiaohongshu.svg?color=%23FF2442",
      "inset": 1,
-     "iconFile": "小红书.svg",
+     "iconFile": "小红书.png",
      "kind": "search",
      "alias": [
       "RED",
@@ -6217,7 +6217,7 @@
      "icon": "https://api.iconify.design/simple-icons:douban.svg?color=%232D963D",
      "inset": 1,
      "kind": "open",
-     "iconFile": "豆瓣读书.svg",
+     "iconFile": "豆瓣.png",
      "alias": [
       "douban",
       "Douban",
@@ -6230,7 +6230,7 @@
      "icon": "https://api.iconify.design/simple-icons:xiaohongshu.svg?color=%23FF2442",
      "inset": 1,
      "kind": "open",
-     "iconFile": "小红书.svg",
+     "iconFile": "小红书.png",
      "alias": [
       "RED",
       "小红书App",
@@ -6507,7 +6507,7 @@
      "url": "https://www.zhihu.com/search?q=%s",
      "icon": "https://api.iconify.design/tabler:brand-zhihu.svg?color=%230084FF",
      "inset": 1,
-     "iconFile": "知乎.svg",
+     "iconFile": "知乎.png",
      "kind": "search",
      "alias": [
       "zhihu",

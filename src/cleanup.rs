@@ -287,14 +287,31 @@ pub fn scan(dirs: &[PathBuf], password: &str, used_icons: &HashSet<String>) -> R
     }
 
     // ---------------- ③ 孤立的自定义图标 ----------------
+    /* ⚠ 判据不能只看 `Config::overrides`。
+     *
+     * `icons/<引擎名>.<ext>` 是**另一条独立通道**（config.rs 的
+     * `dir_icon_defaults`，前端拿它当"这个引擎的默认图标"，优先级高于内置
+     * iconFile）。用户把一张「百度.png」丢进 icons 目录、**不点换图标**，
+     * 那条路就在生效 —— 但它不在 overrides 里。只看 overrides 的话，用户点一次
+     * 「清理冗余数据」，这些图片全被判成孤儿删掉，桌面上那几个引擎的图标
+     * 当场集体变回内置图（用户视角：清理把我的图标弄没了）。
+     *
+     * 所以这里按 `dir_icon_defaults` 的**实际口径**再算一遍：只要文件名（含
+     * 扩展名）能被它扫出来，就算在用。 */
+    let dir_icons: std::collections::HashSet<String> = crate::config::dir_icon_defaults()
+        .into_iter()
+        .filter_map(|(_, p)| p.file_name().and_then(|s| s.to_str()).map(|s| s.to_string()))
+        .collect();
     let icon_dir = crate::config::icons_dir();
     if let Ok(rd) = std::fs::read_dir(&icon_dir) {
         let mut orphan: Vec<PathBuf> = rd
             .filter_map(|e| e.ok())
             .map(|e| e.path())
             .filter(|p| {
+                let n = name_of(p);
                 p.is_file()
-                    && !used_icons.contains(&name_of(p))
+                    && !used_icons.contains(&n)
+                    && !dir_icons.contains(&n)
                     // 目录里可能放着用户自己丢进来的其它图标资产，只认图片类扩展名
                     && matches!(
                         Path::new(&name_of(p))
@@ -313,7 +330,7 @@ pub fn scan(dirs: &[PathBuf], password: &str, used_icons: &HashSet<String>) -> R
                 kind: "orphan-icon",
                 label: format!("{} 个没人用的自定义图标", orphan.len()),
                 why: "这些图标文件还在 icons 目录里，但配置里已经没有任何引擎引用它们了\
-                      （换过图标、删过那个引擎）。"
+                      （换过图标、删过那个引擎），也不是「文件名 = 引擎名」那套默认图标。"
                     .to_string(),
                 files: orphan,
             });

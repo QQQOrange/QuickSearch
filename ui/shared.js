@@ -709,6 +709,30 @@ window.qsNormalizeBarList = function (list) {
     }
 
     /**
+     * 一份 data URL 映射表的**轻量指纹**（键 + 每项长度 + 首尾片段）。
+     *
+     * 用途：横条 / 设置页都要判断"图标有没有变过、要不要重画"，而配置广播
+     * 很频繁（收藏面板拖一下尺寸就 600ms 一次）。
+     *  - 不能直接 `JSON.stringify(map)`：收藏夹里的图片是几 MB 的 base64，
+     *    每次广播整串拼一遍，防抖本身就成了新开销；
+     *  - 也不能只看键：**换图标**时键不变、图变了，列表必须重画。
+     *
+     * 折中：长度变了 / 首尾 12 字符变了，就当作"换过了"。图标文件的
+     * 编解码是确定性的，同内容一定同长度同首尾，不会漏判。
+     */
+    window.qsIconSigOf = function (map) {
+        if (!map) return '';
+        const keys = Object.keys(map);
+        if (!keys.length) return '';
+        let s = '';
+        for (const k of keys) {
+            const v = String(map[k] || '');
+            s += k + ':' + v.length + ':' + v.slice(0, 12) + v.slice(-12) + '\u0001';
+        }
+        return s;
+    };
+
+    /**
      * 取某个图标 URL 的放大系数。
      * @returns 已量好 → 数字；还没量 → null（同时触发测量，量完回调 onReady）
      */

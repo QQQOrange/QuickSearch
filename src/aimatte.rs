@@ -203,6 +203,69 @@ impl Params {
     }
 }
 
+/// 一条缓存：`(模型 id, 会话)`。
+///
+/// 会话用 `Mutex` 包起来，因为 ort 2.0 的 `Session::run` 是 `&mut self`
+/// （内部要登记输入/输出张量）。抠图本来就是串行操作（一次处理一张图），
+/// 这把锁的竞争可以忽略；换来的是 168MB 的模型只加载一次。
+type CachedSession = (
+    &'static str,
+    std::sync::Arc<std::sync::Mutex<ort::session::Session>>,
+);
+
+/// 已加载的推理会话缓存。
+///
+/// # 为什么必须缓存
+///
+/// 每次抠图都 `commit_from_file` 重新加载一遍模型 —— u2netp 是 4.4MB 还好，
+/// `rmbg-full` 是 **168MB**，日志里实测单次加载 270~290ms，而推理本身才 330ms。
+/// 用户调一次参数、或者在同一张图上反复"重来/涂抹后再抠"，每次都要白付这份钱。
+///
+/// 用进程级 `Mutex<Vec<..>>` 而不是每线程一份：能省内存（`rmbg-full` 常驻约
+/// 200MB 级）。常驻数量有上限 —— 用户换着模型试时不至于把四个模型全驻留。
+static SESSIONS: std::sync::OnceLock<std::sync::Mutex<Vec<CachedSession>>> =
+    std::sync::OnceLock::new();
+
+/// 最多同时驻留几个会话。
+const MAX_CACHED_SESSIONS: usize = 2;
+
+fn session_for(
+    spec: &'static aimodels::ModelSpec,
+) -> Result<std::sync::Arc<std::sync::Mutex<ort::session::Session>>, String> {
+    use ort::session::Session;
+    let cache = SESSIONS.get_or_init(|| std::sync::Mutex::new(Vec::new()));
+    {
+        let g = match cache.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        if let Some((_, s)) = g.iter().find(|(id, _)| *id == spec.id) {
+            return Ok(s.clone());
+        }
+    }
+    let path = aimodels::model_path(spec.id);
+    let t = std::time::Instant::now();
+    let sess = Session::builder()
+        .and_then(|b| b.commit_from_file(&path))
+        .map_err(|e| format!("加载模型失败（{}）：{e}", spec.name))?;
+    let sess = std::sync::Arc::new(std::sync::Mutex::new(sess));
+    crate::win::log(&format!(
+        "ai_matte: 首次加载 {} 用时 {}ms（之后复用会话）",
+        spec.name,
+        t.elapsed().as_millis()
+    ));
+    let mut g = match cache.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    // 淘汰最老的一条（简单 FIFO），保持常驻数量可控
+    while g.len() >= MAX_CACHED_SESSIONS {
+        g.remove(0);
+    }
+    g.push((spec.id, sess.clone()));
+    Ok(sess)
+}
+
 /// 跑一次推理，输出与**输入图同尺寸**的 alpha 蒙版。
 ///
 /// `spec`：模型清单项（决定边长、归一化、取哪个输出）。
@@ -213,7 +276,6 @@ pub fn run(
     rgba: &image::RgbaImage,
     params: &Params,
 ) -> Result<AiMatte, String> {
-    use ort::session::Session;
     use ort::value::Value;
 
     let (w, h) = rgba.dimensions();
@@ -225,11 +287,11 @@ pub fn run(
         return Err(format!("模型 {} 还没下载", spec.name));
     }
 
-    let t_load = std::time::Instant::now();
-    let mut sess = Session::builder()
-        .and_then(|b| b.commit_from_file(&path))
-        .map_err(|e| format!("加载模型失败（{}）：{e}", spec.name))?;
-    let load_ms = t_load.elapsed().as_millis();
+    /* ⚠ 会话走缓存（见 `session_for`）：新建一次 = 读整个模型文件。
+     *   `run` 会改 Session 的内部状态吗？不会 —— `Session::run(&self)` 只读，
+     *   所以 `Arc<Session>` 可以跨线程共享。 */
+    let sess = session_for(spec)?;
+    let load_ms = 0u128;
 
     let edge = spec.input_edge as usize;
     // ---- 预处理：缩放到 (1,3,E,E)，按族的归一化规则 ----
@@ -279,29 +341,43 @@ pub fn run(
     // ---- 推理 ----
     let t0 = std::time::Instant::now();
     let val = Value::from_array(arr).map_err(|e| format!("包装输入失败：{e}"))?;
-    let outputs = sess
-        .run(ort::inputs![val])
-        .map_err(|e| format!("推理失败：{e}"))?;
-    let infer_ms = t0.elapsed().as_millis();
-
-    /* ---- 取蒙版 ----
-     * U2Net 输出 7 个（d0..d6），**必须取第 0 个**（d0 是融合输出，
-     * d1..d6 是各尺度的侧输出，单独看都很粗糙）。
-     * RMBG 只有一个。 */
-    let mut picked: Option<(usize, Vec<f32>)> = None;
-    for (idx, (_name, v)) in outputs.iter().enumerate() {
-        if let Ok((shape, data)) = v.try_extract_tensor::<f32>() {
-            let n: usize = shape.iter().map(|d| *d as usize).product();
-            if n >= edge * edge {
-                picked = Some((idx, data.to_vec()));
-                if spec.family == Family::U2net || idx == 0 {
-                    break; // 第一个可用的就是我们要的
+    /* `Session::run` 是 `&mut self`（ort 2.0 内部要登记输入/输出），
+     * 所以从缓存的 Mutex 里短暂借出来跑一次。这把锁只在**同一次推理**期间持有，
+     * 抠图又是串行操作，实际不会成为瓶颈。
+     *
+     * ⚠ 返回的 `SessionOutputs` 借用了 guard 里的 Session（生命周期绑在一起），
+     *   所以必须**在 guard 的作用域之内**把要的数据都取出来（下面那段
+     *   `picked` 提取），不能把 outputs 带出块。 */
+    let (used_idx, data, n_out) = {
+        let mut guard = match sess.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        let outputs = guard
+            .run(ort::inputs![val])
+            .map_err(|e| format!("推理失败：{e}"))?;
+        /* ---- 取蒙版 ----
+         * U2Net 输出 7 个（d0..d6），**必须取第 0 个**（d0 是融合输出，
+         * d1..d6 是各尺度的侧输出，单独看都很粗糙）。
+         * RMBG 只有一个。 */
+        let mut picked: Option<(usize, Vec<f32>)> = None;
+        for (idx, (_name, v)) in outputs.iter().enumerate() {
+            if let Ok((shape, data)) = v.try_extract_tensor::<f32>() {
+                let n: usize = shape.iter().map(|d| *d as usize).product();
+                if n >= edge * edge {
+                    picked = Some((idx, data.to_vec()));
+                    if spec.family == Family::U2net || idx == 0 {
+                        break; // 第一个可用的就是我们要的
+                    }
                 }
             }
         }
-    }
-    let (used_idx, data) = picked.ok_or_else(|| "模型没有可用的输出张量".to_string())?;
-    let n_out = outputs.len();
+        let n_out = outputs.len();
+        let (used_idx, data) = picked.ok_or_else(|| "模型没有可用的输出张量".to_string())?;
+        (used_idx, data, n_out)
+    };
+    let infer_ms = t0.elapsed().as_millis();
+
     if spec.family == Family::U2net && n_out > 1 && used_idx != 0 {
         // 理论上不会走到（上面遇 idx==0 就 break），留着当断言用
         crate::win::log("ai_matte: 注意 —— U2Net 用的不是第 0 个输出");

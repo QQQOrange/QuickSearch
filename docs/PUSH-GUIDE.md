@@ -19,7 +19,7 @@
 | 远端配置 | ✅ `origin` = `https://github.com/QQQOrange/QuickSearch.git` |
 | GitHub 凭据 | ✅ 凭据管理器里有（`git credential fill` 能拿到） |
 | 网络 | ⚠️ **间歇性**：`github.com:443` 时通时不通；`api.github.com` 一直可用 |
-| 发布 | ✅ Release `v1.0.0`、`v1.1.0` |
+| 发布 | ✅ Release `v1.0.0`、`v1.1.0`、`v1.1.1`、`v1.2.0` |
 
 ---
 
@@ -56,16 +56,27 @@ git push origin main
 
 ## 发布新版本 Release
 
-### 1. 改版本号（三处，必须一致）
+### 1. 改版本号（**四处**，必须一致）
 
 ```powershell
-# Cargo.toml / tauri.conf.json / package.json 里的 version
+# Cargo.toml / tauri.conf.json / package.json / package-lock.json（前两处）里的 version
 ```
+
+> ⚠ v1.2.0 起多了一条约束：**程序版本与模型资产版本是两回事**。
+> 模型（4.4/42/84/168 MB）与 `onnxruntime.dll` **不随每个版本重传** ——
+> 它们固定挂在某一个 release 上，由 `src/aimodels.rs` 的 `ASSET_RELEASE_TAG` 指定。
+> 改那个常量就要同步改所有自托管 URL，**但有一条单测
+> （`自托管源指向同一个资产版本`）会立刻把漏改的地方指出来**。
 
 ### 2. 写发布说明
 
-`docs/RELEASE-v<版本>.md` —— 参考 `RELEASE-v1.1.0.md` 的结构：
-主要改动 / 修掉的 bug / 安装 / 质量指标 / 已知限制 / **校验值** / **许可**。
+`docs/RELEASE-v<版本>.md` —— 参考 `RELEASE-v1.2.0.md` 的结构：
+主要改动 / 修掉的 bug / 安装 / **模型在哪个页面下载** / 质量指标 / 验证 / 已知限制 / **校验值** / **许可**。
+
+> ⚠ 校验值那一行必须写成 **`SHA256: <64 位十六进制>`** ——
+> v1.2.0 的自动更新会**从发布说明里解析这一行**，用它校验用户下到的更新包。
+> 格式写错（少了 `SHA256:` 这个词、或十六进制位数不对）会静默退化成"只比体积"。
+> 那条解析逻辑有单测（`从说明里抠出sha256`）钉着。
 
 ### 3. 构建并算校验值
 
@@ -83,19 +94,20 @@ Get-FileHash target\release\QuickSearch.exe -Algorithm MD5, SHA256
 ### 4. 打 tag + 推送
 
 ```powershell
-git tag -a v1.1.0 -m "Quick Search v1.1.0"
+git tag -a v1.2.0 -m "Quick Search v1.2.0"
 git push origin main
-git push origin v1.1.0
+git push origin v1.2.0
 ```
 
 ### 5. 建 Release + 上传 exe
 
-用 API（不依赖 git 协议端口，网络更稳）：
+用 API（不依赖 git 协议端口，网络更稳）。
+**资产名必须是 `QuickSearch.exe`** —— 自动更新就是按这个名字挑更新包的：
 
 ```powershell
 # 需要 token：git credential fill 取
 $h = @{ Authorization = "token <TOKEN>"; Accept = "application/vnd.github+json" }
-$body = @{ tag_name="v1.1.0"; name="Quick Search v1.1.0"; body=(Get-Content docs\RELEASE-v1.1.0.md -Raw); draft=$false; prerelease=$false } | ConvertTo-Json
+$body = @{ tag_name="v1.2.0"; name="Quick Search v1.2.0"; body=(Get-Content docs\RELEASE-v1.2.0.md -Raw); draft=$false; prerelease=$false } | ConvertTo-Json
 Invoke-WebRequest -Method Post -Uri "https://api.github.com/repos/QQQOrange/QuickSearch/releases" -Headers $h -Body $body -ContentType "application/json"
 # 再上传资产：POST /releases/{id}/assets?name=QuickSearch.exe  （二进制 body）
 ```
@@ -106,11 +118,14 @@ Invoke-WebRequest -Method Post -Uri "https://api.github.com/repos/QQQOrange/Quic
 
 - [ ] `cargo test` 全过、`cargo clippy` 0 warning
 - [ ] 真机探针全过
-- [ ] 三处版本号一致
+- [ ] 四处版本号一致（`Cargo.toml` / `tauri.conf.json` / `package.json` / `package-lock.json`）
 - [ ] `docs/RELEASE-v<版本>.md` 已写，校验值与实际产物一致
+- [ ] **发布说明里有一行 `SHA256: <64 位十六进制>`**（自动更新靠它校验更新包）
 - [ ] 产物目录没有 `onnxruntime.dll`
 - [ ] README 与 PRD 里**没有**已删除功能的描述（如"手动补描""颜色解混"）
 - [ ] 许可文件与 README/发布说明里的许可是同一个
+- [ ] 「关于」页的 GitHub 地址仍指向本仓库（`update::REPO_URL`）
+- [ ] 若动过 `ASSET_RELEASE_TAG`，自托管 URL 与文档里的"模型在哪个页面下载"两处都改过
 
 ---
 

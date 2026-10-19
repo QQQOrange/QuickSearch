@@ -17,13 +17,19 @@ let BY_NAME = new Map();
 
 function toast(msg) {
     const t = $('toast');
+    if (!t) return;
     t.textContent = msg;
     t.hidden = false;
-    requestAnimationFrame(() => t.classList.add('show'));
+    t.classList.add('show');
+    /* ⚠ 两个定时器都要能取消。
+     *   以前只存了外层那个：1900ms 内连来第二条时，**第一条**的 220ms 内层
+     *   回调仍会执行 `t.hidden = true` —— 第二条刚显示就被藏掉，
+     *   用户看到的是"提示一闪而过 / 干脆没出现"。 */
     clearTimeout(toast._t);
+    clearTimeout(toast._t2);
     toast._t = setTimeout(() => {
         t.classList.remove('show');
-        setTimeout(() => { t.hidden = true; }, 220);
+        toast._t2 = setTimeout(() => { t.hidden = true; }, 220);
     }, 1900);
 }
 
@@ -251,11 +257,20 @@ function bindTabs() {
             // 告诉我说是否已准备就绪"）。已经检测过就沿用缓存结果，没测过就显示
             // 那个「检测本地 OCR 环境」按钮等他点。
             if (b.dataset.tab === 'ocr') renderOcrDep();
+            /* v1.2.0：切到「关于」时初始化更新那块（接按钮 + 问一句有没有待装的）。
+             * 放这里而不是 boot 里一次性做完，是因为 `update_pending` 问的是
+             * "**此刻**有没有待装的新版"——启动时那次检查可能还没回来，
+             * 等用户真的打开这一页再问，拿到的才准。幂等，重复切页无副作用。 */
+            if (b.dataset.tab === 'about') updInit();
             /* r74：首字母索引浮动钮只许在引擎页亮着。切走先收起来（它是
              * position:fixed，不收就漂在别的页上面）；切回引擎页时如果仍是
              * 「全部引擎」档，按 DOM 现况恢复 —— 不重画列表（会弹回顶部）。 */
             idxFabHide();
             if (b.dataset.tab === 'engines' && allGroupFilter === '*') idxReshow();
+            /* 切回引擎页时作废渲染指纹：指纹相同就意味着"不用重画"，但用户
+             * 可能刚在别处换过图（比如在「横条上的引擎」里换了图标，那里的
+             * 行没走 renderAllList 的指纹），切回来必须看到新图标。 */
+            if (b.dataset.tab === 'engines') invalidateAllList();
             // 调试构建：换页后让「引擎」页的行控件也上报一次坐标
             if (document.body.dataset.qsDebug === '1') {
                 invoke('log_msg', { msg: 'TAB ' + b.dataset.tab }).catch(() => { });
@@ -694,6 +709,18 @@ let allGroupFilter = '';
 let allMidFilter = null;
 /** 小类标题（null = 全部小类）——选了中类才出现这一层。 */
 let allCatFilter = null;
+/** 「全部引擎」列表上一次渲染用的输入指纹（见 renderAllList 的广播防抖）。
+ *  `''` = 还没有渲染过 / 被显式作废（切分页、改筛选时清空）。 */
+let allListSig = '';
+
+/** 作废「全部引擎」的渲染指纹 —— 下一次 renderAllList 一定会重画。
+ *
+ *  什么时候必须调：任何**不体现在指纹里**却改变渲染结果的操作。目前是
+ *  「切回引擎分页」和「索引浮动钮重建」。改筛选条件不用调（它们本身在指纹里）。 */
+function invalidateAllList() {
+    allListSig = '';
+}
+
 /** 「外部软件」页（sec-apps）那个大类块的收起状态 —— #136 要求相同交互。
  *  （引擎库自己的大类收起状态 r70 起没有了：大类标题栏整个删掉，见
  *   renderAllList 里那段注释 —— 筛选用胶囊，不再需要第二套开关。） */
@@ -1145,6 +1172,46 @@ function renderAllList() {
      *   软件 / 开关同步 / 绑定）全部带停。数据没就绪就先不画：boot() 拉到
      *   数据之后会自己再画一次。 */
     if (!CATALOG || !f || !box) return;
+    /* ⚠ 广播防抖（性能 + 不打断滚动）：`qs://config` 每来一次都会走到这里，而
+     *   收藏面板拖尺寸是 600ms 一次广播（bar.js），每次都把 777 行全部拆了重建 ——
+     *   列表还会弹回顶部，用户正在「全部引擎」里滚动时看着就是"页面自己跳了"。
+     *
+     *   判据用**渲染输入**的指纹：过滤词 + 三个下钻态 + 自定义引擎/外部软件的名字
+     *   集合 + 图标覆盖的键。这些都没变，说明这次广播改的是别的东西（收藏尺寸、
+     *   AI 后缀…），重画没有任何收益。
+     *
+     *   指纹存模块级 `allListSig`：切分页 / 用户主动改筛选时由调用方清空（见
+     *   `invalidateAllList`），保证"该重画的时候一定重画"。 */
+    const sig = [
+        f.value,
+        allGroupFilter || '',
+        allMidFilter || '',
+        allCatFilter || '',
+        (CONF.customEngines || []).map((x) => x.name).join('\u0001'),
+        (CONF.apps || []).map((x) => x.name).join('\u0001'),
+        /* ⚠ 下面这三项是**渲染真的会变**的输入，必须进指纹。
+         *
+         *  · `barList`：列表行上的「☆ 已在横条 / ＋ 加到横条」是按它画的，
+         *    用户在横条面板里右键增删、或在「横条上的引擎」里拖动，都会改它。
+         *  · `aiMattingEnable`：它决定每一行**有没有**「编辑图标」按钮
+         *    （见 `iconEditorEnabled` / `hasIconToEdit`）。
+         *  · `dirIcons`：文件名 = 引擎名 的那批默认图标。
+         *
+         * 漏掉它们的时候症状是"界面没反应"：开关点了、横条引擎增删了，
+         * 但列表一行都不重画，用户得切一次分页才看到变化
+         * （`bindSwitches` 里那条注释说的就是这个病，我加指纹时又漏了一遍）。 */
+        (CONF.barList || []).join('\u0001'),
+        CONF.aiMattingEnable ? '1' : '0',
+        CONF.unifyIcons === false ? '0' : '1',
+        /* 图标覆盖：键 + 值的长度 + 首尾各 12 字符。
+         * 只取键不够 —— 「给同一颗引擎换一张图」键不变、图变了，列表里的图标
+         * 必须跟着变（用户会以为没换成功）。又不能把整串 data URL 拼进指纹
+         * （收藏夹那种几 MB 的 base64 会让每次广播都白算一遍）。 */
+        window.qsIconSigOf(CONF.overrideIcons),
+        window.qsIconSigOf(CONF.dirIcons),
+    ].join('\u0002');
+    if (sig === allListSig && box.childElementCount) return;
+    allListSig = sig;
     const kw = f.value.trim().toLowerCase();
     box.textContent = '';
 
@@ -2462,6 +2529,9 @@ const SWITCHES = [
     ['s-shadow', 'shadow'],
     ['s-aiCopyPrompt', 'aiCopyPrompt'],
     ['s-ocrEnable', 'ocrEnable'],
+    // v1.2.0：自动更新。⚠ 它不在「通用」页，而在「关于」页的更新区块里 ——
+    // 但走同一张表、同一套绑定逻辑（少写一套状态同步）。
+    ['s-autoUpdate', 'autoUpdate'],
     // r54 识图搜索。两个开关都**默认开**：用户这一批专门要了这个功能，
     // 开机就该能用（与 config.rs 的 default_true 一致）
     ['s-imgEnable', 'imgEnable'],
@@ -2515,6 +2585,9 @@ const SWITCH_DEFAULT = {
     shadow: false,
     aiCopyPrompt: true,
     ocrEnable: true,
+    // v1.2.0：自动更新默认**开**。功能名就叫"自动更新"，默认不勾等于默认没这功能；
+    // 用户取消勾选后彻底不检测（见 main.rs 的 auto_check_on_start）。
+    autoUpdate: true,
     // r54：识图搜索默认开着、默认加到横条（与 config.rs 的 default_true 对齐）
     imgEnable: true,
     imgAddToBar: true,
@@ -2651,8 +2724,14 @@ function bindBarStyle() {
             Object.assign(CONF, { barGlass: glass, barBlur: blur });
             syncStyleUI();
             renderPreview();
-            invoke('set_setting', { key: 'barGlass', value: glass }).catch(() => {});
-            invoke('set_setting', { key: 'barBlur', value: blur }).catch(() => {});
+            /* ⚠ 一次写完两个键。
+             *   以前是两条 `set_setting`，每条各自 save + 广播 ——
+             *   「磨砂→玻璃」「玻璃→默认」都会广播出一个中间态，
+             *   syncStyleUI 按 qsBarStyle(CONF) 推导时会闪一下
+             *   （文件里 2613 行那段注释说的就是这个病，这里是漏改的一处）。 */
+            invoke('set_settings', {
+                pairs: [['barGlass', glass], ['barBlur', blur]],
+            }).catch(() => {});
         });
     }
 }
@@ -3054,9 +3133,16 @@ function bindSwitches() {
                 aiOnSwitchChanged();
             }
             /* 打开/关闭图标编辑器会改变所有行的按钮组合（「编辑图标」出现或消失），
-             * 所以要重绘列表 —— 否则用户得手动切分页才看到变化。 */
-            if (key === 'aiMattingEnable' && typeof renderAll === 'function') {
-                renderAll();
+             * 所以要重绘列表 —— 否则用户得手动切分页才看到变化。
+             *
+             * ⚠ 这里以前调的是一个**全项目都不存在**的 `renderAll()`，`typeof`
+             *   守卫把它变成永假分支 —— 于是开关点了、配置也存了，但四条列表
+             *   一个字都不重画，用户看到的是"开关没生效"。四块各自重画即可。 */
+            if (key === 'aiMattingEnable') {
+                renderAllList();
+                renderBarList();
+                renderCustomList();
+                renderAppList();
             }
         });
     }
@@ -3104,9 +3190,15 @@ function bindSwitches() {
     }
     // 首屏（以及每次重新绑定）都按当前引擎把百度专用项显隐一次，
     // 否则切到「Windows 本地」后刷新页面，那几行又会冒出来。
+    //
+    // ⚠ 广播到达时（bound=true）也要跑，但要**避开正在输入的那个框**：
+    //   `syncOcrEngineUI` 会连带 `renderOcrEngines` + `renderOcrCred`，
+    //   而后者自己已经加了"正在输入就不重建"的保护，所以这里照跑即可 ——
+    //   以前这两句在 `if (bound) continue` 之外是无条件的，等于每次广播都
+    //   重建一次整张 OCR 引擎表和凭据表单。
     syncOcrEngineUI();
     // 引擎列表要单独拉一次（renderOcrEngines 只负责渲染，数据来自后端注册表）
-    loadOcrEngines();
+    if (!bound) loadOcrEngines();
 
     for (const [id, valId, key, dflt] of SLIDERS) {
         const el = $(id);
@@ -3179,15 +3271,25 @@ function bindSwitches() {
     aiDelayHint();
 
     // 程序列表（多行）：失焦时提交
+    /* ⚠ 这里必须判空再往下走。
+     *   同一个函数里 SWITCHES / SEGS / SLIDERS / TEXTS 都写了
+     *   `if (!el) { console.warn(...); continue; }`，唯独这一处直接 `.value` ——
+     *   元素一旦缺失（改版删错 id、HTML 没同步）就是 TypeError，
+     *   把**后面**所有绑定（搜索防抖、备份按钮、收藏夹热键……）整段带崩，
+     *   用户看到的是"设置页有一半按钮点了没反应"。 */
     const fl = $('s-filterList');
-    if (document.activeElement !== fl) {
-        fl.value = (CONF.filterList || []).join('\n');
-    }
-    if (!bound) {
-        fl.addEventListener('change', () => {
-            const list = fl.value.split('\n').map((s) => s.trim()).filter(Boolean);
-            invoke('set_setting', { key: 'filterList', value: list });
-        });
+    if (fl) {
+        if (document.activeElement !== fl) {
+            fl.value = (CONF.filterList || []).join('\n');
+        }
+        if (!bound) {
+            fl.addEventListener('change', () => {
+                const list = fl.value.split('\n').map((s) => s.trim()).filter(Boolean);
+                invoke('set_setting', { key: 'filterList', value: list });
+            });
+        }
+    } else {
+        console.warn('[qs] 找不到程序过滤列表 #s-filterList，已跳过');
     }
 
     if (!bound) bindBarStyle();
@@ -3808,6 +3910,11 @@ async function loadImgEngines() {
 function renderImgEngines() {
     const box = $('w-imgEngList');
     if (!box) return;
+    /* ⚠ 清空必须放在**最前面**，不能只放在后面那条分支里。
+     *   以前是「列表为空 → 写一句提示 → return」，那个分支不清 DOM ——
+     *   上一次已经画出的十几行会留在原地，提示语追加在后面，看着像
+     *   "加载失败但还能点"。 */
+    box.innerHTML = '';
     if (!IMG_ENGINES.length) {
         box.innerHTML = '<div class="dep-tip">读不到引擎列表（后端没起来？重开设置页试试）</div>';
         return;
@@ -3815,8 +3922,6 @@ function renderImgEngines() {
     const conf = CONF || {};
     const picked = Array.isArray(conf.imgEngines) ? conf.imgEngines.slice() : [];
     const def = (conf.imgDefaultEngine || '') + '';
-    // ⚠ 必须先清空：见上面注释
-    box.innerHTML = '';
     // 后端发来的就是归过序的（默认那两家在最前），界面按注册表顺序画，
     // 不按用户勾选先后重排 —— 「标签页顺序稳定」是用户看得见的一条。
     IMG_ENGINES.forEach((e) => {
@@ -3991,19 +4096,28 @@ function setImgDefault(id, row) {
     if (!CONF) return;
     const e = IMG_ENGINES.find((x) => x.id === id);
     if (!e) return;
-    CONF.imgDefaultEngine = id;
-    invoke('set_setting', { key: 'imgDefaultEngine', value: id }).catch(() => {});
     const cur = Array.isArray(CONF.imgEngines) ? CONF.imgEngines.slice() : [];
-    if (cur.indexOf(id) < 0) {
-        cur.push(id);
-        CONF.imgEngines = cur;
-        invoke('set_setting', { key: 'imgEngines', value: cur }).catch(() => {});
+    const needAdd = cur.indexOf(id) < 0;
+    if (needAdd) cur.push(id);
+    CONF.imgDefaultEngine = id;
+    CONF.imgEngines = cur;
+    /* ⚠ 两个键必须**一次**写下去。
+     *
+     * 以前是两条独立的 `set_setting`：每条各自 `config::save` + `broadcast()`，
+     * 于是中间那一份广播里 `imgDefaultEngine` 已经是新引擎、`imgEngines` 还是
+     * 旧的 —— 界面重画后那一行显示"当前默认"但复选框没勾上，正是上面
+     * paintImgDefaultMove 注释里说"已经修好"的那个症状的另一条来源。
+     * `set_settings` 是批量入口，一次落两键、一次广播。 */
+    invoke('set_settings', {
+        pairs: needAdd
+            ? [['imgDefaultEngine', id], ['imgEngines', cur]]
+            : [['imgDefaultEngine', id]],
+    }).catch(() => {});
+    if (needAdd && row) {
         // 同步这一行的复选框与底色（不整表重画，理由见 paintImgDefaultMove）
-        if (row) {
-            const box = row.querySelector('.eng-check input[type=checkbox]');
-            if (box) box.checked = true;
-            row.classList.add('on');
-        }
+        const box = row.querySelector('.eng-check input[type=checkbox]');
+        if (box) box.checked = true;
+        row.classList.add('on');
     }
     // 不整表重画：只把上一行的"当前默认"退回按钮、这一行反过来。
     // 整表重画会让用户正在看的滚动位置跳回去（列表有十几行，实测会滚到顶）
@@ -4394,6 +4508,14 @@ function pickOcrEngine(id) {
 function renderOcrCred() {
     const box = $('w-ocrCredBox');
     if (!box) return;
+    /* ⚠ 正在这个框里打字时**不许重建**。
+     *
+     * 凭据输入框的落库时机是 `change`（失焦 / 回车），而配置广播很频繁
+     * （横条收藏面板每 600ms 存一次尺寸就会广播一次）。以前这里无条件
+     * `box.innerHTML = ''` 重建：用户刚敲完 Key、还没失焦，一次广播过来
+     * 输入框被换掉 —— 里面是旧值，**刚打的字直接丢**。
+     * 同页的 `renderAiList` / `favTree` 早就加了这道保护，这里漏了。 */
+    if (qsEditingIn('w-ocrCredBox')) return;
     const title = $('w-ocrCredTitle');
     const tip = $('w-ocrCredTip');
     const e = engineById(CONF.ocrEngine || 'baidu');
@@ -6235,6 +6357,25 @@ function webviewLabel() {
  *  发新版时**同时**加一条，对不上就是漏了。 */
 const CHANGELOG = [
     {
+        ver: 'v1.2.0',
+        items: [
+            '<b>自动更新</b>（新）：「关于」页里多了一个勾选框 —— 勾着时每次打开软件都会自动检查新版本，<b>没新版就什么都不发生</b>；有新版会告诉你可以下载。<b>下载不跳浏览器</b>：在软件内部下好、自动校验、自动换掉旧程序，装完点「立即重启」就行。旁边还有一颗「检查更新」按钮，不受那个开关限制，随时可以手动查一次。',
+            '<b>关于页加上项目地址</b>：GitHub 仓库地址直接标在「关于」里，点一下用系统默认浏览器打开。',
+            '<b>自定义图标变成内置默认图标</b>：百度 / Google / 知乎 / 小红书 / 淘宝 / 天猫 / 京东 / 豆瓣 这一批换成了你自己画的那张图 —— 之前是"覆盖项"，现在烘进程序里当默认图标，横条、面板、设置页三处同时生效，换台电脑也照样在。',
+            '<b>修：剪贴板还原会把你的内容清空</b> —— 取词和识图都借用剪贴板，还原时如果快照恰好是空的，就会把你原本复制的东西抹掉。这条被一个一直红着的测试精确命中，现在修好了。',
+            '<b>修：识图搜完会把你中途复制的内容覆盖回去</b> —— 那 1~2 秒里你要是又复制了别的东西，以前会被旧的盖掉；现在会先核对、放过你新复制的内容。',
+            '<b>修：「清理冗余数据」会把自定义图标删光</b> —— 判据漏了「文件名 = 引擎名」那套默认图标。',
+            '<b>修：自定义备份目录里的备份找不回</b> —— 主配置损坏时会直接落回默认配置。',
+            '<b>修：中文输入法在横条上按回车会直接开搜</b> —— 打拼音选词那一下被当成"确认搜索"了。',
+            '<b>修：深色模式下几个纯黑品牌图标看不见</b>（反白规则被另一条同权重规则顶掉了）。',
+            '<b>修：腾讯云 OCR 一直不可用</b>（签名里写的请求头和实际发出去的不一致）。',
+            '<b>修：没配在线密钥时框完必然识别失败</b>（放行判断用了本地兜底，识别时却没用同一份名单）。',
+            '<b>快了很多</b>：引擎过滤框敲第一个字不再卡一两秒（改成分批建格子）；配置广播不再重建 777 行列表；高刷鼠标不再把上千条移动事件塞满队列；AI 模型不再每次抠图都重新加载一遍（168MB 那个尤其明显）；拖拽不再每个像素都发一次 IPC；大屏抓屏不再白清一遍内存。',
+            '<b>稳了不少</b>：框选遮罩的"最后一道保险"以前其实是空的（跨线程销毁窗口必然失败），现在会正确请求销毁；玻璃渲染加上显示上下文丢失/恢复，显卡驱动重置后不用重启程序了。',
+            '<b>这次是把整个项目从头到尾审了一遍</b>，一共修了 93 处（含我自己上一批改动里引入的问题）。逐条清单见仓库里的审计报告。',
+        ],
+    },
+    {
         ver: 'v1.1.1',
         items: [
             '<b>修：点一次下载却像下了好几遍</b> —— 同时发起多个下载时，它们会抢同一个临时文件、互相把对方下到一半的文件删掉，结果每一轮都失败、界面看着像"重复下载"。现在同一时刻只允许一个下载，重复点会明确提示"已经有一个在进行中"。',
@@ -6322,8 +6463,212 @@ function fillAbout() {
         ver.title = '开发者 ' + (CONF.developer || 'QQQOrange')
             + ' · 构建于 ' + (CONF.builtAt || '未知');
     }
+
+    /* v1.2.0：更新那块也顺手初始化一次。
+     *
+     * 为什么放在这里（而不是只在 boot 里做一次）：`fillAbout` 在**每次配置
+     * 广播**都会跑，而广播会重设开关的 checked 状态 —— 按钮的绑定与"问一句
+     * 有没有待装版本"必须跟着走，否则改个别的设置回来，那颗「检查更新」
+     * 就成了没接线的装饰。函数内部全是幂等操作，重复调没有副作用。 */
+    try { updInit(); } catch (e) { console.warn('[qs] updInit 失败', e); }
 }
 
+
+/* ------------------------------------------------------------------ */
+/* v1.2.0：更新                                                         */
+/*                                                                     */
+/* 用户要求：                                                          */
+/*   ① 关于里要有「自动更新」这个**勾选项**，勾了才会自动检查；        */
+/*   ② 还有一个「检查更新」按钮，点了就去问有没有新版；                */
+/*   ③ 发现新版要提示"是否下载"；                                      */
+/*   ④ 下载**不跳浏览器**，在程序里下好 → 自动删掉原来的 → 换新的；     */
+/*   ⑤ 关于里要有 GitHub 地址，点一下用浏览器打开。                     */
+/*                                                                     */
+/* 后端分工（见 src/update.rs 与 main.rs 的 update_* 命令）：          */
+/*   update_check     → 查（结果走 qs://update 事件回来）               */
+/*   update_pending   → 打开关于页时问一句"有没有待装的"                */
+/*   update_install   → 下载 + 校验 + 替换（进度走 qs://update-progress）*/
+/*   update_restart   → 起新进程再退出自己                                */
+/* ------------------------------------------------------------------ */
+
+/** 最近一次「有新版」的详情（`qs://update` / `update_pending` 都往里写）。 */
+let UPD_INFO = null;
+
+/** 把字节数变成人话（和 Rust 的 aimodels::human_size 同口径）。 */
+function updSizeText(n) {
+    if (!n || n < 0) return '';
+    const mb = 1024 * 1024;
+    return n >= mb ? (n / mb).toFixed(1) + ' MB' : Math.round(n / 1024) + ' KB';
+}
+
+/** 进度条：`total` 为 0 时只显示"已下载多少"（远端没给体积的情况）。 */
+function updPaintProgress(done, total) {
+    const box = $('updProgress');
+    const bar = $('updBar');
+    const pct = $('updPct');
+    if (!box || !bar || !pct) return;
+    box.hidden = false;
+    if (total > 0) {
+        const p = Math.max(0, Math.min(100, Math.round((done / total) * 100)));
+        bar.style.width = p + '%';
+        pct.textContent = p + '%  ·  ' + updSizeText(done) + ' / ' + updSizeText(total);
+    } else {
+        bar.style.width = '100%';
+        bar.style.opacity = '.35';   // 不知道总量：显示一条"在动"的条，不假装百分比
+        pct.textContent = '已下载 ' + updSizeText(done);
+    }
+}
+
+/** 有新版 → 把详情块摆出来。 */
+function updShowFound(v) {
+    const box = $('updFound');
+    if (!box) return;
+    box.hidden = false;
+    qsSetText('updVer', 'v' + v);
+    const info = UPD_INFO;
+    const sizeEl = $('updSize');
+    if (sizeEl) sizeEl.textContent = info && info.size ? '（' + updSizeText(info.size) + '）' : '';
+    const notes = $('updNotes');
+    if (notes) {
+        /* ⚠ 版本说明用 textContent，不用 innerHTML —— Release body 是**服务端
+         *   下发的内容**（理论上可被改），拼进 HTML 就是白送一个注入点。
+         *   这里也不需要富文本：`.upd-notes` 已经设了 white-space:pre-wrap，
+         *   Markdown 的换行照样看得清。 */
+        notes.textContent = (UPD_INFO && UPD_INFO.notes) || '（这个版本没有写说明）';
+    }
+    // 已经有下载好的包时，按钮状态由 qs://update-done 决定
+    const ins = $('btnUpdateInstall');
+    if (ins) ins.hidden = false;
+}
+
+/** 打开「关于」页时问后端一句"有没有待装的"，并把仓库按钮接上。 */
+function updInit() {
+    const repo = $('aboutRepo');
+    if (repo && !repo.dataset.bound) {
+        repo.dataset.bound = '1';
+        /* 「标明 github 的地址，并且点击后能够直接通过浏览器打开」——
+         * 走后端命令（ShellExecuteW），不是在 webview 里跳转。 */
+        repo.addEventListener('click', () => {
+            invoke('open_repo_page').catch(() => {});
+        });
+    }
+    const check = $('btnUpdateCheck');
+    if (check && !check.dataset.bound) {
+        check.dataset.bound = '1';
+        check.addEventListener('click', () => {
+            const hint = $('updHint');
+            if (hint) hint.textContent = '正在检查…';
+            check.disabled = true;
+            // ⚠ 结果走事件回来（qs://update）。无论有没有新版都会回一条
+            //   （manual=true），所以这里**不需要**超时兜底 —— 后端查失败
+            //   时也会发 qs://toast 说明原因。但按钮不能一直按不动，
+            //   给一个 20 秒的保险（比后端的 15 秒超时稍长）。
+            setTimeout(() => { check.disabled = false; }, 20000);
+            invoke('update_check').catch((e) => {
+                if (hint) hint.textContent = '检查失败：' + e;
+            });
+        });
+    }
+    const ins = $('btnUpdateInstall');
+    if (ins && !ins.dataset.bound) {
+        ins.dataset.bound = '1';
+        ins.addEventListener('click', () => {
+            ins.disabled = true;
+            const hint = $('updHint');
+            if (hint) hint.textContent = '正在下载…';
+            updPaintProgress(0, UPD_INFO ? UPD_INFO.size : 0);
+            invoke('update_install').catch((e) => {
+                toast('下载失败：' + e);
+                ins.disabled = false;
+            });
+        });
+    }
+    const rst = $('btnUpdateRestart');
+    if (rst && !rst.dataset.bound) {
+        rst.dataset.bound = '1';
+        rst.addEventListener('click', () => {
+            // 起新进程 + 退自己，都在后端一次做完（见 update_restart）
+            invoke('update_restart').catch(() => {});
+        });
+    }
+    const pg = $('btnUpdatePage');
+    if (pg && !pg.dataset.bound) {
+        pg.dataset.bound = '1';
+        pg.addEventListener('click', () => {
+            const url = (UPD_INFO && UPD_INFO.page) || '';
+            if (!url) return;
+            /* 复用现成的 `open_links`（它内部丢后台线程 ShellExecuteW，
+             * 而且会先过一遍 URL 合法性）。不为"打开一个链接"新开一条命令。 */
+            invoke('open_links', { links: [url] }).catch(() => {});
+        });
+    }
+    // 问一句有没有待装的（启动时那次检查的结果可能已经在那儿了）
+    invoke('update_pending').then((r) => {
+        if (r && r.has) {
+            UPD_INFO = { version: r.version, notes: r.notes, size: r.size, page: r.page };
+            updShowFound(r.version);
+            const hint = $('updHint');
+            if (hint) hint.textContent = '发现新版本 v' + r.version;
+        }
+    }).catch(() => {});
+}
+
+
+/* 后端查完更新推回来（qs://update）。
+ *
+ * `manual = true` 表示这是用户点「检查更新」触发的 —— 那时候**无论有没有新版
+ * 都要给回话**（用户主动问了，什么都不说等于"点了没反应"）。
+ * 自动检查（manual=false）只有真有新版才会推过来，所以这里不用再判 newer。 */
+listen('qs://update', (ev) => {
+    const p = ev.payload || {};
+    const check = $('btnUpdateCheck');
+    if (check) check.disabled = false;
+    const hint = $('updHint');
+    if (p.newer) {
+        UPD_INFO = { version: p.version, notes: p.notes, size: p.size, page: p.page };
+        updShowFound(p.version);
+        if (hint) hint.textContent = '发现新版本 v' + p.version + '，可以下载';
+    } else {
+        const found = $('updFound');
+        if (found) found.hidden = true;
+        if (hint) hint.textContent = '已是最新版本（v' + (p.current || CONF.version || '—') + '）';
+        if (p.manual) toast('已是最新版本');
+    }
+});
+
+/* 下载进度 */
+listen('qs://update-progress', (ev) => {
+    const p = ev.payload || {};
+    updPaintProgress(p.done || 0, p.total || 0);
+});
+
+/* 装好了 */
+listen('qs://update-done', (ev) => {
+    const v = ev.payload || '';
+    const bar = $('updBar');
+    if (bar) { bar.style.width = '100%'; bar.style.opacity = '1'; }
+    const ins = $('btnUpdateInstall');
+    if (ins) ins.hidden = true;
+    const rst = $('btnUpdateRestart');
+    if (rst) rst.hidden = false;
+    const tip = $('updDoneTip');
+    if (tip) tip.hidden = false;
+    const hint = $('updHint');
+    if (hint) hint.textContent = 'v' + v + ' 已安装完成';
+    toast('新版本 v' + v + ' 已装好，点「立即重启」生效');
+});
+
+/* 下载/替换失败 */
+listen('qs://update-failed', (ev) => {
+    const msg = (ev && ev.payload) || '未知原因';
+    const ins = $('btnUpdateInstall');
+    if (ins) ins.disabled = false;
+    const pg = $('updProgress');
+    if (pg) pg.hidden = true;
+    const hint = $('updHint');
+    if (hint) hint.textContent = '更新失败';
+    toast('更新失败：' + msg);
+});
 
 /* ------------------------------------------------------------------ */
 /* 事件绑定                                                            */
@@ -6959,88 +7304,14 @@ async function qsSelfTest() {
 }
 
 /* ------------------------------------------------------------------ */
-/* 启动                                                                */
+/* r80：AI 抠图（图标编辑器用）                                          */
+/* ⚠ 这一整块必须在**顶层**，不能写在 boot() 里。                        */
+/*   它原来确实在 boot 函数体内（`(async function boot() {` 一直到文件末尾  */
+/*   才 `})();`），于是 15 个 ai* 函数全成了 boot 的局部函数 ——            */
+/*   `bindSwitches` 里 `typeof aiOnSwitchChanged === 'function'` 永远为假， */
+/*   开关切换后后端的模型 / 运行库状态永不刷新（用户看到"开关点了没反应"）。*/
+/*   搬到顶层之后，boot 末尾那次 `aiInit()` 才真的能调到它。              */
 /* ------------------------------------------------------------------ */
-
-/* 首帧一画完就通知 Rust 把（隐藏建出来的）设置窗口显示出来。
- *  为什么隐藏建窗：见 Rust 侧 open_settings_win 的注释 —— 主要是不让用户先看到
- *  WebView2 还没渲染时那块原生黑底。双重 rAF 保证这一帧真的提交上屏了再 show。 */
-requestAnimationFrame(() => requestAnimationFrame(() => {
-    invoke('settings_ready').catch(() => {});
-}));
-
-(async function boot() {
-    bindTabs();
-
-    CATALOG = await fetch('data/engines.json').then((r) => r.json());
-    for (const e of CATALOG.toolbar) BY_NAME.set(e.name, e);
-    for (const c of CATALOG.categories) {
-        for (const e of c.engines) if (!BY_NAME.has(e.name)) BY_NAME.set(e.name, e);
-    }
-    /* r74：旧 renderEngineLib（r51/r52 那套 #libToc/#libBody 三层库）连同它的
-     * 两个前置版本一起删了 —— 那两个 DOM 节点在 r61 合并卡片时就不存在了，
-     * 函数开头 `if (!toc || !body) return` 让整套代码一次都没跑过。引擎库现在
-     * 只有 renderAllList 一条路（见上面 r73 那段）。 */
-
-    CONF = window.CONF = await invoke('get_config');
-    $('ver').textContent = 'v' + (CONF.version || '—');
-    fillAbout();
-    // 调试构建才打开自动化辅助（坐标上报等）
-    if (CONF.debug) document.body.dataset.qsDebug = '1';
-
-    // 内建自检：QS_SELFTEST=1 时把真实控件的自检跑一遍（只用于开发验证）
-    if (CONF.selftest) setTimeout(() => { qsSelfTest().catch((e) => console.warn(e)); }, 300);
-    // 用户自己的引擎必须在第一次渲染前并进目录，否则它不出现在
-    // 「全部引擎」里，也就没法加到横条上。
-    qsMergeCustomEngines(CATALOG, BY_NAME, CONF);
-
-    renderBarList();
-    renderAllList();
-    renderCustomList();
-    renderAppList();
-    renderAiList();
-    syncOcrInBarBtn();
-    /* r54：识图搜索那一栏 + 数据那一栏从后端拿清单（界面不自己维护）。
-     * ⚠ 这两个是**后台跑**、不拦在 bindSwitches 前面：boot 剩下的都是同步渲染，
-     *    一拦就把"控件按配置摆好"整个推迟到两次 IPC 之后。实测（r44 探针）
-     *    就是这个顺序让「空格=智能」那一档在窗口刚出来时还没摆上 ——
-     *    用户看到的是"设置刚打开时几个开关是空的，过一下才对"。
-     *    所以：先起动（fire and forget），bindSwitches 照老顺序跑，
-     *    清单回来后 renderImgEngines / renderExportBox 自己会把内容填上。 */
-    const imgListReady = loadImgEngines();
-    bindDataTab();
-    const exportReady = loadExportGroups();
-    // 本地 OCR 环境检测：设置窗一打开先跑一次（用户要求「进入页面 / 初始化 OCR
-    // 时自动检测」）——缺组件时用户在 OCR 页第一眼就能看到，不用先点「测试」。
-    bindOcrDep();
-    renderOcrDep();
-    bindSwitches();
-    bindCeKind();
-    bindCeBind();   // r58：快捷键引擎「绑定应用」的联动（开关 → 选应用 → 管理员）
-    bindApKind();
-    // r76：AI 识图延迟那一行的「↺ 默认」钮
-    bindAiDelayReset();
-    // 上面那两份清单回来后补一次渲染（引擎行上的图标要等清单才知道有几家）
-    await imgListReady;
-    renderImgEngines();
-    await exportReady;
-
-    document.addEventListener('contextmenu', (e) => e.preventDefault());
-
-    /* r75：回到顶部浮动钮。放在最后装 —— 它只是长页面的辅助入口，不能挡在
-     * 配置读回来、控件按配置摆好这些正事前面。 */
-    toTopBuild();
-    toTopStackSync();
-    toTopSync();
-
-    // 自动化测试用的坐标上报：把关键控件的视口 rect 打一份到日志。
-    // 只在调试构建（QS_DEBUG=1，由后端在启动时把开关塞进 body.dataset）时跑，
-    // 正式使用不受任何影响；对用户来说这条路永不执行。
-    if (document.body.dataset.qsDebug === '1') reportRects();
-
-    /* ── r80：AI 抠图（图标编辑器）────────────────────────────────────
-       把"开关 + 模型选择 + 下载进度"整套挂在这里。逻辑说明见块内注释。 */
-
 
 /* ══════════════════════════════════════════════════════════════════════════
  * r80：AI 抠图（图标编辑器用）
@@ -7177,13 +7448,22 @@ function aiRenderModels() {
     const tip = $('aiMatteTip');
     if (tip) {
         let msg;
+        /* ⚠ 以前这里是两个一模一样的 `if (!AI_STATUS.runtime)` 分支 ——
+         *   第二个 `else if` 永远不可能命中（死代码），而它承载的正是 r80g
+         *   改口径之后**唯一正确**的那句提示（"运行库随模型一起下"）。
+         *   也就是说：真正缺运行库时，用户看到的还是老文案"重新下载完整程序包"，
+         *   照做也没用（安装包本来就不含 dll）。
+         *   现在按**有没有模型已下载**分两种说法：
+         *     · 一个模型都没有 → 告诉他"下模型时会一起下"（新口径）；
+         *     · 已经有模型但运行库不在 → 这是异常（文件被删/被杀软隔离），
+         *       告诉他去重新下载。 */
+        const anyModel = models.some((m) => m.downloaded);
         if (!AI_STATUS.runtime) {
-            msg = '缺少推理运行时（onnxruntime.dll），下载模型也没法运行。请重新下载完整程序包。';
-        } else if (!AI_STATUS.runtime) {
-            /* r80g：运行库现在**随模型一起下载**，所以这里不再是"重新下程序包"，
-             * 而是"点模型的下载按钮会一起下"（见 ai_matting_download）。 */
-            msg = '运行库（onnxruntime.dll）还没就绪 —— 它会在你点某个模型的「下载」时'
-                + '一起下好，并和模型放在同一个目录里。';
+            msg = anyModel
+                ? '运行库（onnxruntime.dll）不见了 —— 模型在但跑不了。点任意模型的「重新下载」，'
+                    + '它会把运行库一起补上。'
+                : '还差运行库（onnxruntime.dll）：不用单独找它，点某个模型的「下载」时会'
+                    + '一起下好，并和模型放在同一个目录里。';
         } else if (!AI_STATUS.currentReady) {
             const cm = models.find((x) => x.id === cur);
             msg = '当前选的是「' + (cm ? cm.name : cur) + '」，但还没下载 —— 点上面的「下载」按钮，'
@@ -7569,6 +7849,88 @@ function aiToolsInit() {
     aiCutBind();
     aiDirRefresh();
 }
+
+/* ------------------------------------------------------------------ */
+/* 启动                                                                */
+/* ------------------------------------------------------------------ */
+
+/* 首帧一画完就通知 Rust 把（隐藏建出来的）设置窗口显示出来。
+ *  为什么隐藏建窗：见 Rust 侧 open_settings_win 的注释 —— 主要是不让用户先看到
+ *  WebView2 还没渲染时那块原生黑底。双重 rAF 保证这一帧真的提交上屏了再 show。 */
+requestAnimationFrame(() => requestAnimationFrame(() => {
+    invoke('settings_ready').catch(() => {});
+}));
+
+(async function boot() {
+    bindTabs();
+
+    CATALOG = await fetch('data/engines.json').then((r) => r.json());
+    for (const e of CATALOG.toolbar) BY_NAME.set(e.name, e);
+    for (const c of CATALOG.categories) {
+        for (const e of c.engines) if (!BY_NAME.has(e.name)) BY_NAME.set(e.name, e);
+    }
+    /* r74：旧 renderEngineLib（r51/r52 那套 #libToc/#libBody 三层库）连同它的
+     * 两个前置版本一起删了 —— 那两个 DOM 节点在 r61 合并卡片时就不存在了，
+     * 函数开头 `if (!toc || !body) return` 让整套代码一次都没跑过。引擎库现在
+     * 只有 renderAllList 一条路（见上面 r73 那段）。 */
+
+    CONF = window.CONF = await invoke('get_config');
+    $('ver').textContent = 'v' + (CONF.version || '—');
+    fillAbout();
+    // 调试构建才打开自动化辅助（坐标上报等）
+    if (CONF.debug) document.body.dataset.qsDebug = '1';
+
+    // 内建自检：QS_SELFTEST=1 时把真实控件的自检跑一遍（只用于开发验证）
+    if (CONF.selftest) setTimeout(() => { qsSelfTest().catch((e) => console.warn(e)); }, 300);
+    // 用户自己的引擎必须在第一次渲染前并进目录，否则它不出现在
+    // 「全部引擎」里，也就没法加到横条上。
+    qsMergeCustomEngines(CATALOG, BY_NAME, CONF);
+
+    renderBarList();
+    renderAllList();
+    renderCustomList();
+    renderAppList();
+    renderAiList();
+    syncOcrInBarBtn();
+    /* r54：识图搜索那一栏 + 数据那一栏从后端拿清单（界面不自己维护）。
+     * ⚠ 这两个是**后台跑**、不拦在 bindSwitches 前面：boot 剩下的都是同步渲染，
+     *    一拦就把"控件按配置摆好"整个推迟到两次 IPC 之后。实测（r44 探针）
+     *    就是这个顺序让「空格=智能」那一档在窗口刚出来时还没摆上 ——
+     *    用户看到的是"设置刚打开时几个开关是空的，过一下才对"。
+     *    所以：先起动（fire and forget），bindSwitches 照老顺序跑，
+     *    清单回来后 renderImgEngines / renderExportBox 自己会把内容填上。 */
+    const imgListReady = loadImgEngines();
+    bindDataTab();
+    const exportReady = loadExportGroups();
+    // 本地 OCR 环境检测：设置窗一打开先跑一次（用户要求「进入页面 / 初始化 OCR
+    // 时自动检测」）——缺组件时用户在 OCR 页第一眼就能看到，不用先点「测试」。
+    bindOcrDep();
+    renderOcrDep();
+    bindSwitches();
+    bindCeKind();
+    bindCeBind();   // r58：快捷键引擎「绑定应用」的联动（开关 → 选应用 → 管理员）
+    bindApKind();
+    // r76：AI 识图延迟那一行的「↺ 默认」钮
+    bindAiDelayReset();
+    // 上面那两份清单回来后补一次渲染（引擎行上的图标要等清单才知道有几家）
+    await imgListReady;
+    renderImgEngines();
+    await exportReady;
+
+    document.addEventListener('contextmenu', (e) => e.preventDefault());
+
+    /* r75：回到顶部浮动钮。放在最后装 —— 它只是长页面的辅助入口，不能挡在
+     * 配置读回来、控件按配置摆好这些正事前面。 */
+    toTopBuild();
+    toTopStackSync();
+    toTopSync();
+
+    // 自动化测试用的坐标上报：把关键控件的视口 rect 打一份到日志。
+    // 只在调试构建（QS_DEBUG=1，由后端在启动时把开关塞进 body.dataset）时跑，
+    // 正式使用不受任何影响；对用户来说这条路永不执行。
+    if (document.body.dataset.qsDebug === '1') reportRects();
+
+
 
 
     // r80：AI 抠图（开关回填 + 状态查询 + 模型列表）

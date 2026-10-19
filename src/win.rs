@@ -1,4 +1,4 @@
-//! Win32 底层封装：输入模拟、光标定位、提权、开机自启。
+﻿//! Win32 底层封装：输入模拟、光标定位、提权、开机自启。
 #![allow(dead_code)]
 #![allow(non_snake_case)]
 
@@ -42,6 +42,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_CONTROL, VK_C, VK_V, VK_MENU, VK_RBUTTON, VK_RETURN,
     VK_SHIFT,
     VK_LWIN, VK_RWIN, VK_TAB, VK_ESCAPE, VK_SPACE, VK_BACK, VK_DELETE, VK_INSERT, VK_HOME, VK_END,
+    VK_LBUTTON,
     VK_PRIOR, VK_NEXT, VK_UP, VK_DOWN, VK_LEFT, VK_RIGHT, VK_SNAPSHOT, VK_PAUSE, VK_APPS,
     VK_CAPITAL, VK_F1, VK_F2, VK_F3, VK_F4, VK_F5, VK_F6, VK_F7, VK_F8, VK_F9, VK_F10, VK_F11,
     VK_F12, VK_F13, VK_F14, VK_F15, VK_F16, VK_F17, VK_F18, VK_F19, VK_F20, VK_F21, VK_F22, VK_F23,
@@ -65,7 +66,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     HWND_TOPMOST, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
     SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE, SW_SHOWNOACTIVATE,
     SW_SHOWNORMAL, WS_EX_NOACTIVATE, WS_EX_TRANSPARENT,
-    WS_EX_TOOLWINDOW, KBDLLHOOKSTRUCT, MSLLHOOKSTRUCT, DestroyWindow,
+    WS_EX_TOOLWINDOW, KBDLLHOOKSTRUCT, MSLLHOOKSTRUCT,
+    IsWindow, WM_CLOSE, WM_SYSCOMMAND, SC_CLOSE,
     // UIA 探针唤醒用：带超时的消息发送，防对方进程卡死把我们也拖住
     SendMessageTimeoutW, SMTO_ABORTIFHUNG,
     // r58「快捷键绑定应用」要枚举顶层窗口，找出目标应用的窗口
@@ -211,6 +213,31 @@ pub fn log_sync(msg: &str) {
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&p) {
         let _ = writeln!(f, "{}", line);
         let _ = f.flush();
+    }
+}
+
+/// 弹一个**原生**消息框（阻塞，直到用户点确定）。
+///
+/// 只给"程序马上就要退出、而且用户必须知道为什么"的那几条路径用 ——
+/// 现在只有一处：启动时建 WebView2 失败（通常是上一个实例刚被杀、它的
+/// WebView2 用户数据目录还没释放）。那种情况下程序会静默消失，
+/// 用户只会觉得"点了没反应，要再点一次"。
+///
+/// 用 Win32 的 `MessageBoxW` 而不是 Tauri 的对话框：这个时候 Tauri 的
+/// 事件循环还没建起来，任何依赖它的东西都用不了。
+pub fn message_box(title: &str, text: &str) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        MessageBoxW, MB_ICONWARNING, MB_OK, MB_SETFOREGROUND, MB_TOPMOST,
+    };
+    let t = wide(title);
+    let m = wide(text);
+    unsafe {
+        MessageBoxW(
+            None,
+            PCWSTR(m.as_ptr()),
+            PCWSTR(t.as_ptr()),
+            MB_OK | MB_ICONWARNING | MB_TOPMOST | MB_SETFOREGROUND,
+        );
     }
 }
 
@@ -605,6 +632,28 @@ pub fn alt_down() -> bool {
 /// Shift 此刻是否按着（收藏夹自定义快捷键要用）。
 pub fn shift_down() -> bool {
     unsafe { (GetAsyncKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0 }
+}
+
+/// Win 键此刻是否按着（收藏夹自定义快捷键支持 `win+…` 组合）。
+///
+/// 左右两个都要看：`VK_LWIN` / `VK_RWIN` 是分开的物理键，只查左边的话
+/// 用右手按 Win 的用户会一直被判成"没按修饰键"。`VK_LWIN` 的位在
+/// `GetAsyncKeyState(VK_LWIN)` 里，与 `VK_CONTROL` 那种"合并修饰键"不同，
+/// 所以这里两个都读。
+pub fn win_down() -> bool {
+    unsafe {
+        (GetAsyncKeyState(VK_LWIN.0 as i32) as u16 & 0x8000) != 0
+            || (GetAsyncKeyState(VK_RWIN.0 as i32) as u16 & 0x8000) != 0
+    }
+}
+
+/// 左键此刻是否按着（钩子里判"拖动中"用）。
+///
+/// 为什么不在钩子里自己记 DOWN/UP 状态：钩子可能被系统中途摘掉、再重装，
+/// 那时状态就失配了（以为一直按着，于是每条 MOUSEMOVE 都往 channel 里塞）。
+/// `GetAsyncKeyState` 是直接读系统按键状态，永远和真实状态一致，且极轻。
+pub fn left_down() -> bool {
+    unsafe { (GetAsyncKeyState(VK_LBUTTON.0 as i32) as u16 & 0x8000) != 0 }
 }
 
 /// 右键此刻是否按着。
@@ -1193,13 +1242,27 @@ fn uia_wake_render_children(fg: HWND) {
         const WM_GETOBJECT: u32 = 0x003D;
         // 两种变体都发：官方设计文档口径(w=1,l=0) + AHK UIA-v2 库验证口径(w=0,l=1)。
         let variants: [(usize, usize); 2] = [(1, 0), (0, 1)];
+        /* ⚠ 子窗上限 8 个、单条消息 120ms、总预算 300ms。
+         *
+         * 原来是 64 个子窗 × 2 变体 × **500ms** —— 最坏这条"零成本唤醒"要跑
+         * 64 秒。而 `uia_query_with_timeout` 超过 `UIA_TIMEOUT_MS` 就把读取线程
+         * 丢下不管了：反复划词会在后台堆起一串仍卡在 SendMessageTimeout 里的
+         * 线程，每个还握着 COM 对象。实测日志里"读取失败"之后仍然一行行刷
+         * 子窗消息，就是这个形状。
+         *
+         * 唤醒本身只要"给渲染子窗敲一下门"，前几个子窗就够了（Chromium 的
+         * 渲染宿主窗口总是最靠前的几个之一）。 */
         let mut seen: Vec<isize> = Vec::new();
         let mut child = GetWindow(fg, GW_CHILD).unwrap_or(HWND(std::ptr::null_mut()));
         let mut g = 0;
-        while !child.0.is_null() && g < 64 {
+        let deadline = Instant::now() + Duration::from_millis(300);
+        while !child.0.is_null() && g < 8 && Instant::now() < deadline {
             if !seen.contains(&(child.0 as isize)) {
                 seen.push(child.0 as isize);
                 for &(w, l) in &variants {
+                    if Instant::now() >= deadline {
+                        break;
+                    }
                     let mut result: usize = 0;
                     let _ = SendMessageTimeoutW(
                         child,
@@ -1207,7 +1270,7 @@ fn uia_wake_render_children(fg: HWND) {
                         WPARAM(w),
                         LPARAM(l as isize),
                         SMTO_ABORTIFHUNG,
-                        500,
+                        120,
                         Some(&mut result),
                     );
                 }
@@ -1218,11 +1281,35 @@ fn uia_wake_render_children(fg: HWND) {
     }
 }
 
+/// 还活着的 UIA 读取线程数（超过上限就不再新建）。
+///
+/// 为什么需要：`uia_query_with_timeout` 超时只是**不再等**，线程本身还在跑
+/// （对方进程卡住时它可能卡在跨进程封送里很久）。而划词是高频动作 ——
+/// 用户在一个卡死的程序里连划十次，就有十条线程挂在 UIA 里，每条还各持一个
+/// `IUIAutomation` COM 对象。这里给一个上限，超了就直接走后面的兜底通道。
+static UIA_INFLIGHT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+const UIA_MAX_INFLIGHT: usize = 3;
+
 fn uia_query_with_timeout(drag_end: POINT, drag_start: POINT) -> UiaOutcome {
+    use std::sync::atomic::Ordering;
+    let inflight = UIA_INFLIGHT.load(Ordering::SeqCst);
+    if inflight >= UIA_MAX_INFLIGHT {
+        log(&format!(
+            "uia: 已有 {inflight} 条读取线程还没返回（对方进程大概率卡住），这次直接走兜底通道"
+        ));
+        return UiaOutcome::Failed;
+    }
+    UIA_INFLIGHT.fetch_add(1, Ordering::SeqCst);
     let (tx, rx) = std::sync::mpsc::channel();
     let t0 = Instant::now();
     std::thread::spawn(move || {
-        let _ = tx.send(uia_selection_text_inner(drag_end, drag_start));
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            uia_selection_text_inner(drag_end, drag_start)
+        }));
+        // 无论正常返回还是 panic，都要把在途计数还回去（否则计数只增不减，
+        // 几次之后 UIA 通道就永久停用了）
+        UIA_INFLIGHT.fetch_sub(1, Ordering::SeqCst);
+        let _ = tx.send(r.unwrap_or(UiaOutcome::Failed));
     });
     match rx.recv_timeout(Duration::from_millis(UIA_TIMEOUT_MS)) {
         Ok(v) => {
@@ -1609,15 +1696,26 @@ pub fn uia_probe(pt: Option<POINT>) {
 
 /// 从一个 TextPattern 里把「当前所有选区」的文字拼起来。
 fn text_from_text_pattern(pat: &IUIAutomationTextPattern) -> Option<String> {
+    /* ⚠ 必须给 `GetText` 一个**长度上限**。
+     *
+     * `GetText(-1)` 是"不限长度"：用户全选一篇长文档（或网页 Ctrl+A）时，
+     * UIA 会把整篇文本**跨进程封送**过来。实测这时候封送本身能跑几秒，
+     * 而我们外面那个 `UIA_TIMEOUT_MS` 只是"不再等结果"，线程还在里面搬数据。
+     * 划词场景本来就只要"选中的那一小段"，所以给 2 万字符的上限：
+     * 正常选区永远够用，异常的全选最多也就多搬 40KB。 */
+    const MAX_CHARS: i32 = 20_001;
     unsafe {
         let ranges = pat.GetSelection().ok()?;
         let n = ranges.Length().unwrap_or(0);
         let mut out = String::new();
         for i in 0..n {
             let Ok(r) = ranges.GetElement(i) else { continue };
-            // -1 = 不限制长度（返回整个 range 的文字）
-            if let Ok(b) = r.GetText(-1) {
+            if let Ok(b) = r.GetText(MAX_CHARS) {
                 out.push_str(&b.to_string());
+                // 已经够长了就别再拼下一段（多选区的极端情况）
+                if out.chars().count() >= 20_000 {
+                    break;
+                }
             }
         }
         let t = out.trim().to_string();
@@ -2110,8 +2208,52 @@ pub fn force_kill_overlay(hwnd: HWND) {
     }
     unsafe {
         let _ = ShowWindow(hwnd, SW_HIDE);
-        let _ = DestroyWindow(hwnd);
+        /* ⚠ `DestroyWindow` 只能销毁**本线程创建**的窗口，跨线程调用必然返回
+         * FALSE（错误码 5 拒绝访问）。遮罩窗口是 Tauri 主线程建的，这段兜底
+         * 代码几乎总是跑在别的线程上 —— 所以以前那句 `DestroyWindow` 实际上
+         * 什么都没做，只剩一句"强杀"的日志。
+         *
+         * 正确做法是**请求它的属主线程去销毁**：
+         *   1. 先投 WM_CLOSE（走正常的销毁路径，wry 会自己清理 WebView2）；
+         *   2. 再投 WM_SYSCOMMAND + SC_CLOSE 兜一层（有些窗口不处理 WM_CLOSE）。
+         * 两条都是 PostMessageW，不阻塞、也不需要跨线程调用窗口过程。 */
+        if crate::win::is_window(hwnd) {
+            let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+            let _ = PostMessageW(
+                Some(hwnd),
+                WM_SYSCOMMAND,
+                WPARAM(SC_CLOSE as usize),
+                LPARAM(0),
+            );
+            // 再补一次隐藏：投递是异步的，可能这一帧窗口还挂在最上面吃药丸。
+            let _ = ShowWindow(hwnd, SW_HIDE);
+        }
     }
+}
+
+/// 句柄还活着吗（`IsWindow` 的薄封装）。
+pub fn is_window(hwnd: HWND) -> bool {
+    unsafe { IsWindow(Some(hwnd)).as_bool() }
+}
+
+/// 这个句柄看起来还是不是我们的「框选遮罩」。
+///
+/// 用途只有一个：**强杀之前复核**。`REGION_HWND` 是缓存句柄，窗口销毁后句柄值
+/// 会被系统复用 —— 不复核就动手，可能把别的程序的窗口关掉。
+///
+/// 判据：类名是我们自己窗口的 `Tauri Window`（wry 的宿主窗口类），
+/// 且带 `WS_EX_TOOLWINDOW`（遮罩建出来时就是这么设的，见 `make_overlay`）。
+/// 两条都不满足就认为已经被复用，调用方应当放弃强杀。
+pub fn looks_like_overlay(hwnd: HWND) -> bool {
+    if !is_window(hwnd) {
+        return false;
+    }
+    let cls = class_name(hwnd);
+    if !cls.contains("Tauri Window") && !cls.contains("WebView") {
+        return false;
+    }
+    let (_, ex) = style_of(hwnd);
+    (ex & WS_EX_TOOLWINDOW.0) != 0
 }
 
 pub fn hide(hwnd: HWND) {
@@ -2652,17 +2794,32 @@ pub fn app_running(exe_name: &str) -> bool {
     if want.is_empty() {
         return false;
     }
+    /* ⚠ pid 表要**按需要扩容**。
+     *
+     * 原来固定 4096 个槽位、再用 `.min(pids.len())` 截断：进程数超过 4096 的
+     * 机器上（跑了一堆 Electron / 服务）被截掉的那部分永远扫不到 —— 一个正在
+     * 运行的软件会被判成"没运行"，于是 `wait_app_ready` 又去 `ShellExecuteW`
+     * 拉一次，用户看到的是"同一个软件越开越多"。 */
     let mut pids = vec![0u32; 4096];
     let mut needed = 0u32;
-    let ok = unsafe {
-        EnumProcesses(
-            pids.as_mut_ptr(),
-            (pids.len() * std::mem::size_of::<u32>()) as u32,
-            &mut needed,
-        )
-    };
-    if ok.is_err() {
-        return false;
+    loop {
+        let ok = unsafe {
+            EnumProcesses(
+                pids.as_mut_ptr(),
+                (pids.len() * std::mem::size_of::<u32>()) as u32,
+                &mut needed,
+            )
+        };
+        if ok.is_err() {
+            return false;
+        }
+        let got = needed as usize / std::mem::size_of::<u32>();
+        // 缓冲区够用（EnumProcesses 返回的 needed 小于容量）→ 可以开始扫
+        if got < pids.len() || pids.len() >= 1 << 20 {
+            break;
+        }
+        // 不够：扩到两倍再来一次
+        pids.resize(pids.len() * 2, 0);
     }
     let n = (needed as usize / std::mem::size_of::<u32>()).min(pids.len());
     for &pid in &pids[..n] {
@@ -2813,6 +2970,12 @@ pub fn wait_app_ready(exe_name: &str, timeout_ms: u64) -> Option<HWND> {
     let t0 = std::time::Instant::now();
     let mut appeared = false;
     while t0.elapsed().as_millis() < timeout_ms as u128 {
+        /* ⚠ 轮询间隔 120ms → 300ms。
+         *
+         * `app_running` 每次都要**枚举全部进程**、每个 pid 再 OpenProcess +
+         * QueryFullProcessImageNameW。120ms 一轮 + 最多 20 秒 = 160 多轮全量
+         * 枚举，单核会被打满（这是"点了快捷键引擎，机器风扇转起来"的一个来源）。
+         * 启动一个应用本来就要一两秒，300ms 的粒度完全够。 */
         let running = app_running(exe_name);
         if running {
             appeared = true;
@@ -2824,7 +2987,7 @@ pub fn wait_app_ready(exe_name: &str, timeout_ms: u64) -> Option<HWND> {
         if appeared && t0.elapsed().as_millis() > 2500 {
             return None;
         }
-        std::thread::sleep(std::time::Duration::from_millis(120));
+        std::thread::sleep(std::time::Duration::from_millis(300));
     }
     None
 }
@@ -2892,7 +3055,13 @@ pub fn grab_region(x: i32, y: i32, w: i32, h: i32) -> Option<(u32, u32, Vec<u8>)
             },
             ..Default::default()
         };
-        let mut buf = vec![0u8; (w as usize) * (h as usize) * 4];
+        /* ⚠ 不要 `vec![0u8; w*h*4]`：那会先 memset 一遍再让 GetDIBits 覆盖写。
+         * OCR 框选常见 2K/4K 屏，白白清零几 MB~几十 MB。用未初始化缓冲 +
+         * 长度断言（只有 `lines == h` 全部写满才会走到后面读）。
+         *
+         * SAFETY：读之前必定已由 GetDIBits 写满 h 行；任何不足都在下面的
+         * `lines as i32 != h` 分支里 return None 了。 */
+        let mut buf: Vec<u8> = Vec::with_capacity((w as usize) * (h as usize) * 4);
         let lines = GetDIBits(
             mem,
             bmp,
@@ -2909,10 +3078,11 @@ pub fn grab_region(x: i32, y: i32, w: i32, h: i32) -> Option<(u32, u32, Vec<u8>)
 
         if !ok || lines as i32 != h {
             // lines 是 GetDIBits 实际复制的扫描行数：0 = 直接失败；小于 h =
-            // 只抄了一部分，缓冲区剩下的是零字节（PNG 会是黑带）——一律当失败，
-            // 别把半张图当成功传出去。
+            // 只抄了一部分 —— 一律当失败，别把半张图当成功传出去。
             return None;
         }
+        // 整段已在外层 unsafe 里，这里直接标长度
+        buf.set_len((w as usize) * (h as usize) * 4);
         // BitBlt 抓来的是 BGRA，而且 alpha 通道是垃圾值（屏幕没有 alpha）。
         // 统一刷成 255，否则编码出来的 PNG 会整张透明。
         for px in buf.as_chunks_mut::<4>().0 {

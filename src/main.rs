@@ -38,6 +38,9 @@ mod aimatte;
 mod iconedit_ai;
 mod webdav;
 mod win;
+// v1.2.0：自动更新。查 GitHub 最新版 → 程序内下载 → 校验 → 替换旧程序。
+// 自包含（只依赖 win/ocr 的日志与网络错误措辞），可独立单测。
+mod update;
 
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, AtomicUsize, Ordering};
@@ -420,6 +423,19 @@ fn dismiss_bar() {
     let h = bar_hwnd();
     if h.0.is_null() {
         return;
+    }
+    /* ⚠ 收藏面板的「钉住」必须在**所有提前 return 之前**复位。
+     *
+     * 原来 `FAV_PINNED` 只在 `set_fav_pinned` 里改：用户钉住面板 → 按 Esc 收条 →
+     * 下次划词弹出来，点面板外面依旧"已钉住，忽略收起"，一直到用户手动取消钉住。
+     * 用户感知就是「横条收不掉了」。钉住的语义本来就是"这一次展开时别自动收"，
+     * 收起即结束。
+     *
+     * 位置很讲究：下面 `!g.shown && !g.focused` 那条会**提前 return**（横条本来
+     * 就是收着的），复位放它后面就永远轮不到 —— 必须放最前面。 */
+    if FAV_PINNED.swap(false, Ordering::SeqCst) {
+        win::log("dismiss_bar: 收藏面板原本钉着，随收起一并解除");
+        let _ = app().emit_to("bar", "qs://fav-pinned", serde_json::json!({ "on": false }));
     }
     // 横条收起 = 不再有实时抓屏：无条件解除「对抓屏隐身」。
     // 实时模式开着的时候用户按了 Esc / 点了别处，前端可能来不及发
@@ -925,7 +941,13 @@ fn sync_webview_bounds() {
         }
     });
     if let Err(e) = res {
-        win::log(&format!("sync_webview_bounds: with_webview 失败: {e}"));
+        /* ⚠ 失败时要把「已记账」的尺寸**回滚**。
+         *
+         * 这里先是 `LAST.swap(key)` 再发起跨线程调用 —— 调用失败却没回滚的话，
+         * 下一次同样的尺寸会被 `LAST == key` 直接挡掉，于是合成面永远不再同步。
+         * 用户看到的就是这个函数本来要治的那个症状：窗口被切掉一块。 */
+        LAST.store(0, std::sync::atomic::Ordering::SeqCst);
+        win::log(&format!("sync_webview_bounds: with_webview 失败: {e}（已回滚尺寸记账，下次重试）"));
     }
 }
 
@@ -1134,7 +1156,7 @@ fn capture_selection(target_pid: u32) -> Option<String> {
      * 现在的口径：拿不到快照就不还原（本来也没备到东西），但取词照做。
      * 最坏结果和用户自己按一次 Ctrl+C 一样（剪贴板被选区覆盖），不会更糟；
      * 换来的是"一定能弹"。 */
-    let snap = clip::snapshot();
+    let mut snap = clip::snapshot();
     let old_text = snap
         .as_ref()
         .and_then(|s| s.text())
@@ -1278,9 +1300,25 @@ fn capture_selection(target_pid: u32) -> Option<String> {
      * 用户的硬要求是「选中就弹条，不是选中就复制」—— 取词借用了剪贴板，就必须
      * 保证剪贴板**看不出被动过**。快照为空时跳过还原（我上一版为了"别抹掉对端
      * 迟到写入的数据"这么改过）会让选区留在剪贴板里，用户一眼就看到"选中就复制了"，
-     * 这是实打实的体验事故。空快照的还原 = EmptyClipboard，正是我们要的"恢复到空"。 */
+     * 这是实打实的体验事故。空快照的还原 = EmptyClipboard，正是我们要的"恢复到空"。
+     *
+     * ⚠ 但「还原」不能无条件：先把剪贴板序号和我们刚写完那一刻比一比，
+     *   第三方在中间写过东西的话就**放手**（见 `clip::restore_if_unchanged`）。 */
+    /* ⚠ 还原前必须把基准挪到"我们自己刚写完那一刻"。
+     *
+     * `snapshot()` 记的是**复制前**的序号；而中间那次 `send_ctrl_c()` /
+     * `post_copy_to_focus()` 是**我们自己**在写剪贴板，序号必然变。
+     * 不重新对齐的话 `restore_if_unchanged` 会把"我们自己的写入"误判成
+     * "第三方改过"，于是**永远跳过还原** —— 选中的文字就永久留在剪贴板里，
+     * 正是用户明确禁止的「选中就复制」。
+     *
+     * 对齐之后，基准 = 我们写完那一刻；此后若再有写入（用户手动 Ctrl+C、
+     * 别的程序写了东西），才是真的"别人动过"，那时跳过还原才是对的。 */
+    if let Some(s) = snap.as_mut() {
+        s.note_our_write();
+    }
     match &snap {
-        Some(s) => clip::restore(s),
+        Some(s) => clip::restore_if_unchanged(s),
         None => win::log("capture: 本次快照没拿到（剪贴板被占着）—— 无法还原，剪贴板里会留着这次选区"),
     }
     let t = got?;
@@ -1820,7 +1858,14 @@ fn late_text_patch(before: u32, gen: usize, fg_pid: u32) {
     let t = {
         // 和拖选取词那条线抢剪贴板时串行化（它中途会 snapshot/restore）
         let _clip = lock_clip();
-        clip::read_text_any()
+        /* ⚠ 这里用**长重试**版本（30 ≈ 300ms），不是 `read_text_any()` 的短重试。
+         *
+         * 这条函数是"迟到补"的最后一步：上面已经等了 900ms 确认复制落地
+         * （`wait_until`），此刻数据就在剪贴板里。而别的程序（微信这类自建
+         * 剪贴板监听的客户端）可能正握着它不放 —— 短重试会读不到，
+         * 于是**这次取词白等 900ms 还拿不到词**，横条上留着旧文字。
+         * 读一次最多等 300ms 是划算的：它是单次路径，不在任何轮询里。 */
+        clip::read_text_any_within(30)
             .map(|t| t.trim().to_string())
             .unwrap_or_default()
     };
@@ -2087,6 +2132,23 @@ static OCR_ONLY: AtomicBool = AtomicBool::new(false);
 /// Ctrl+C 复制到的是图片时走这条路 —— 图片上的文字选不中，
 /// 但用户按 Ctrl+C 的意图很明确，给他一个入口比什么都不做强。
 fn show_ocr_only_bar() {
+    /* 「只留 OCR 那一个按钮」的横条。
+     *
+     * ⚠⚠ 这里**保持原样**：`dismiss_bar()` → 30ms → `show_bar()`。
+     *
+     * 我一度把它"优化"成"只做不涉及焦点的那部分收起，然后立刻 show，去掉 sleep"，
+     * 理由是"dismiss 会把焦点还给上一个窗口、30ms 后又拿回来，用户看到焦点弹一下"。
+     * **那个理由从来没有被实测证实，但改动引入的四个回归是真的**：
+     *   · 漏掉 `glass::clear_exclude_from_capture()` → 横条可能仍对抓屏隐身，
+     *     用户截图/录屏里横条会凭空消失；
+     *   · 漏掉 `win::set_noactivate(h, true)` → 窗口不再是无激活浮层，
+     *     可能把焦点从用户正在打字的窗口抢走；
+     *   · 漏掉 `bar_win()` 为 None 时的 `move_resize(..., false)` 兜底 →
+     *     窗口还没建好的那条路上，横条会留在原地不消失；
+     *   · 漏掉 `g.focused = false` / `prev_fg` 处理 → 焦点状态机停在错误状态。
+     *
+     * 结论：**没有一个可复现的 bug 值得拿这四处换**。保留原始实现，
+     * 把这段记在这里，免得下一个人（或下一个 AI）再"优化"一遍。 */
     OCR_ONLY.store(true, Ordering::SeqCst);
     dismiss_bar();
     std::thread::sleep(Duration::from_millis(30));
@@ -2586,7 +2648,7 @@ fn spawn_detector() {
                             continue;
                         }
                     }
-                    Ev::KeyDown(vk, seq0, ctrl, alt, shift, ours) => {
+                    Ev::KeyDown(vk, seq0, ctrl, alt, shift, win, ours) => {
                         /* ⚠ ctrl / alt 是**钩子回调当时**读到的状态（见 hook.rs 的
                          * Ev::KeyDown 注释），不是这里现读的 —— 消费线程是异步的，
                          * 等排到这条事件时用户可能已经把 Ctrl 松开了，现读会得到 false，
@@ -2598,7 +2660,7 @@ fn spawn_detector() {
                         // 必须放在 Ctrl+C 那条前面：万一用户录的就是 Ctrl+C，
                         // 那他想要的是收藏夹，不是取词。
                         if !ours {
-                            if let Some((hc, ha, hs, hvk)) = parse_hotkey(&cfg_with(|c| c.fav_hotkey.clone()))
+                            if let Some((hc, ha, hs, hw, hvk)) = parse_hotkey(&cfg_with(|c| c.fav_hotkey.clone()))
                             {
                                 // ⚠ Ctrl+C 是「复制取词」的保留键。历史版本允许把
                                 //   Ctrl+C 录给收藏夹，而这条分支排在取词前面 ——
@@ -2609,8 +2671,10 @@ fn spawn_detector() {
                                     && hc
                                     && !ha
                                     && !hs
+                                    && !hw
                                     && cfg_with(|c| c.trigger_copy);
-                                if vk == hvk && ctrl == hc && alt == ha && shift == hs && !steals_copy
+                                if vk == hvk && ctrl == hc && alt == ha && shift == hs && win == hw
+                                    && !steals_copy
                                 {
                                     win::log("hotkey: 打开收藏夹");
                                     std::thread::spawn(show_fav_panel_bar);
@@ -2894,6 +2958,8 @@ fn config_view() -> Value {
         "webdavPass": cfg.webdav_pass,
         "webdavOnStart": cfg.webdav_on_start,
         "webdavOnExit": cfg.webdav_on_exit,
+        // v1.2.0：自动更新开关。设置页「关于」里那个勾选框就是它。
+        "autoUpdate": cfg.auto_update,
         "lastEngine": cfg.last_engine,
         // r54 识图搜索。跟设置走（是用户偏好，不是逐机器的东西）——
         // 换电脑恢复之后识图引擎的勾选要还在。
@@ -3034,6 +3100,8 @@ fn apply_view(v: &Value, cfg: &mut config::Config) {
     }
     if let Some(x) = b("webdavOnStart") { cfg.webdav_on_start = x; }
     if let Some(x) = b("webdavOnExit") { cfg.webdav_on_exit = x; }
+    // v1.2.0：自动更新开关（跟着备份/恢复走 —— 它是用户偏好，不是逐机器的东西）
+    if let Some(x) = b("autoUpdate") { cfg.auto_update = x; }
     // 注意：这三项**空值不覆盖**。备份是在填 WebDAV 之前导出的很常见，
     // 要是照单全收把地址/密码清空，之后所有同步都会失败，用户还不一定反应过来。
     if let Some(x) = s("webdavUrl") {
@@ -3396,6 +3464,9 @@ fn apply_one_setting(cfg: &mut config::Config, key: &str, value: Value) -> Resul
         "aiModelDir" => cfg.ai_model_dir = value.as_str().unwrap_or("").to_string(),
         "webdavOnStart" => cfg.webdav_on_start = value.as_bool().unwrap_or(false),
         "webdavOnExit" => cfg.webdav_on_exit = value.as_bool().unwrap_or(false),
+        // v1.2.0：自动更新。⚠ `set_setting` 是白名单式的 —— 不在这里登记，
+        // 前端勾选框「看着有反应、其实没存」（这个坑页内自检抓到过一次）。
+        "autoUpdate" => cfg.auto_update = value.as_bool().unwrap_or(true),
         "webdavUrl" => {
             // 单键修改走的是设置页实时保存。这里只做「补协议 + 补尾斜杠」，
             // **不**把软件子目录写进配置（用户要求：地址栏只填根地址）。
@@ -3796,6 +3867,33 @@ fn export_config(app: AppHandle) {
 /// `swap(true)` 抢锁，抢不到的直接提示，绝不让两个云操作叠着跑。
 static SYNC_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// 云同步互斥的 **RAII 守卫**。
+///
+/// # 为什么必须是 RAII（不是手动 store(false)）
+///
+/// 以前每一处都是「swap 抢锁 → 干活 → store(false) 放锁」。这中间任何一步
+/// panic（网络库、JSON 解析、`restore_from_text`…）都会让标志**永远停在 true**，
+/// 之后所有云操作统一报「上一次云操作还没结束」，只能重启程序。
+/// 文件里别的地方（BUSY）早就用守卫解决过同类问题，这里一直漏着。
+struct SyncGuard;
+
+impl SyncGuard {
+    /// 抢锁；已经被别人占着返回 None（调用方据此给一句"稍等"）。
+    fn acquire() -> Option<SyncGuard> {
+        if SYNC_BUSY.swap(true, Ordering::SeqCst) {
+            None
+        } else {
+            Some(SyncGuard)
+        }
+    }
+}
+
+impl Drop for SyncGuard {
+    fn drop(&mut self) {
+        SYNC_BUSY.store(false, Ordering::SeqCst);
+    }
+}
+
 /// 载入备份的体积上限：32MB。
 ///
 /// 收藏夹塞满压缩图也就几 MB；超过这个数只可能是选错了文件（把视频/镜像
@@ -4056,12 +4154,13 @@ fn backup_summary(r: &BackupOutcome) -> String {
 fn webdav_sync_on_start() {
     // 启动同步启动得晚（setup 里缓了 6 秒等面板就绪），用户完全可能在这之前
     // 就手点了上传/恢复 —— 互斥锁两边都认，抢不到就让位。
-    if SYNC_BUSY.swap(true, Ordering::SeqCst) {
+    // 抢锁用 RAII 守卫：`_inner` 里任何一步 panic 都不会把标志永久留在 true
+    // （以前手动 store(false)，一旦 panic 就变成"所有云操作都报上一次没结束"）。
+    let Some(_guard) = SyncGuard::acquire() else {
         win::log("webdav: 已有云操作在跑，启动同步让位");
         return;
-    }
+    };
     webdav_sync_on_start_inner();
-    SYNC_BUSY.store(false, Ordering::SeqCst);
 }
 
 fn webdav_sync_on_start_inner() {
@@ -4144,16 +4243,15 @@ fn webdav_test() {
 #[tauri::command]
 fn webdav_upload() {
     std::thread::spawn(|| {
-        if SYNC_BUSY.swap(true, Ordering::SeqCst) {
+        let Some(_guard) = SyncGuard::acquire() else {
             wd_toast("上一次云操作还没结束，稍等一下再点");
             return;
-        }
+        };
         let cfg = cfg_snapshot();
         match backup_once(&cfg, 15) {
             Ok(r) => wd_toast(backup_summary(&r)),
             Err(e) => wd_toast(format!("上传失败：{e}")),
         }
-        SYNC_BUSY.store(false, Ordering::SeqCst);
     });
 }
 
@@ -4223,15 +4321,14 @@ fn webdav_delete(files: Vec<String>) {
         return;
     }
     std::thread::spawn(move || {
-        if SYNC_BUSY.swap(true, Ordering::SeqCst) {
+        let Some(_guard) = SyncGuard::acquire() else {
             wd_toast("上一次云操作还没结束，稍等一下再点");
             return;
-        }
+        };
         let cfg = cfg_snapshot();
         let o = wd_opts(&cfg, 20);
         if !o.ready() {
             wd_toast("先在设置里填 WebDAV 地址");
-            SYNC_BUSY.store(false, Ordering::SeqCst);
             return;
         }
         let mut ok = 0usize;
@@ -4255,7 +4352,6 @@ fn webdav_delete(files: Vec<String>) {
             ));
         }
         emit_wd_list(&o);
-        SYNC_BUSY.store(false, Ordering::SeqCst);
     });
 }
 
@@ -4272,10 +4368,10 @@ fn webdav_delete(files: Vec<String>) {
 fn prune_backups(keep: usize) {
     let keep = keep.max(1);
     std::thread::spawn(move || {
-        if SYNC_BUSY.swap(true, Ordering::SeqCst) {
+        let Some(_guard) = SyncGuard::acquire() else {
             wd_toast("上一次云操作还没结束，稍等一下再点");
             return;
-        }
+        };
         // ① 本地：按修改时间从新到旧排，只保留前 keep 个
         let dir = cfg_with(config::backup_dir_of);
         let mut all: Vec<(std::path::PathBuf, u64)> = Vec::new();
@@ -4326,6 +4422,22 @@ fn prune_backups(keep: usize) {
                     }
                     cloud_kept = v.len().min(keep);
                     for b in v.iter().skip(keep) {
+                        /* ⚠ 云端删除必须和本地用**同一个判据**。
+                         *
+                         * WebDAV 列目录是按"看起来像文件"过滤的（有扩展名就收），
+                         * 用户那个目录里完全可能有别的东西（别的软件的备份、
+                         * 同步下来的文档）。无条件 `skip(keep)` 全删 = 把不属于
+                         * 本软件的文件也删了 —— 本地侧一直有 `is_prunable_backup`
+                         * 这道闸，云端这边原来漏了。
+                         *
+                         * 认不出是"我们的备份"就跳过，只记一行日志。 */
+                        if !is_prunable_backup(&b.name) {
+                            win::log(&format!(
+                                "prune: 云端 {} 不是本软件的备份命名，跳过不删",
+                                b.name
+                            ));
+                            continue;
+                        }
                         match webdav::delete_named(&o, &b.name) {
                             Ok(_) => cloud_removed += 1,
                             Err(e) => {
@@ -4358,7 +4470,6 @@ fn prune_backups(keep: usize) {
         if o.ready() && cloud_error.is_empty() {
             emit_wd_list(&o);
         }
-        SYNC_BUSY.store(false, Ordering::SeqCst);
     });
 }
 
@@ -4413,15 +4524,14 @@ async fn cleanup_data(apply: bool) -> serde_json::Value {
 #[tauri::command]
 fn webdav_restore_named(name: String) {
     std::thread::spawn(move || {
-        if SYNC_BUSY.swap(true, Ordering::SeqCst) {
+        let Some(_guard) = SyncGuard::acquire() else {
             wd_toast("上一次云操作还没结束，稍等一下再点");
             return;
-        }
+        };
         let cfg = cfg_snapshot();
         let o = wd_opts(&cfg, 20);
         if !o.ready() {
             wd_toast("先在设置里填 WebDAV 地址");
-            SYNC_BUSY.store(false, Ordering::SeqCst);
             return;
         }
         stash_local_config();
@@ -4429,7 +4539,6 @@ fn webdav_restore_named(name: String) {
             Ok(_) => wd_toast(format!("已从云端恢复「{name}」")),
             Err(e) => wd_toast(format!("恢复失败：{e}")),
         }
-        SYNC_BUSY.store(false, Ordering::SeqCst);
     });
 }
 
@@ -4489,6 +4598,267 @@ fn exit_sync_if_needed() {
     }
 }
 
+/* ================================================================== */
+/* v1.2.0：自动更新                                                     */
+/* ================================================================== */
+
+/// 更新互斥：同一时刻只允许一个"查 / 下 / 装"在跑。
+///
+/// 同 `SYNC_BUSY` 的理由与写法：用户连点「检查更新」、或者一边下着一边又点，
+/// 两个线程同时写同一个 `QuickSearch.exe.new` 会互相踩。
+struct UpdateGuard;
+
+static UPDATE_BUSY: AtomicBool = AtomicBool::new(false);
+
+impl UpdateGuard {
+    fn acquire() -> Option<UpdateGuard> {
+        if UPDATE_BUSY.swap(true, Ordering::SeqCst) {
+            None
+        } else {
+            Some(UpdateGuard)
+        }
+    }
+}
+impl Drop for UpdateGuard {
+    fn drop(&mut self) {
+        UPDATE_BUSY.store(false, Ordering::SeqCst);
+    }
+}
+
+/// 最近一次检查到的"有新版"结果（前端问 `update_pending` 时给它）。
+///
+/// 为什么要存下来：启动时那次检查是**后台**做的，等它回来时用户可能还没打开
+/// 设置页。存一份状态，前端打开「关于」页就能看到"有新版 vX.Y.Z"，
+/// 而不是错过那个瞬时事件。
+static UPDATE_PENDING: std::sync::Mutex<Option<update::UpdateInfo>> =
+    std::sync::Mutex::new(None);
+
+/// 把一次检查结果推给设置页（`qs://update`）。
+///
+/// `manual = true` 时即使没有新版也要发（用户手动点的，必须给回话）。
+fn emit_update(info: &update::UpdateInfo, manual: bool) {
+    let payload = serde_json::json!({
+        "version": info.version,
+        "tag": info.tag,
+        "newer": info.newer,
+        "current": info.current,
+        "notes": info.notes,
+        "size": info.size,
+        "page": info.page,
+        "manual": manual,
+    });
+    let _ = APP.get().map(|a| a.emit_to("settings", "qs://update", payload));
+}
+
+/// 查一次更新并把结果广播出去。
+///
+/// `manual`：用户主动点「检查更新」→ 无论结果如何都要说话；
+///          自动（启动时）→ 只有"确实有新版"才推事件（没新版就什么都不发生，
+///          这正是用户要求的「如果是最新版，那就什么都不发生」）。
+fn do_check_update(manual: bool) {
+    let Some(_guard) = UpdateGuard::acquire() else {
+        if manual {
+            let _ = APP.get().map(|a| {
+                a.emit_to("settings", "qs://toast", "正在检查更新，稍等一下…")
+            });
+        }
+        return;
+    };
+    let current = config::VERSION;
+    match update::check(current) {
+        Ok(info) => {
+            win::log(&format!(
+                "update: 检查完成 —— 远端 {}，当前 {current}，有新版={}",
+                info.tag, info.newer
+            ));
+            if info.newer {
+                if let Ok(mut g) = UPDATE_PENDING.lock() {
+                    *g = Some(info.clone());
+                }
+                emit_update(&info, manual);
+            } else {
+                if let Ok(mut g) = UPDATE_PENDING.lock() {
+                    *g = None;
+                }
+                if manual {
+                    emit_update(&info, true);
+                }
+            }
+        }
+        Err(e) => {
+            win::log(&format!("update: 检查失败 {e}"));
+            if manual {
+                let _ = APP.get()
+                    .map(|a| a.emit_to("settings", "qs://toast", format!("检查更新失败：{e}")));
+            }
+        }
+    }
+}
+
+/// 启动时的那一次（后台，等一会儿再查，别和窗口/钩子抢启动）。
+fn auto_check_on_start() {
+    // 用户在设置里取消勾选 → **彻底不检测**（不发任何网络请求）
+    if !cfg_with(|c| c.auto_update) {
+        win::log("update: 自动更新开关关着，跳过启动检查");
+        return;
+    }
+    std::thread::spawn(|| {
+        std::thread::sleep(Duration::from_secs(8));
+        do_check_update(false);
+    });
+}
+
+/// 「检查更新」按钮。**手动动作不受自动更新开关限制** ——
+/// 用户明确要求"检查更新就是点击检查之后，来看是否有更新版"。
+#[tauri::command]
+fn update_check() {
+    std::thread::spawn(|| do_check_update(true));
+}
+
+/// 前端打开「关于」页时问一句"现在有没有待装的新版"。
+#[tauri::command]
+fn update_pending() -> serde_json::Value {
+    let g = match UPDATE_PENDING.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    match g.as_ref() {
+        Some(i) => serde_json::json!({
+            "has": true,
+            "version": i.version,
+            "tag": i.tag,
+            "notes": i.notes,
+            "size": i.size,
+            "page": i.page,
+        }),
+        None => serde_json::json!({ "has": false }),
+    }
+}
+
+/// 「下载并安装」：在程序内下好 → 校验 → 替换旧程序。
+///
+/// 进度通过 `qs://update-progress` 推给设置页（`(已下, 总)`）。
+/// 成功后**不自动退出**：把决定权交给用户（页面上出现"立即重启"按钮），
+/// 免得他正开着 OCR 结果窗或没保存的收藏就被程序自己关掉。
+#[tauri::command]
+async fn update_install() {
+    std::thread::spawn(|| {
+        let Some(_guard) = UpdateGuard::acquire() else {
+            wd_toast("正在下载更新，稍等一下…");
+            return;
+        };
+        let info = {
+            let g = match UPDATE_PENDING.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            match g.as_ref() {
+                Some(i) => i.clone(),
+                None => {
+                    wd_toast("没有待安装的新版本，先点「检查更新」");
+                    return;
+                }
+            }
+        };
+        win::log(&format!("update: 开始下载 {}", info.url));
+        let app = APP.get().cloned();
+        let mut last_emit = std::time::Instant::now();
+        let r = update::download(&info, &mut |done, total| {
+            /* 进度事件节流到 ~8 次/秒：下载可能几十 MB，每条都发 IPC 会让
+             * WebView 一直忙着重绘进度条，反而卡。 */
+            if last_emit.elapsed().as_millis() < 120 && done < total {
+                return;
+            }
+            last_emit = std::time::Instant::now();
+            if let Some(a) = &app {
+                let _ = a.emit_to(
+                    "settings",
+                    "qs://update-progress",
+                    serde_json::json!({ "done": done, "total": total }),
+                );
+            }
+        });
+        let new_path = match r {
+            Ok(p) => p,
+            Err(e) => {
+                if let Some(a) = &app {
+                    let _ = a.emit_to("settings", "qs://update-failed", e);
+                }
+                win::log("update: 下载失败");
+                return;
+            }
+        };
+        win::log(&format!("update: 下载完成 {}", new_path.display()));
+        match update::apply_update() {
+            Ok(_) => {
+                if let Some(a) = &app {
+                    let _ = a.emit_to("settings", "qs://update-done", info.version.clone());
+                }
+                win::log("update: 替换完成，等用户重启");
+            }
+            Err(e) => {
+                if let Some(a) = &app {
+                    let _ = a.emit_to("settings", "qs://update-failed", e);
+                }
+                win::log("update: 替换失败");
+            }
+        }
+    });
+}
+
+/// 「立即重启」：退出当前进程并拉起新的那份 exe。
+///
+/// 用 `CreateProcess` 而不是 `open::that`：后者会走 shell 关联，
+/// 可能被"以管理员运行"的 UAC 拦一道、还可能因为路径里有空格出岔子。
+/// 这里直接起自己（同目录、同权限），最直。
+#[tauri::command]
+fn update_restart() {
+    match std::env::current_exe() {
+        Ok(exe) => {
+            win::log(&format!("update: 重启到 {}", exe.display()));
+            // 先把该收的收了（临时图、云同步按设置），再拉新进程
+            img_temp_cleanup();
+            if cfg_with(|c| c.webdav_on_exit && !c.webdav_url.trim().is_empty()) {
+                let (tx, rx) = std::sync::mpsc::channel::<()>();
+                std::thread::spawn(move || {
+                    exit_sync_if_needed();
+                    let _ = tx.send(());
+                });
+                let _ = rx.recv_timeout(Duration::from_secs(6));
+            }
+            let dir = exe.parent().map(|p| p.to_path_buf());
+            let mut cmd = std::process::Command::new(&exe);
+            if let Some(d) = dir {
+                cmd.current_dir(d);
+            }
+            match cmd.spawn() {
+                Ok(_) => {
+                    app().exit(0);
+                }
+                Err(e) => {
+                    // 起不来就**别退出** —— 否则用户手上一个程序都没有了
+                    wd_toast(format!(
+                        "重启失败：{e} —— 请手动关掉本程序再打开（新版已经装好了）"
+                    ));
+                }
+            }
+        }
+        Err(e) => wd_toast(format!("取不到程序路径：{e}")),
+    }
+}
+
+/// 「关于」页那颗 GitHub 按钮：用系统默认浏览器打开仓库主页。
+#[tauri::command]
+fn open_repo_page() {
+    let url = update::REPO_URL;
+    win::log(&format!("open_repo_page: {url}"));
+    // open::that 在 Windows 上就是 ShellExecuteW，冷启动会阻塞几百毫秒，
+    // 所以丢后台线程（同 spawn_open_links 的理由）。
+    std::thread::spawn(move || {
+        let _ = open::that(url);
+    });
+}
+
 /// 所有「用户主动退出」的入口都走这里：先把该同步的同步掉，再退。
 fn quit_with_sync(code: i32) {
     /* r57：退出前把识图留下的那张临时图清掉。
@@ -4498,7 +4868,22 @@ fn quit_with_sync(code: i32) {
      * 少写一处，那条路上就会留一张图在 %TEMP% 里躺着，正好是用户说的
      * 「不能永久的存在电脑里面」。 */
     img_temp_cleanup();
-    exit_sync_if_needed();
+    /* ⚠ 退出同步挪到**后台线程**跑，最多等 5 秒。
+     *
+     * 原来 `exit_sync_if_needed()` 直接在这条调用栈上同步跑 `backup_once`：
+     * 它是网络操作（最长 5 秒超时），期间窗口不重绘、点哪都没反应 ——
+     * 用户看到的是"点了退出，程序卡住几秒才消失"。
+     *
+     * 现在：起一个线程做同步，主线程最多等 5 秒（超时就不等了，直接退）。
+     * 网络通畅时行为和以前一样；网络不通时也不会让退出变得更卡。 */
+    if cfg_with(|c| c.webdav_on_exit && !c.webdav_url.trim().is_empty()) {
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            exit_sync_if_needed();
+            let _ = tx.send(());
+        });
+        let _ = rx.recv_timeout(Duration::from_secs(6));
+    }
     app().exit(code);
 }
 
@@ -4680,17 +5065,23 @@ fn close_window(name: &str) {
 /// 参数 `why` 只进日志，方便事后看出是哪一层兜底救回来的。
 fn hard_close_region(why: &str) {
     close_window("region");
-    // 等 600ms 看主线程有没有真的把窗口关掉
-    let gone = {
-        let a = app();
-        (0..12).all(|_| {
-            if a.get_webview_window("region").is_none() {
-                return true;
-            }
-            std::thread::sleep(Duration::from_millis(50));
-            false
-        })
-    };
+    /* 等最多 600ms 看主线程有没有真的把窗口关掉。
+     *
+     * ⚠ 这里原来写的是 `(0..12).all(|_| {...; false })` —— `all` 在**第一个
+     * false 处短路**，循环体只跑一次、50ms 后就判"没关掉"，于是几乎每次都会
+     * 立刻走到下面的 `force_kill_overlay`。而 `REGION_HWND` 是缓存句柄
+     * （本文件自己也承认它可能过期），上一个遮罩销毁后句柄会被系统复用 ——
+     * 强杀一个"看起来还在"的旧句柄，风险是打到别人的窗口上。
+     * 现在改成显式循环：每 50ms 重查一次，最多 12 次。 */
+    let a = app();
+    let mut gone = false;
+    for _ in 0..12 {
+        if a.get_webview_window("region").is_none() {
+            gone = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
     if gone {
         REGION_HWND.store(0, Ordering::SeqCst);
         return;
@@ -4700,10 +5091,28 @@ fn hard_close_region(why: &str) {
         win::log(&format!("region: 强杀兜底也没拿到句柄，只能靠看门狗继续轮询（{why}）"));
         return;
     }
+    /* 强杀前复核一次：句柄还活着、而且**仍然是遮罩窗口**才动手。
+     * `IsWindow` 只能证明"这个值还是个窗口"，挡不住句柄复用；类名/标题
+     * 才是"它是不是我们的遮罩"的证据。两者都不满足就放手，交给看门狗。 */
+    let hwnd = HWND(raw as *mut _);
+    if !win::is_window(hwnd) {
+        win::log(&format!(
+            "region: 缓存的句柄 {raw:#x} 已经销毁，不必强杀（{why}）"
+        ));
+        REGION_HWND.store(0, Ordering::SeqCst);
+        return;
+    }
+    if !win::looks_like_overlay(hwnd) {
+        win::log(&format!(
+            "region: 缓存句柄 {raw:#x} 已经被系统复用成别的窗口，放弃强杀（{why}）"
+        ));
+        REGION_HWND.store(0, Ordering::SeqCst);
+        return;
+    }
     win::log(&format!(
         "region: 主线程关不掉遮罩（{why}），直接 Win32 强杀 {raw:#x}，先把鼠标还给用户"
     ));
-    win::force_kill_overlay(HWND(raw as *mut _));
+    win::force_kill_overlay(hwnd);
     REGION_HWND.store(0, Ordering::SeqCst);
 }
 
@@ -5307,7 +5716,9 @@ fn img_clip_restore(keep: &Option<clip::Snapshot>, pasted: bool, keep_img: bool)
         return;
     }
     if let Some(s) = keep.as_ref() {
-        clip::restore(s);
+        // 只有剪贴板还是「我们写进去的那张截图」时才还原；期间用户自己
+        // Ctrl+C 了别的东西，就把他的新内容留着（不覆盖）。
+        clip::restore_if_unchanged(s);
         win::log("img: 已把剪贴板还原成截图前的内容（截图不留在电脑上）");
     } else {
         // 没备份成（剪贴板当时被别的进程占着）。这时**不能** clear ——
@@ -5577,8 +5988,14 @@ fn img_upload(e: &imgsearch::Engine, jpeg: &[u8]) -> Result<String, String> {
      * 不对，所以 r70 的实测（curl 直接打）没暴露它。
      * 现在按分支惰性解析：只有真要读 JSON 字段的分支才解析。 */
     let parse_json = || -> Result<serde_json::Value, String> {
-        serde_json::from_str(&text)
-            .map_err(|_| format!("对方回的不是 JSON：{}", &text[..text.len().min(80)]))
+        /* ⚠ 截断必须按**字符**取，不能 `&text[..80]`：对方回中文错误页时
+         * 第 80 字节很可能落在某个三字节汉字的中间，那一下是
+         * "byte index is not a char boundary" —— 直接把识图线程 panic 掉，
+         * 这一轮剩下的引擎全丢。 */
+        serde_json::from_str(&text).map_err(|_| {
+            let head: String = text.chars().take(80).collect();
+            format!("对方回的不是 JSON：{head}")
+        })
     };
 
     match e.upload {
@@ -6043,8 +6460,21 @@ fn img_region(x: f64, y: f64, w: f64, h: f64, dpr: f64) {
          *     用户原来的内容原地不动。两头都占。
          * ⚠ snapshot 可能失败（剪贴板被别的进程占着）。失败时**不要**去 restore
          *   （那会把别人正在写的东西清掉），只当没备份过 —— 见 clip::snapshot 注释。 */
-        let clip_keep = clip::snapshot();
+        let mut clip_keep = clip::snapshot();
         let pasted = clip::set_image(&jpeg);
+        /* ⚠ 同一课：`set_image` 是**我们自己**在写剪贴板，序号必然变。
+         *   不把基准挪到这一刻，后面 `restore_if_unchanged` 会把我们自己的
+         *   写入误判成"用户又复制了别的东西"，于是**永远不还原** ——
+         *   截图永久留在剪贴板上，正是用户说的「不能永久存在电脑里面」。
+         *
+         *   对齐之后语义才对：
+         *     · 这一轮没别人动过 → 还原（截图消失，原内容回来）；
+         *     · 用户在这 1~2 秒里自己 Ctrl+C 了 → 不还原（留住他刚复制的）。 */
+        if clip_keep.is_some() {
+            if let Some(s) = clip_keep.as_mut() {
+                s.note_our_write();
+            }
+        }
         win::log(&format!(
             "img: clipboard image ok={pasted}（已备份原剪贴板：{}）",
             clip_keep.is_some()
@@ -6159,43 +6589,7 @@ fn img_region(x: f64, y: f64, w: f64, h: f64, dpr: f64) {
 
         /* 上传类（真 POST 的那几家）在这一段里等回来 —— AI 六家都是 Page 类，
          * 走不到这里；留着是为了将来若有人把 AI 家改成 Upload 档不出错。 */
-        if !pending_upload.is_empty() {
-            let (tx, rx) = std::sync::mpsc::channel::<(String, Result<String, String>)>();
-            for e in pending_upload.drain(..) {
-                let tx = tx.clone();
-                let jpeg = jpeg.clone();
-                std::thread::spawn(move || {
-                    let r = img_upload(e, &jpeg);
-                    let _ = tx.send((e.id.to_string(), r));
-                });
-            }
-            drop(tx);
-            let t_up = std::time::Instant::now();
-            while let Ok((id, r)) = rx.recv() {
-                match r {
-                    Ok(u) => {
-                        win::log(&format!(
-                            "img: {id} 上传完成，开结果页（{}ms）",
-                            t_up.elapsed().as_millis()
-                        ));
-                        img_open_tab(&u);
-                        opened += 1;
-                    }
-                    Err(msg) => {
-                        /* r78：回到旧逻辑 —— 上传失败时**退回打开上传页**。
-                         * （r77 因为"进队列时已经先开过上传页"而删掉了这一手，
-                         *  现在那个页面不再提前打开，所以这里必须补回来，
-                         *  否则用户点了一家、失败后**什么页面都没有**。） */
-                        win::log(&format!("img: {id} 上传失败（{msg}），退回打开页面"));
-                        problems.push(format!("{id} 上传失败（{msg}）"));
-                        if let Some(e) = imgsearch::find(&id) {
-                            img_open_tab(e.page);
-                            opened += 1;
-                        }
-                    }
-                }
-            }
-        }
+        drain_uploads(&mut pending_upload, &jpeg, &mut problems, &mut opened);
 
         /* r65：这一轮里有 AI 识图引擎 → 补一次 Ctrl+V（用户授权）。
          * 只对 AI 那几家；别的引擎一个键都不发。
@@ -6216,43 +6610,7 @@ fn img_region(x: f64, y: f64, w: f64, h: f64, dpr: f64) {
             opened += open_one(e, &mut problems, &mut pending_upload);
         }
 
-        if !pending_upload.is_empty() {
-            let (tx, rx) = std::sync::mpsc::channel::<(String, Result<String, String>)>();
-            for e in pending_upload.drain(..) {
-                let tx = tx.clone();
-                let jpeg = jpeg.clone();
-                std::thread::spawn(move || {
-                    let r = img_upload(e, &jpeg);
-                    let _ = tx.send((e.id.to_string(), r));
-                });
-            }
-            drop(tx);
-            let t_up = std::time::Instant::now();
-            while let Ok((id, r)) = rx.recv() {
-                match r {
-                    Ok(u) => {
-                        win::log(&format!(
-                            "img: {id} 上传完成，开结果页（{}ms）",
-                            t_up.elapsed().as_millis()
-                        ));
-                        img_open_tab(&u);
-                        opened += 1;
-                    }
-                    Err(msg) => {
-                        /* r78：回到旧逻辑 —— 上传失败时**退回打开上传页**。
-                         * （r77 因为"进队列时已经先开过上传页"而删掉了这一手，
-                         *  现在那个页面不再提前打开，所以这里必须补回来，
-                         *  否则用户点了一家、失败后**什么页面都没有**。） */
-                        win::log(&format!("img: {id} 上传失败（{msg}），退回打开页面"));
-                        problems.push(format!("{id} 上传失败（{msg}）"));
-                        if let Some(e) = imgsearch::find(&id) {
-                            img_open_tab(e.page);
-                            opened += 1;
-                        }
-                    }
-                }
-            }
-        }
+        drain_uploads(&mut pending_upload, &jpeg, &mut problems, &mut opened);
 
         if opened == 0 {
             img_clip_restore(&clip_keep, pasted, cfg.img_keep_clip);
@@ -6331,6 +6689,61 @@ fn img_region(x: f64, y: f64, w: f64, h: f64, dpr: f64) {
 /// （用户原话：「如果选中了 ai 看图，那么默认 ai 看图就是最先打开最先完成的，
 /// 软件自己按完快捷键再打开其他的识图网址」）。
 /// 顺序 = AI 家（保持注册表顺序）→ 其余。这一个函数是纯函数，单测直接钉行为。
+/// 并行上传 + 谁先回来先开（识图的两段都走这里）。
+///
+/// # 为什么要抽出来
+///
+/// `img_region` 里原本有**两份逐字相同**的 33 行代码（AI 那一段之后一份、
+/// 其余引擎那一段之后一份），只有外层注释不同。改一处漏一处是必然的 ——
+/// 比如 r78 把"上传失败退回打开页面"补回来时，就得记得改两遍。
+///
+/// `pending` 会被清空；`problems` 收失败原因，`opened` 累加真正打开了的页数。
+fn drain_uploads(
+    pending: &mut Vec<&'static imgsearch::Engine>,
+    jpeg: &[u8],
+    problems: &mut Vec<String>,
+    opened: &mut usize,
+) {
+    if pending.is_empty() {
+        return;
+    }
+    let (tx, rx) = std::sync::mpsc::channel::<(String, Result<String, String>)>();
+    for e in pending.drain(..) {
+        let tx = tx.clone();
+        let jpeg = jpeg.to_vec();
+        std::thread::spawn(move || {
+            let r = img_upload(e, &jpeg);
+            let _ = tx.send((e.id.to_string(), r));
+        });
+    }
+    drop(tx);
+    let t_up = std::time::Instant::now();
+    while let Ok((id, r)) = rx.recv() {
+        match r {
+            Ok(u) => {
+                win::log(&format!(
+                    "img: {id} 上传完成，开结果页（{}ms）",
+                    t_up.elapsed().as_millis()
+                ));
+                img_open_tab(&u);
+                *opened += 1;
+            }
+            Err(msg) => {
+                /* r78：回到旧逻辑 —— 上传失败时**退回打开上传页**。
+                 * （r77 因为"进队列时已经先开过上传页"而删掉了这一手，
+                 *  现在那个页面不再提前打开，所以这里必须补回来，
+                 *  否则用户点了一家、失败后**什么页面都没有**。） */
+                win::log(&format!("img: {id} 上传失败（{msg}），退回打开页面"));
+                problems.push(format!("{id} 上传失败（{msg}）"));
+                if let Some(e) = imgsearch::find(&id) {
+                    img_open_tab(e.page);
+                    *opened += 1;
+                }
+            }
+        }
+    }
+}
+
 fn img_plan(cfg: &config::Config) -> Vec<&'static imgsearch::Engine> {
     /* r62：**勾了多家就全部打开**（用户原话："如果在识图搜索里面把引擎都勾选，
      * 那点击横条中的识图搜索框选完之后，就应该在不同的标签页里面打开不同的识图"）。
@@ -7773,14 +8186,19 @@ fn rescan_ocr_multi(engine: Option<String>) -> Result<String, String> {
 /// 「重新识别」按钮：用配置里的引擎重跑一次（不开框选、不重截图）。
 /// 错误直接透传给前端 invoke —— 结果页的 `rescanWith` 会 catch 住并提示真实原因，
 /// 比在后端用 ocr_tell 再绕一圈更准（也不会和前端自己的提示叠成两条）。
+///
+/// ⚠ 必须 `async`：同步命令跑在 IPC/主线程上，而 `rescan_ocr` 会真的发一次
+/// 网络 OCR（最长 25 秒）。以前是普通 `fn`，用户切一下引擎、结果窗就整个卡住，
+/// 连"正在识别…"都刷不出来，看着像程序死了。
 #[tauri::command]
-fn ocr_rerun() -> Result<String, String> {
+async fn ocr_rerun() -> Result<String, String> {
     rescan_ocr(None)
 }
 
 /// 结果页切换引擎：用当前窗口里那张图，按指定引擎立刻重新识别。
+/// `async` 的理由同 `ocr_rerun`。
 #[tauri::command]
-fn ocr_rescan(engine: String) -> Result<String, String> {
+async fn ocr_rescan(engine: String) -> Result<String, String> {
     rescan_ocr(Some(engine))
 }
 
@@ -8343,7 +8761,15 @@ fn ocr_region(x: f64, y: f64, w: f64, h: f64, dpr: f64) {
         // 并行模式下本地引擎也要跑，缩放基准按它来（2600 也在百度 4096 的
         // 限度内，一张缩放后的图两个引擎共用）。
         // 参与名单：**默认引擎** + 「同时识别」里勾的其它几家（r47）。
-        let run = ocr_engine_plan(&cfg);
+        //
+        // ⚠ 必须走 `ocr_plan_with_local_fallback`，不能直接 `ocr_engine_plan`：
+        //   放行判断（ocr_start_flow）用的是带兜底的那版，识别用的却是这里的名单 ——
+        //   用户没配百度密钥时就会出现「能框选、框完必然失败」的死路。
+        //   两边用同一个函数，兜底才真的落在这一轮上。
+        let (run, fell_back) = ocr_plan_with_local_fallback(&cfg);
+        if fell_back {
+            win::log("ocr: 这一轮名单里全是缺凭据的引擎，已临时补上本地识别");
+        }
         // ⚠ 缩放基准：名单里有本地（走 CPU、图太大会明显变慢）就按 LOCAL_MAX_SIDE，
         //   否则按百度的上限。一张缩放后的图所有引擎共用。
         let max_side = if run.iter().any(|e| e == "windows") {
@@ -8447,7 +8873,14 @@ fn ocr_region(x: f64, y: f64, w: f64, h: f64, dpr: f64) {
 
         // 本地识别（Windows 内置）走另一条路：不联网、不编码第二次、速度最快。
         // 截图线程已经编好 JPEG，本地 OCR 的 BitmapDecoder 直接认，省掉整段网络往返。
-        let ocr_engine = cfg.ocr_engine.clone();
+        //
+        // ⚠ 引擎取 `run[0]` 而不是 `cfg.ocr_engine`：上面那份名单可能已经把
+        //   本地引擎临时补到首位（默认引擎缺凭据时的兜底）。这里用配置值的话，
+        //   兜底就白做了 —— 用户能框选，但一识别就必失败。
+        let ocr_engine = run
+            .first()
+            .cloned()
+            .unwrap_or_else(|| cfg.ocr_engine.clone());
         match run_ocr(&png, &ocr_engine) {
             Ok((text, raw, label)) => {
                 win::log(&format!(
@@ -8810,8 +9243,12 @@ fn icon_edit_ready() {
 ///   所以现在不可用时返回**明确错误**（含去哪打开/下载），不再静默回退。
 /// · r80b：新增 **AI 参数**（`params`）—— 用户要求「在编辑画面里面多添加一些
 ///   与这些模型相关的参数」。见 `aimatte::Params` 的字段说明。
+///
+/// ⚠ `async`：这张图要解码 + 跑一次 ONNX 推理（首次含模型加载，140~1000ms）
+///   + PNG 编码，全是同步 CPU 活。同步命令会把 UI 线程占住，表现为
+///   "点了抠图，整个编辑器卡一下、连进度提示都不刷新"。
 #[tauri::command]
-fn icon_remove_bg(
+async fn icon_remove_bg(
     src: String,
     keep: Option<iconedit::KeepMask>,
     params: Option<aimatte::Params>,
@@ -8957,6 +9394,18 @@ fn ai_matting_status() -> Value {
         // 体积同时给"人类可读"版本：前端就不必再实现一套格式化
         // （两处各写一份迟早会不一致）
         "models": aimodels::downloaded_with_size(),
+        /* v1.2.0：模型资产所在的 Release 页。
+         *
+         * 用户要求「模型就不用一起上传了，只是提示说在哪一个版本页面可以下载就可以了」——
+         * 所以界面上要能**明确告诉用户**"模型在哪个页下载"。这个值与
+         * `aimodels::ASSET_RELEASE_TAG` 是同一个来源，不会和实际下载地址脱节
+         * （有单测钉着两者一致）。 */
+        "assetTag": aimodels::ASSET_RELEASE_TAG,
+        "assetPage": format!(
+            "{}/tag/{}",
+            crate::update::RELEASES_URL,
+            aimodels::ASSET_RELEASE_TAG
+        ),
     })
 }
 
@@ -9881,21 +10330,30 @@ fn remove_bar_ocr() {
 /* 收藏夹                                                                */
 /* ==================================================================== */
 
-/// 解析用户录的组合键（如 `"Ctrl+Alt+F"`、`"Ctrl+Shift+1"`、`"Alt+F3"`）。
-/// 返回 `(ctrl, alt, shift, 主键 vk)`。空串 / 解析不了 → None（= 没启用）。
-fn parse_hotkey(s: &str) -> Option<(bool, bool, bool, u32)> {
+/// 解析用户录的组合键（如 `"Ctrl+Alt+F"`、`"Ctrl+Shift+1"`、`"Win+Shift+S"`）。
+/// 返回 `(ctrl, alt, shift, win, 主键 vk)`。空串 / 解析不了 → None（= 没启用）。
+///
+/// ⚠ 不能只是"忽略认不出的修饰键"：设置页允许录 `win+shift+s` 这类组合
+/// （`settings.js` 的录制器会把 metaKey 记成 `win`），以前这里丢了 Win 键、
+/// 又把 `win+shift+s` 当成 `shift+s` 去匹配 —— 保存成功、界面回显正常，
+/// 但那个热键永远不会触发，用户只会觉得"收藏夹快捷键时灵时不灵"。
+/// 现在把 Win 算进修饰键，并和 `win::parse_hotkey` 的口径保持一致。
+fn parse_hotkey(s: &str) -> Option<(bool, bool, bool, bool, u32)> {
     let s = s.trim();
     if s.is_empty() {
         return None;
     }
-    let (mut c, mut a, mut sh, mut main) = (false, false, false, None);
+    let (mut c, mut a, mut sh, mut w, mut main) = (false, false, false, false, None);
     for part in s.split('+') {
         let p = part.trim();
+        if p.is_empty() {
+            continue; // "ctrl++t" 这种手滑多打的加号，容错
+        }
         match p.to_ascii_uppercase().as_str() {
             "CTRL" | "CONTROL" => c = true,
-            "ALT" => a = true,
+            "ALT" | "MENU" => a = true,
             "SHIFT" => sh = true,
-            "WIN" | "SUPER" => {} // 暂不支持 Win 键，忽略不报错
+            "WIN" | "WINDOWS" | "SUPER" | "META" | "CMD" => w = true,
             _ => {
                 let up = p.to_ascii_uppercase();
                 main = Some(match up.as_str() {
@@ -9925,9 +10383,9 @@ fn parse_hotkey(s: &str) -> Option<(bool, bool, bool, u32)> {
         }
     }
     // 必须带至少一个修饰键，不然连打字都会触发
-    let need_mod = c || a || sh;
+    let need_mod = c || a || sh || w;
     match (need_mod, main) {
-        (true, Some(v)) => Some((c, a, sh, v)),
+        (true, Some(v)) => Some((c, a, sh, w, v)),
         _ => None,
     }
 }
@@ -10343,7 +10801,15 @@ fn clean_custom_engine(
                     return Err("打开类地址是原样打开的，不能有 %s；想带关键词搜索请选「搜索」类".into());
                 }
             }
-            config::EngineKind::Hotkey => unreachable!("快捷键类在上面已经分流"),
+            /* ⚠ 用 `Err` 而不是 `unreachable!`。
+             *
+             * 内层确实已经在外面的 `if kind == Hotkey` 分流过了，但
+             * `EngineKind` 是可扩展枚举 —— 将来加一个变体忘了改这里，
+             * `unreachable!` 会**直接 panic 把程序带走**，而用户只是在校验
+             * 一个自定义引擎。返回一条错误最多是"这个引擎没存上"。 */
+            config::EngineKind::Hotkey => {
+                return Err("快捷键类引擎在上面已经分流了，走到这里说明内部状态异常".into());
+            }
         }
         if url.chars().any(|c| c.is_whitespace()) {
             return Err("地址里不能有空格（空格请写成 %20）".into());
@@ -11633,9 +12099,22 @@ fn build_tray(a: &AppHandle) -> tauri::Result<()> {
                     wd_toast("还没配置 WebDAV，先在设置里填一下");
                     return;
                 }
-                std::thread::spawn(move || match backup_once(&cfg_snapshot(), 15) {
-                    Ok(r) => wd_toast(backup_summary(&r)),
-                    Err(e) => wd_toast(format!("同步失败：{e}")),
+                /* ⚠ 托盘这条也要抢 `SYNC_BUSY`。
+                 *
+                 * 设置页的上传/恢复/删除/清理都抢了这把锁，唯独托盘菜单的
+                 * 「立即同步」原来直接 `spawn(backup_once)` 裸跑 —— 两边同时
+                 * 进来就会有两个线程同时写本地备份目录、同时 `mark_backup_done`，
+                 * 轻则云端多出一份同名不同时间的文件，重则刚恢复的配置被
+                 * 另一次上传覆盖。 */
+                std::thread::spawn(move || {
+                    let Some(_guard) = SyncGuard::acquire() else {
+                        wd_toast("上一次云操作还没结束，稍等一下再点");
+                        return;
+                    };
+                    match backup_once(&cfg_snapshot(), 15) {
+                        Ok(r) => wd_toast(backup_summary(&r)),
+                        Err(e) => wd_toast(format!("同步失败：{e}")),
+                    }
                 });
             }
             "dir" => {
@@ -11821,6 +12300,49 @@ fn main() {
         config::save(&cfg);
         std::process::exit(0);
     }
+    // --update-probe：只查一次更新并把结果打到 stdout，然后退出（不进界面）。
+    //
+    // 为什么需要它：更新这条链最要紧的两段（"远端比当前新"和"下载+替换"）
+    // 没法靠界面自动化可靠地测 —— 尤其"替换正在运行的 exe"那一步，
+    // 一旦测坏就是"程序没了"。这条 run-and-exit 的探针让外部脚本能：
+    //   · 拿一个假的 GitHub（QS_UPDATE_API / QS_UPDATE_WEB 指过去）验发现新版；
+    //   · 再跑 --update-install 验下载 / 校验 / 替换 / 清理，全程可断言文件状态。
+    if flag("--update-probe") {
+        match update::check(config::VERSION) {
+            Ok(i) => {
+                println!("NEWER={}", i.newer);
+                println!("TAG={}", i.tag);
+                println!("CURRENT={}", i.current);
+                println!("SIZE={}", i.size);
+                println!("SHA={}", i.sha256);
+                println!("URL={}", i.url);
+            }
+            Err(e) => println!("ERR={e}"),
+        }
+        std::process::exit(0);
+    }
+    // --update-install：查一次 → 下载 → 校验 → 替换（run-and-exit，仅测试用）。
+    //
+    // ⚠ 它**会真的换掉当前这份 exe**（这正是要验的东西）。所以只该在隔离目录里跑。
+    if flag("--update-install") {
+        let r = update::check(config::VERSION).and_then(|i| {
+            if !i.newer {
+                return Err("当前已是最新，无需安装".to_string());
+            }
+            let p = update::download(&i, &mut |d, t| {
+                if t > 0 && d % (4 * 1024 * 1024) < 64 * 1024 {
+                    println!("PROGRESS={d}/{t}");
+                }
+            })?;
+            println!("DOWNLOADED={}", p.display());
+            update::apply_update()
+        });
+        match r {
+            Ok(old) => println!("OK old={}", old.display()),
+            Err(e) => println!("ERR={e}"),
+        }
+        std::process::exit(0);
+    }
     // --uia-probe：诊断「UIA 在本机到底能不能用」的只读探针。
     //
     // 存在的理由：划词取值的首选通道是 UIA（选中即读、不碰剪贴板），
@@ -11883,6 +12405,10 @@ fn main() {
     win::log_sync(&format!("=== start, args={:?} ===", args));
 
     // 任何线程 panic 都记进日志，而不是让程序静默消失
+    //
+    // ⚠ 必须用 `log_sync`（同步写盘）而不是 `log`（走后台队列）。
+    //   panic 之后进程往往**立刻**退出，队列里那条消息根本没机会落盘 ——
+    //   表现就是"程序没了，日志里一个字都没有"，比崩溃本身更难查。
     std::panic::set_hook(Box::new(|info| {
         let loc = info
             .location()
@@ -11894,7 +12420,24 @@ fn main() {
             .map(|s| s.to_string())
             .or_else(|| info.payload().downcast_ref::<String>().cloned())
             .unwrap_or_else(|| "?".to_string());
-        win::log(&format!("PANIC {loc} {msg}"));
+        // 同时打到 stderr（调试构建带控制台时能直接看见；正式构建没有控制台也无害）
+        eprintln!("PANIC {loc} {msg}");
+        win::log_sync(&format!("PANIC {loc} {msg}"));
+        /* 建 WebView2 失败是唯一一种"必须告诉用户"的 panic。
+         *
+         * 实测成因很具体：上一个实例被强杀（或任务管理器结束进程）之后，它的
+         * WebView2 用户数据目录会短暂处于"使用中"，这时立刻重开就会收到
+         * `HRESULT(0x800700AA) 请求的资源在使用中`，程序随即 exit(101)。
+         * 用户看到的只是"点了没反应，再点一次就好了" —— 但完全不知道为什么。
+         * 给一句人话，用户就知道等一秒再开。 */
+        if msg.contains("failed to create webview") {
+            win::message_box(
+                "Quick Search 没能启动",
+                "创建界面组件失败 —— 通常是上一个 Quick Search 刚被强制结束，\
+                 它占用的目录还没释放。\n\n请等一两秒再双击一次。\n\n\
+                 （若反复出现，注销或重启一次即可。）",
+            );
+        }
     }));
 
     // 1. 已经有一个在跑就直接退，避免出现两个托盘图标
@@ -12051,6 +12594,12 @@ fn main() {
             log_msg,
             ensure_rect,
             quit_app,
+            // v1.2.0：自动更新（查 / 下 / 装 / 重启 / 关于页那颗 GitHub 按钮）
+            update_check,
+            update_pending,
+            update_install,
+            update_restart,
+            open_repo_page,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -12209,6 +12758,20 @@ fn main() {
                 std::thread::sleep(Duration::from_secs(6));
                 webdav_sync_on_start();
             });
+            /* ---- v1.2.0：清掉上次更新留下的 .old ----
+             * 替换那一刻旧 exe 还被本进程占着、删不掉；**现在**（新进程里）
+             * 它已经不被占用了，才能删。放在这里既早（不拖启动）又安全
+             * （删不掉也只是留个文件，不影响任何功能）。 */
+            std::thread::spawn(|| {
+                let n = update::sweep_leftovers();
+                if n > 0 {
+                    win::log(&format!("update: 启动清理了 {n} 个更新残留"));
+                }
+            });
+            // ---- v1.2.0：自动检查更新（勾了开关才做）----
+            // 用户口径：「每次打开软件，它都会检测当前是不是最新版，如果是最新版，
+            // 那就什么都不发生」。所以这里是**静默**的：没新版一条事件都不发。
+            auto_check_on_start();
             win::log("hooks + tray ready");
 
             // ---- 内存泄漏压测：反复显示/隐藏横条，观察资源是否单调上涨 ----
@@ -12740,9 +13303,6 @@ mod tests {
 
     /* ---------------- r76：AI 识图的排序与按键判据 ---------------- */
 
-    /// AI 引擎必须排在最前（用户要"AI 最先打开最先完成"），
-    /// 且**非 AI 家的相对顺序一个都不能动**（勾选顺序 = 标签页从左到右）。
-    #[test]
     /// AI 引擎必须排在最前（用户要"AI 最先打开最先完成"），
     /// 且**非 AI 家的相对顺序一个都不能动**。
     ///

@@ -38,6 +38,12 @@ fn is_gdi_format(f: u32) -> bool {
 
 pub struct Snapshot {
     items: Vec<(u32, Vec<u8>)>,
+    /// 备份那一刻的剪贴板序号。
+    ///
+    /// 还原前拿它和当前序号比：**不一样就说明有人（用户或别的程序）在中间
+    /// 改过剪贴板**，这时候还原等于把人家刚复制的东西抹掉。实测踩过的形状是
+    /// 「识图 1~2 秒里用户又 Ctrl+C 了一次别的文本，搜完图剪辑板被还原成旧内容」。
+    seq: u32,
 }
 
 impl Snapshot {
@@ -61,18 +67,116 @@ impl Snapshot {
         }
         Some(String::from_utf16_lossy(&v))
     }
+
+    /// **重新对齐基准**：把"这是什么时刻的剪贴板"改成此刻。
+    ///
+    /// # 为什么必须有（这是修复自己上一轮引入的回归）
+    ///
+    /// `restore_if_unchanged` 拿 `self.seq` 和当前序号比，判断"这中间有没有
+    /// 别人写过"。但要命的是，取词和识图这两条路都是：
+    ///
+    /// ```text
+    ///   snapshot()             ← 记下 seq = A
+    ///   我们自己写剪贴板        ← seq 变成 B（SendInput 的 Ctrl+C / set_image）
+    ///   restore_if_unchanged() ← A != B，判成"别人改过"，**永不还原**
+    /// ```
+    ///
+    /// 后果正是原版花大力气避免的两件事：**选中文字永久留在剪贴板里**
+    /// （用户一眼看出"选中就复制了"）、**识图的截图清不掉**。
+    ///
+    /// 所以必须在我们**自己写完剪贴板之后**调一次这个，把基准挪到 B；
+    /// 此后若再有写入（用户在识图那 1~2 秒里又 Ctrl+C），才是真的"别人改过"，
+    /// 那时跳过还原才是对的。
+    pub fn note_our_write(&mut self) {
+        self.seq = seq();
+    }
 }
 
 fn open_clipboard() -> bool {
+    open_clipboard_within(30)
+}
+
+/// 打开剪贴板，最多重试 `tries` 次（每次间隔 10ms）。
+///
+/// 重试窗口的大小是**场景相关**的，不能一刀切：
+///   · 还原路径（`restore` / 还原前的预分配）值得等满 300ms —— 等不到就丢数据；
+///   · "看一眼剪贴板有什么"（`has_image` / 取词轮询里的读）不该等 —— 那条路
+///     40ms 就轮一次，每次都在里面阻塞 300ms 的话，一次取词会被它吃掉好几个窗口
+///     （实测：`capture_selection` 的 250ms 首轮窗口被 `has_image` 一次就读完）。
+fn open_clipboard_within(tries: u32) -> bool {
     // 30 × 10ms ≈ 300ms：微信这类客户端"握着剪贴板准备数据"的时候会把
     // OpenClipboard 一直挡回来，重试窗口给足一点能少丢几次。
-    for _ in 0..30 {
+    for _ in 0..tries {
         if unsafe { OpenClipboard(None) }.is_ok() {
             return true;
         }
         std::thread::sleep(Duration::from_millis(10));
     }
     false
+}
+
+/// 剪贴板格式表：打开 → 枚举 → 关闭。**不重试**（返回原样的空表）。
+fn enum_formats_once(limit: usize, tries: u32) -> Option<Vec<u32>> {
+    if !open_clipboard_within(tries) {
+        return None;
+    }
+    let mut out = Vec::new();
+    unsafe {
+        let mut f = 0u32;
+        while out.len() < limit {
+            f = EnumClipboardFormats(f);
+            if f == 0 {
+                break;
+            }
+            out.push(f);
+        }
+        let _ = CloseClipboard();
+    }
+    Some(out)
+}
+
+/// 枚举剪贴板格式，**空表时短暂重试**。
+///
+/// # 为什么要重试（实测抓到的真 bug）
+///
+/// `EmptyClipboard + SetClipboardData + CloseClipboard` 之后，系统的剪贴板
+/// 数据对象要等下一次被打开（别的进程读、或系统合成 CF_TEXT/CF_LOCALE）
+/// 才真正"落地"。实测（本机 release，`clip::tests`）：
+///
+/// ```text
+/// t=00 formats=Some([])                          text=Some("QS-TIMELINE-MARK")
+/// t=01 formats=Some([13, 16, 1, 7])              text=Some("QS-TIMELINE-MARK")
+/// ```
+///
+/// 也就是说紧跟着自己写完剪贴板去枚举，会拿到**空表**，但
+/// `GetClipboardData(CF_UNICODETEXT)` 已经有内容 —— 两个视图不同步。
+///
+/// 这不是测试的怪癖，是产品路径上的真问题：`snapshot()` 拿到空表就会
+/// 认为"用户剪贴板本来就是空的"，用完 `restore()` 时 `EmptyClipboard()`
+/// 之后一个格式都不写回 —— **用户刚复制的内容被清空**。
+fn enum_formats_settled(tries: u32) -> Option<Vec<u32>> {
+    /* 最多 4 轮的「空表」重试。
+     *
+     * ⚠ 总耗时要算**两笔**：打开剪贴板的重试（`tries` × 10ms）和轮次间隔（8ms）。
+     *   调用方给的 `tries` 会被乘进每一轮，所以**后续轮次改用短 tries**：
+     *   第一轮按调用方要求等满（还原路径值得等），后面几轮只是"数据还没落地"
+     *   的复检，4 次（40ms）足够。否则 `snapshot()` 的 30 tries 会变成
+     *   300ms × 4 ≈ 1.2 秒——把取词那条路的首轮窗口直接吃光。 */
+    let mut last: Option<Vec<u32>> = None;
+    for i in 0..4 {
+        let t = if i == 0 { tries } else { tries.min(4) };
+        match enum_formats_once(512, t) {
+            None => return None, // 打不开 ≠ 空的，原样上报（调用方据此放弃还原）
+            Some(v) if !v.is_empty() => return Some(v),
+            Some(v) => {
+                last = Some(v);
+                if i < 3 {
+                    std::thread::sleep(Duration::from_millis(8));
+                }
+            }
+        }
+    }
+    last
 }
 
 fn hglobal_bytes(h: HANDLE) -> Option<Vec<u8>> {
@@ -97,17 +201,22 @@ fn hglobal_bytes(h: HANDLE) -> Option<Vec<u8>> {
 
 /// 备份当前剪贴板；打不开剪贴板就返回 None（此时不要去还原，免得把别人的东西清空）
 pub fn snapshot() -> Option<Snapshot> {
+    /* ⚠ 格式表必须用「空表会重试」的那一版：紧接在自己写完剪贴板之后
+     * 枚举，系统可能先给出一张空表（见 `enum_formats_settled` 的实测记录）。
+     * 拿空表当"用户剪贴板是空的" → 还原时什么都不写回 → **用户内容被清空**。 */
+    let formats = enum_formats_settled(30)?;
+    // 序号要在**枚举之前**取：枚举本身可能触发系统合成格式（会推进序号），
+    // 之后取就会把"我们自己的枚举"错认成第三方改动。
+    let seq = seq_at_snapshot();
+    if formats.is_empty() {
+        return Some(Snapshot { items: Vec::new(), seq });
+    }
     if !open_clipboard() {
         return None;
     }
     let mut items = Vec::new();
     unsafe {
-        let mut f = 0u32;
-        loop {
-            f = EnumClipboardFormats(f);
-            if f == 0 {
-                break;
-            }
+        for f in formats {
             if is_gdi_format(f) {
                 continue;
             }
@@ -119,7 +228,34 @@ pub fn snapshot() -> Option<Snapshot> {
         }
         let _ = CloseClipboard();
     }
-    Some(Snapshot { items })
+    Some(Snapshot { items, seq })
+}
+
+/// 还原的**安全版**：剪贴板在我们备份之后被人改过，就什么都不动。
+///
+/// # 为什么需要它（真实数据丢失路径）
+///
+/// 识图那条链是「snapshot → 写截图进剪贴板 → 各家上传（0.3~2s）→ restore」。
+/// 这 1~2 秒里用户完全可能自己又 Ctrl+C 了一次别的内容 —— 无条件 `restore`
+/// 会把那份**刚复制的文本覆盖回旧的**，用户看到的正是"我明明复制了，粘出来是上一条"。
+///
+/// 判据用剪贴板序号：备份时记一份，还原前再读一份，不一样就说明中间有人写过。
+/// 代价是"序号变了但其实内容没变"时我们不还原 —— 那种情况用户本来也没丢东西。
+pub fn restore_if_unchanged(s: &Snapshot) {
+    let now = seq();
+    if now != s.seq {
+        crate::win::log(&format!(
+            "clip: 备份之后剪贴板被改过（seq {}→{}），跳过还原，保留当前内容",
+            s.seq, now
+        ));
+        return;
+    }
+    restore(s);
+}
+
+/// 取快照时刻的序号（单独抽出来，方便测试注入/替换）。
+fn seq_at_snapshot() -> u32 {
+    seq()
 }
 
 pub fn restore(s: &Snapshot) {
@@ -200,29 +336,19 @@ pub fn clear() {
 /// 用来识别「用户 Ctrl+C 复制的其实是一张图」：图片上的文字选不中，
 /// 但这时候我们照样把横条唤出来（只留一个「识别图片文字」按钮），
 /// 用户点一下就进框选识别。这是图片里抠字最顺手的一条路。
+///
+/// ⚠ 走 `enum_formats_settled(4)` 而不是自己枚举：紧接在**我们自己**刚写完剪贴板
+/// 之后调用时，系统可能先给出一张空表（见那个函数的实测记录），自枚举会误报
+/// 「不是图」。这条路只在 Ctrl+C 之后跑，32ms 的重试窗口不影响手感。
+///
+/// ⚠ 而且**只重试 4 次（≈30ms）的打开**，不是 300ms：这个函数在取词的
+/// 40ms 轮询里被反复调用，每次阻塞 300ms 的话 250ms 的首轮窗口一次就被它吃掉
+/// （审计实测就是这个形状）。
 pub fn has_image() -> bool {
-    if !open_clipboard() {
-        return false;
+    match enum_formats_settled(4) {
+        Some(v) => v.iter().any(|f| matches!(f, 2 | 8 | 17)),
+        None => false,
     }
-    let hit = unsafe {
-        let mut found = false;
-        let mut f = 0u32;
-        loop {
-            f = EnumClipboardFormats(f);
-            if f == 0 {
-                break;
-            }
-            if matches!(f, 2 | 8 | 17) {
-                found = true;
-                break;
-            }
-        }
-        found
-    };
-    unsafe {
-        let _ = CloseClipboard();
-    }
-    hit
 }
 
 pub fn seq() -> u32 {
@@ -454,23 +580,11 @@ pub fn set_image(bytes: &[u8]) -> bool {
 /// 把格式列表写进日志，一眼就能看出到底该读哪一种。
 /// `None` = **剪贴板打不开**（被别的程序握着不放 —— 微信复制过程中就是这个状态，
 /// 它先 EmptyClipboard 清空、再握着剪贴板去准备数据）；`Some(vec![])` = 打得开但是空的。
+///
+/// ⚠ 只给 4 次（≈30ms）的打开窗口：它出现在**日志与轮询**里，不该为了诊断
+/// 把取词的关键窗口堵住。要长重试的是还原路径，不是诊断。
 pub fn formats_open() -> Option<Vec<u32>> {
-    if !open_clipboard() {
-        return None;
-    }
-    let mut out = Vec::new();
-    unsafe {
-        let mut f = 0u32;
-        while out.len() < 64 {
-            f = EnumClipboardFormats(f);
-            if f == 0 {
-                break;
-            }
-            out.push(f);
-        }
-        let _ = CloseClipboard();
-    }
-    Some(out)
+    enum_formats_settled(4)
 }
 
 /// 诊断用的一句话。**必须区分「打不开」和「空的」** —— 这两个的修法完全不同：
@@ -638,8 +752,21 @@ pub fn read_text_open() -> Option<String> {
 }
 
 /// `read_text_open` 的自带开关版本（自己开/关剪贴板）。
+///
+/// ⚠ **读取路径只给短重试（4 × 10ms）**，不要用 `open_clipboard()` 的 300ms。
+///
+/// 这个函数出现在取词那条 **40ms 一轮的轮询**里（见 `capture_selection`）：
+/// 每轮都阻塞 300ms 的话，本来 250ms 的首轮窗口会被一次读取吃掉，
+/// 用户侧的体感就是"划词弹得慢"。
+/// 读取本来就允许失败（读不到就下一轮再试），没必要为一个"看一眼"等 300ms；
+/// 需要长重试的是**写入/还原**那条路（等不到就丢数据）。
 pub fn read_text_any() -> Option<String> {
-    if !open_clipboard() {
+    read_text_any_within(4)
+}
+
+/// 带可调重试次数的读取（重试 = 每次 10ms）。
+pub fn read_text_any_within(tries: u32) -> Option<String> {
+    if !open_clipboard_within(tries) {
         return None;
     }
     let out = read_text_open();
@@ -652,6 +779,20 @@ pub fn read_text_any() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 剪贴板测试的串行锁。
+    ///
+    /// 剪贴板是**进程级单例**：两条测试并行跑就会互相踩（A 刚 `set_text`，
+    /// B 立刻 `set_image` 把它覆盖掉，于是 A 的前置断言直接炸）。
+    /// 之前只有一条剪贴板测试所以没暴露；加上第二条之后立刻撞上了。
+    ///
+    /// 用 `Mutex<()>` + `lock().unwrap_or_else(|e| e.into_inner())`：某条测试
+    /// 断言失败时锁会被标记 poison，后面的照样能拿到（否则一条红会连累全部）。
+    static CLIP_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn serial() -> std::sync::MutexGuard<'static, ()> {
+        CLIP_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     /// CF_HTML 的偏移必须**按 UTF-8 字节**数：中文内容 char 数 ≠ 字节数，
     /// 按字符算偏移会让宿主（Word/Chrome）从错误的位置开始读碎片 ——
@@ -719,8 +860,14 @@ mod tests {
     ///   · `set_text` —— 剪贴板打不开时它第一步就炸，不会走到下面；
     ///   · `keep.is_some()` —— 能写进去就该能备份。
     /// 有了这两道，restore 那几个断言（图没了 / 文字回来）**不可能**被悄悄跳过。
+    /* ⚠ 两条临时诊断测试（debug_clip_timeline_probe / debug_clip_restore_probe）
+     * 在定位「紧跟着自己写完剪贴板去枚举会拿到空表」这个 bug 时用过，已删 ——
+     * 它们会长时间占用剪贴板，留在测试集里只会拖慢、还会和真机上的复制动作打架。
+     * 结论已经写进 `enum_formats_settled()` 的注释。 */
+
     #[test]
     fn 识图截图借了剪贴板要还() {
+        let _serial = serial();   // 剪贴板是进程级单例，测试必须串行
         const MARK: &str = "QS-R56-CLIP-PROBE-ORIGINAL";
         // 1) 摆一个已知内容
         assert!(set_text(MARK), "测试前置：往剪贴板放一段文字");
@@ -757,5 +904,66 @@ mod tests {
          *    免得后人"优化"成无条件 clear。 */
         let none_keep: Option<Snapshot> = None;
         assert!(none_keep.as_ref().is_none(), "None 备份 = 不动剪贴板");
+    }
+
+    /// `restore_if_unchanged` 的**基准对齐**语义（这是修自己上一轮引入的回归）。
+    ///
+    /// # 它钉住的是什么
+    ///
+    /// 取词 / 识图两条路都是「snapshot → **我们自己**写剪贴板 → 用完还原」。
+    /// `snapshot` 记的序号是"写之前"的，而我们自己那一写必然让序号 +1。
+    /// 如果还原前不把基准挪到"刚写完那一刻"，`restore_if_unchanged` 会把
+    /// **我们自己的写入**误判成"第三方改过"，于是永远跳过还原 ——
+    /// 选中文字永久留在剪贴板、识图截图清不掉。
+    ///
+    /// 所以这条测试走两个回合：
+    ///   ① 写完不 note_our_write → 应当**跳过**还原（判断依据是"变了"）；
+    ///   ② 写完先 note_our_write → 应当**真的**还原。
+    ///
+    /// ⚠ 只测语义，不测实现细节；剪贴板打不开时（CI / 被占）第一步 set_text 就炸，
+    ///   不会把断言悄悄跳过。
+    #[test]
+    fn 自己写完剪贴板后要重新对齐基准才还原() {
+        let _serial = serial();   // 剪贴板是进程级单例，测试必须串行
+        use windows::Win32::System::DataExchange::EmptyClipboard;
+
+        const MARK: &str = "QS-R82-ALIGN-PROBE";
+        let fake_png: &[u8] = &[
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9C, 0x63, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00,
+            0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        ];
+
+        /* ---- 回合 ①：写完不对齐 → 应当跳过还原 ---- */
+        assert!(set_text(MARK), "测试前置：往剪贴板放一段文字");
+        let mut keep = snapshot().expect("能写就该能备份");
+        assert!(set_image(fake_png), "写图进剪贴板应当成功");
+        assert!(has_image(), "此时剪贴板里应当是图");
+        // 不对齐基准就直接走"安全还原"：它应当拒绝（因为序号确实变了）
+        restore_if_unchanged(&keep);
+        assert!(
+            has_image(),
+            "没对齐基准时 restore_if_unchanged 必须**跳过**（把'我们自己写的'误判成第三方，正是那个回归）"
+        );
+
+        /* ---- 回合 ②：对齐基准 → 应当真的还原 ---- */
+        keep.note_our_write();
+        restore_if_unchanged(&keep);
+        assert!(!has_image(), "对齐基准之后，还原应当真的执行（图消失）");
+        assert_eq!(
+            read_text_any().as_deref(),
+            Some(MARK),
+            "对齐基准之后，用户原本的内容要回来"
+        );
+
+        // 收尾：别把测试痕迹留在用户剪贴板里
+        if open_clipboard() {
+            unsafe {
+                let _ = EmptyClipboard();
+                let _ = CloseClipboard();
+            }
+        }
     }
 }

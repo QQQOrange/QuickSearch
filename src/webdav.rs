@@ -243,6 +243,7 @@ fn parse_multistatus(xml: &str, dir: &str) -> Result<Vec<Backup>, String> {
             continue;
         }
         let Some(href) = tag_text(seg, "href") else { continue };
+        // ⚠ 只在这里解一次（tag_text 已改成返回原文，见它的注释）
         let decoded = percent_decode(&href);
         let name = decoded.rsplit('/').next().unwrap_or("").trim().to_string();
         if name.is_empty() || name == dir_self {
@@ -280,7 +281,12 @@ fn find_response_open(lower: &str, from: usize) -> Option<usize> {
     None
 }
 
-/// 取出某个标签的文字内容（忽略命名空间前缀，忽略大小写）。
+/// 取出某个标签的**原文**内容（忽略命名空间前缀，忽略大小写）。
+///
+/// ⚠ 这里**不做** percent-decode，解码由调用方做一次。以前它自己解、
+///   `parse_multistatus` 又对结果解了一次 —— 文件名里只要带 `%` 就被解两遍
+///   （`a%2541.txt` → `aA.txt`），下载会说"云端没有找到"，而 delete 把 404
+///   当成功：删除"成功"但文件还在。
 fn tag_text(xml: &str, tag: &str) -> Option<String> {
     let lower = xml.to_ascii_lowercase();
     let needle = format!(":{tag}>");
@@ -307,7 +313,7 @@ fn tag_text(xml: &str, tag: &str) -> Option<String> {
     };
     let rest = &xml[at + skip..];
     let end = rest.find('<')?;
-    Some(percent_decode(rest[..end].trim()))
+    Some(rest[..end].trim().to_string())
 }
 
 fn percent_decode(s: &str) -> String {
@@ -425,12 +431,38 @@ pub fn download_named(o: &Opts, name: &str) -> Result<String, String> {
         r = r.set("Authorization", &h);
     }
     match r.call() {
-        Ok(resp) => resp
-            .into_string()
-            .map_err(|e| format!("读取响应失败：{e}")),
+        /* ⚠ 不能用 `into_string()`：ureq 对它的上限是 **10 MiB**，而备份允许到
+         * 32 MiB（`MAX_BACKUP_BYTES`）。收藏夹塞满图片的合法备份会在这里报
+         * "response too big for into_string" —— 而调用方此时已经 stash 过本地
+         * 配置，用户看到的是"恢复失败"，白折腾一场。
+         * 按上限读字节再转 UTF-8（备份本身就是 JSON 文本）。 */
+        Ok(resp) => read_body_capped(resp, MAX_BACKUP_BYTES),
         Err(ureq::Error::Status(404, _)) => Err(format!("云端没有找到「{clean}」")),
         Err(e) => Err(explain(&e)),
     }
+}
+
+/// 备份文件的体积上限（32 MiB）—— 与 main.rs 的 `MAX_BACKUP_BYTES` 同一个数。
+///
+/// 为什么这里要单独有一份：那一个是 main.rs 里的私有常量，而
+/// `download_named` 在 webdav 模块内、拿不到它。两边必须一致，改一处要改两处
+/// （webdav 的测试里没有交叉断言，只能靠注释提醒）。
+pub const MAX_BACKUP_BYTES: u64 = 32 * 1024 * 1024;
+
+/// 按字节上限读响应体，超限给一句人话错误。
+fn read_body_capped(resp: ureq::Response, cap: u64) -> Result<String, String> {
+    use std::io::Read;
+    let mut buf: Vec<u8> = Vec::with_capacity(64 * 1024);
+    let mut rd = resp.into_reader().take(cap + 1);
+    rd.read_to_end(&mut buf)
+        .map_err(|e| format!("读取响应失败：{e}"))?;
+    if buf.len() as u64 > cap {
+        return Err(format!(
+            "备份文件太大（超过 {} MiB 上限），无法直接恢复",
+            cap / (1024 * 1024)
+        ));
+    }
+    String::from_utf8(buf).map_err(|_| "云端文件不是 UTF-8 文本（可能已损坏）".to_string())
 }
 
 /// 删除云端的一份备份（DELETE）。

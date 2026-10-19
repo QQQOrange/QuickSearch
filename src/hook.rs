@@ -9,9 +9,9 @@ use std::sync::Mutex;
 
 use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetMessageW, SetWindowsHookExW, MSG, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN,
-    WM_SYSKEYUP,
+    GetMessageW, SetWindowsHookExW, UnhookWindowsHookEx, MSG, WH_KEYBOARD_LL, WH_MOUSE_LL,
+    WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONDOWN,
+    WM_SYSKEYDOWN, WM_SYSKEYUP,
 };
 
 use crate::clip;
@@ -24,7 +24,7 @@ pub enum Ev {
     Move(i32, i32),
     /// 键盘按下。
     ///
-    /// 字段：`(vk, 剪贴板序号, ctrl, alt, shift, 是不是我们自己注入的)`
+    /// 字段：`(vk, 剪贴板序号, ctrl, alt, shift, win, 是不是我们自己注入的)`
     ///
     /// 为什么要在钩子里就把**序号**取下来：低级键盘钩子的回调是在按键进入目标
     /// 线程消息队列**之前**跑的，此刻用户这次 Ctrl+C 还没生效，序号是"复制前"
@@ -40,7 +40,7 @@ pub enum Ev {
     /// 那次注入绝不能被当成用户按的。靠 `dwExtraInfo` 里的暗号
     /// （`win::SELF_INJECT_TAG`）一锤定音 —— 比"时间窗"靠谱，不会误吞第三方
     /// 工具发的 Ctrl+C（用户报过"概率性唤不出来"，就是时间窗误吞造成的）。
-    KeyDown(u32, u32, bool, bool, bool, bool),
+    KeyDown(u32, u32, bool, bool, bool, bool, bool),
     /// 键盘抬起。
     ///
     /// 专门为 OCR 框选遮罩的 Esc 兜底：遮罩窗口虽然 `.focused(true)`，但 WebView2
@@ -91,7 +91,19 @@ unsafe extern "system" fn mouse_proc(code: i32, w: WPARAM, l: LPARAM) -> LRESULT
             match msg {
                 WM_LBUTTONDOWN => send(Ev::Down(info.pt.x, info.pt.y, info.time)),
                 WM_LBUTTONUP => send(Ev::Up(info.pt.x, info.pt.y, info.time)),
-                WM_MOUSEMOVE => send(Ev::Move(info.pt.x, info.pt.y)),
+                /* ⚠ 鼠标移动**只在左键按着的时候**才转发。
+                 *
+                 * 钩子回调跑在系统输入链路上，有 LowLevelHooksTimeout（默认
+                 * 300ms）盯着：超时系统会把钩子**摘掉**且不通知我们。
+                 * 而 WM_MOUSEMOVE 在 1000Hz 的高刷鼠标上是每秒上千条 ——
+                 * 每条都塞 channel，消费线程光取消息就把一个核占满，回调本身
+                 * 还排在链路上。消费侧真正需要的只是"拖动中的轨迹"
+                 * （判拖选），左键没按下时的移动一律没有用。 */
+                WM_MOUSEMOVE => {
+                    if win::left_down() {
+                        send(Ev::Move(info.pt.x, info.pt.y));
+                    }
+                }
                 // ⚠ 只在 **DOWN** 时发 RDown。以前 DOWN / UP 都发 —— 结果菜单在
                 //   按下时打开、松开时又收到一次 RDown，前端先藏菜单再查重，
                 //   150ms 内命中查重就不再重开 → 用户看到「按住才有菜单、
@@ -99,16 +111,10 @@ unsafe extern "system" fn mouse_proc(code: i32, w: WPARAM, l: LPARAM) -> LRESULT
                 //   至于「别的鼠标钩子会吃掉 WM_RBUTTONDOWN」的兜底：那是
                 //   spawn_rbutton_watch 轮询线程的职责（只在按下沿触发），
                 //   不需要 UP 来补。
-                WM_RBUTTONDOWN => {
-                    win::log(&format!("hook: RMB down at ({},{})", info.pt.x, info.pt.y));
-                    send(Ev::RDown(info.pt.x, info.pt.y))
-                }
-                WM_RBUTTONUP => {
-                    win::log(&format!("hook: RMB up at ({},{})", info.pt.x, info.pt.y));
-                }
-                m if (0x0200..=0x0210).contains(&m) => {
-                    win::log(&format!("hook: other mouse msg {m:#06x}"));
-                }
+                WM_RBUTTONDOWN => send(Ev::RDown(info.pt.x, info.pt.y)),
+                // 其余（中键滚动 / 双击 / 各种扩展消息）：**不进日志**。
+                // 以前每个滚轮事件都 format! 一行写进队列，滚一下就是几十条；
+                // 真正要排查时反而把有用的日志淹了。
                 _ => {}
             }
         }
@@ -145,6 +151,10 @@ unsafe extern "system" fn keyboard_proc(code: i32, w: WPARAM, l: LPARAM) -> LRES
                     win::ctrl_down(),
                     win::alt_down(),
                     win::shift_down(),
+                    // Win 键也要一起报：收藏夹热键支持 win+…，而配置里存的组合键
+                    // 只是要"必须带修饰键"，不带 Win 的话 win+shift+s 这类会被
+                    // 当成"没按修饰键"而静默失效（设置页允许录，后端却不认）。
+                    win::win_down(),
                     // 暗号对上了 = 这是软件自己为取词注入的 Ctrl+C，消费线程会跳过
                     info.dwExtraInfo == win::SELF_INJECT_TAG,
                 ));
@@ -157,6 +167,15 @@ unsafe extern "system" fn keyboard_proc(code: i32, w: WPARAM, l: LPARAM) -> LRES
 }
 
 /// 起一个专门跑消息循环的线程来装钩子。钩子句柄跟着线程活，不主动卸。
+///
+/// # 存活检测（为什么循环里还要再看一眼）
+///
+/// 低级钩子被系统**摘掉**是静默的：回调超时（`LowLevelHooksTimeout`，默认
+/// 300ms）、或者 `GetMessageW` 返回 0/-1，都会让消息循环退出。以前这里就一句
+/// `while GetMessageW(...).as_bool() {}` —— 一旦退出，钩子永远不再装回来，
+/// 用户侧的表现是"用了一会儿之后划词就不灵了，重启才好"。
+///
+/// 现在循环退出后会重新装一次（最多 5 次），并在日志里留下痕。
 pub fn spawn(tx: Sender<Ev>) {
     if let Ok(mut g) = TX.lock() {
         *g = Some(tx);
@@ -164,21 +183,59 @@ pub fn spawn(tx: Sender<Ev>) {
     std::thread::Builder::new()
         .name("qs-hooks".into())
         .spawn(|| unsafe {
-            // ⚠ 成败都要记账。以前这里是 `let _mouse = ...` 静默丢弃 —— 装钩子
-            // 失败（被安全软件拦、系统钩子数耗尽等）时用户侧只表现为「Ctrl+C
-            // 没反应」，log.txt 里一个字不留，排查只能干猜。句柄接着留在闭包
-            // 栈上：钩子跟着这条线程的消息循环活，不主动卸。
-            let mouse = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), None, 0);
-            let kb = SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_proc), None, 0);
-            win::log(&format!(
-                "hooks: WH_MOUSE_LL {} / WH_KEYBOARD_LL {}",
-                hook_state("鼠标（划词触发）", mouse.as_ref().err()),
-                hook_state("键盘（Ctrl+C 兜底）", kb.as_ref().err()),
-            ));
-            let _mouse = mouse;
-            let _kb = kb;
-            let mut msg = MSG::default();
-            while GetMessageW(&mut msg, None, 0, 0).as_bool() {}
+            let mut attempt = 0u32;
+            loop {
+                attempt += 1;
+                // ⚠ 成败都要记账。以前这里是 `let _mouse = ...` 静默丢弃 —— 装钩子
+                // 失败（被安全软件拦、系统钩子数耗尽等）时用户侧只表现为「Ctrl+C
+                // 没反应」，log.txt 里一个字不留，排查只能干猜。
+                let mouse = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), None, 0);
+                let kb = SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_proc), None, 0);
+                win::log(&format!(
+                    "hooks: 第 {attempt} 次安装 —— WH_MOUSE_LL {} / WH_KEYBOARD_LL {}",
+                    hook_state("鼠标（划词触发）", mouse.as_ref().err()),
+                    hook_state("键盘（Ctrl+C 兜底）", kb.as_ref().err()),
+                ));
+                let mut msg = MSG::default();
+                /* GetMessageW 的返回值必须分开处理：
+                 *   · > 0  正常消息；
+                 *   · == 0 WM_QUIT —— 这是**我们自己要退出**（PostQuitMessage），
+                 *          不能重装，否则退出流程会卡在这条线程上反复装钩子；
+                 *   · == -1 出错（极少见），这时重装才有意义。 */
+                let mut quit = false;
+                loop {
+                    let r = GetMessageW(&mut msg, None, 0, 0);
+                    if r.0 == 0 {
+                        quit = true;
+                        break;
+                    }
+                    if r.0 < 0 {
+                        break;
+                    }
+                }
+                /* ⚠ 重装之前**必须显式卸载**旧钩子。
+                 *
+                 * `HHOOK` 是个裸句柄（没有 Drop），直接丢掉不会卸载 —— 不清就重装
+                 * 会让钩子**叠加**在同一线程上：系统链里挂着两个 WH_MOUSE_LL，
+                 * 每个鼠标事件都走两遍我们的回调、往 channel 里塞两份，
+                 * 拖拽/取词判定跟着乱（这是我修"钩子被摘掉"时引进去的）。 */
+                if let Ok(h) = mouse {
+                    let _ = UnhookWindowsHookEx(h);
+                }
+                if let Ok(h) = kb {
+                    let _ = UnhookWindowsHookEx(h);
+                }
+                if quit {
+                    win::log("hooks: 收到 WM_QUIT，钩子线程正常退出（不再重装）");
+                    return;
+                }
+                if attempt >= 5 {
+                    win::log("hooks: 消息循环反复出错，停止重装（钩子功能可能已失效）");
+                    return;
+                }
+                win::log("hooks: 消息循环出错，1 秒后重装");
+                std::thread::sleep(std::time::Duration::from_millis(1000));
+            }
         })
         .ok();
 }

@@ -1,4 +1,4 @@
-//! 液态玻璃的背景抓取层（Rust 侧）。
+﻿//! 液态玻璃的背景抓取层（Rust 侧）。
 //!
 //! 浏览器安全模型下，WebGL / WebGPU **永远读不到窗口外面的桌面像素** ——
 //! 横条是悬浮在别的软件之上的透明窗，它要折射的恰恰是窗外那部分。
@@ -109,7 +109,16 @@ pub fn capture_rect(x: i32, y: i32, w: i32, h: i32) -> Option<Snap> {
             ..Default::default()
         };
         let need = (w as usize) * (h as usize) * 4;
-        let mut rgba: Vec<u8> = vec![0; need];
+        /* ⚠ `vec![0; n]` 会先清零再让 GetDIBits 覆盖写 —— 对一块 8K 屏来说
+         * 那是白白 memset 上百 MB（上限 8000² × 4 ≈ 244MB）。用
+         * `with_capacity` + `set_len` 拿一块**未初始化**的缓冲：GetDIBits
+         * 会把 lines 行的像素全部填满，填不满时下面 `lines != h` 会直接返回
+         * None，不会把未初始化的字节交出去。
+         *
+         * SAFETY：`u8` 没有无效位模式（未初始化读在 Rust 抽象机里仍属 UB，
+         * 所以这里必须保证"读之前一定已写"—— 见上面的 lines 校验：
+         * 只有 lines == h（= 全部行都写到了）才会走到后面的读取）。 */
+        let mut rgba: Vec<u8> = Vec::with_capacity(need);
         let lines = GetDIBits(
             mem,
             bmp,
@@ -125,6 +134,8 @@ pub fn capture_rect(x: i32, y: i32, w: i32, h: i32) -> Option<Snap> {
         if lines != h {
             return None;
         }
+        // 走到这里说明 h 行全写满了，长度可以安全地标出来（整段已在外层 unsafe 里）
+        rgba.set_len(need);
         // BitBlt 抓来的是 BGRA（alpha 通道是垃圾值）→ 现场换成 RGBA，
         // alpha 拍成 255。一次线性扫描，520×60@2x 也就 12 万像素，微秒级。
         for px in rgba.as_chunks_mut::<4>().0 {

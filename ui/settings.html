@@ -1245,6 +1245,60 @@
             <div class="am-row"><span class="am-k">当前版本</span><span class="am-v" id="aboutVer">—</span></div>
             <div class="am-row"><span class="am-k">版本更新时间</span><span class="am-v" id="aboutBuilt">—</span></div>
             <div class="am-row"><span class="am-k">界面渲染</span><span class="am-v" id="aboutWebview">—</span></div>
+            <!-- v1.2.0：GitHub 仓库地址。用户要求「标明 github 的地址，并且点击后
+                 能够直接通过浏览器打开」——所以它是一个**按钮**（button 而非 a），
+                 点击走 Rust 的 open_repo_page（ShellExecuteW 交给系统默认浏览器）。
+                 不用 <a href>：页面跑在 WebView2 里，a 会被拦在 webview 内部
+                 （或撞 CSP），拿不到"用系统浏览器打开"这个语义。 -->
+            <div class="am-row">
+                <span class="am-k">项目地址</span>
+                <span class="am-v">
+                    <button type="button" class="linkbtn" id="aboutRepo"
+                            title="在浏览器里打开 GitHub 仓库主页">QQQOrange/QuickSearch ↗</button>
+                </span>
+            </div>
+        </div>
+
+        <!-- v1.2.0：更新。一个开关 + 一个按钮 + 一块进度，都在这一张卡里 ——
+             用户要的就是"在关于里面"能看到并操作。 -->
+        <div class="tools">
+            <div class="tools-title">更新</div>
+            <div class="upd">
+                <label class="upd-row">
+                    <span class="sw"><input type="checkbox" id="s-autoUpdate"><i></i></span>
+                    <span class="upd-txt">
+                        <b>自动更新</b>
+                        <small>每次打开软件时自动检查新版本；发现新版会提示你下载。
+                               取消勾选后不再自动检查（仍可点右边的「检查更新」）。</small>
+                    </span>
+                </label>
+                <div class="upd-actions">
+                    <button type="button" class="btn" id="btnUpdateCheck">检查更新</button>
+                    <span class="upd-hint" id="updHint"></span>
+                </div>
+                <!-- 进度条：平时藏着，下载时才出现 -->
+                <div class="upd-progress" id="updProgress" hidden>
+                    <div class="upd-bar"><i id="updBar"></i></div>
+                    <div class="upd-pct" id="updPct">0%</div>
+                </div>
+                <!-- 有新版时的详情块（版本号 / 说明 / 下载 / 重启） -->
+                <div class="upd-found" id="updFound" hidden>
+                    <div class="upd-head">
+                        发现新版本 <b id="updVer">—</b>
+                        <span class="upd-size" id="updSize"></span>
+                    </div>
+                    <div class="upd-notes" id="updNotes"></div>
+                    <div class="upd-actions">
+                        <button type="button" class="btn primary" id="btnUpdateInstall">下载并安装</button>
+                        <button type="button" class="btn" id="btnUpdateRestart" hidden>立即重启</button>
+                        <button type="button" class="linkbtn" id="btnUpdatePage"
+                                title="在浏览器里打开这个版本的说明页">在网页上查看 ↗</button>
+                    </div>
+                    <div class="upd-note-tip" id="updDoneTip" hidden>
+                        ✔ 新版本已经装好。点「立即重启」即可用上新版（不点也不会丢，下次开程序就是新版）。
+                    </div>
+                </div>
+            </div>
         </div>
         <div class="tools">
             <div class="tools-title">使用的工具</div>

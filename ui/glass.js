@@ -38,9 +38,20 @@
     var liveStarting = false;     // 正在异步开启（等 glass_exclude 回执）
     var excluded = false;         // 横条已对抓屏隐身（WDA_EXCLUDEFROMCAPTURE 生效中）
     var captureBusy = false;      // 一次抓屏在途（去重，杜绝叠加隐藏）
+    /** 抓屏代次：每次 captureOnce 自增，用来作废"上一轮迟到的回调"。 */
+    var captureBusyGen = 0;
+    /** **是谁把 stage 藏起来的**（那一代的代次；0 = 没藏着）。
+     *  只有它自己回来时才有资格恢复可见 —— 见 captureOnce 里的两目标说明。 */
+    var stageHideOwner = 0;
     var liveThrottle = 0;         // 兜底路径的帧计数（每 4 帧抓一次）
     var exclChain = Promise.resolve();  // 抓屏隐身状态变更的串行队列（乱序免疫）
     var shown = false;
+    /** WebGL 上下文丢失/恢复的监听是不是已经挂过（只在第一次 initGL 时挂一次）。 */
+    var contextHooksInstalled = false;
+    /** 外部可注册的两个回调（见 initGL 里挂监听那段的注释）。
+     *  bar.js 会挂上：丢失时清状态、恢复时让下一次 show 重新抓背景。 */
+    var onContextLost = null;
+    var onContextRestored = null;
 /* r49：横条被"钉住"时藏起来了（bar.js 给 .bar 挂 .ghost = visibility:hidden）。
  *
  * ⚠ 为什么玻璃层必须知道这件事：`.ghost` 只藏了 **DOM** 那一层，而玻璃是画在
@@ -262,6 +273,34 @@ var barGhost = false;
         gl.disable(gl.DEPTH_TEST);
         gl.enable(gl.BLEND);
         gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);   // 预乘 Alpha，同 liquidGL
+        /* ⚠ GPU 重置 / 驱动更新 / 显卡休眠唤醒之后，上下文会**静默失效**：
+         *   不监听的话 `gl` 字段非空、`ready` 仍然是 true，但所有绘制都画不出
+         *   东西 —— 落到用户眼里就是"玻璃突然变成一块空白，重启才好"。
+         *   这里在第一次建上下文时装一次监听；`restored` 时把 gl 置空，下一次
+         *   initGL() 会重新编译着色器、重建纹理（重建后需要重新喂一张背景，
+         *   交给 onShow 那条正常路径）。 */
+        if (!contextHooksInstalled) {
+            contextHooksInstalled = true;
+            canvas.addEventListener('webglcontextlost', function (e) {
+                // preventDefault 才能让浏览器有机会发 restored
+                e.preventDefault();
+                console.warn('glass: WebGL 上下文丢失，等恢复');
+                gl = null;
+                prog = null;
+                tex = null;
+                uni = {};
+                if (typeof onContextLost === 'function') {
+                    try { onContextLost(); } catch (_) { }
+                }
+            }, false);
+            canvas.addEventListener('webglcontextrestored', function () {
+                console.warn('glass: WebGL 上下文已恢复，重建渲染器');
+                // gl 已经在 lost 里置空，这里等下一次 draw/ensure 自己重建
+                if (typeof onContextRestored === 'function') {
+                    try { onContextRestored(); } catch (_) { }
+                }
+            }, false);
+        }
         return true;
     }
 
@@ -520,10 +559,31 @@ var barGhost = false;
     function captureOnce(hideStage) {
         if (captureBusy) return null;
         captureBusy = true;
+        /* ⚠ 给这一次抓屏打一个"代次"，并记住**是谁把 stage 藏起来的**。
+         *
+         * 两个必须同时成立的目标（我第一版只做了前者，把后者做坏了）：
+         *
+         *  ① 上一轮迟到的回调不能把**新一轮刚藏好的** stage 提前显示出来
+         *     —— 那会让新一轮抓到"自己还没隐藏"的那一帧（文件里 528~533 行
+         *     描述的「纹理自拍」）。
+         *  ② 但如果**没有**新一轮（只被 stopLive 打断），迟到的回调仍必须
+         *     把 stage 恢复可见 —— 否则舞台**永久隐藏**，横条整个消失。
+         *
+         * 判据用 `stageHideOwner`（藏 stage 那一代的代次）而不是"当前代次"：
+         *   · A 藏（owner=A），stopLive 增代但 owner 不变 → A 回来时 owner 仍是 A
+         *     → **恢复**（目标 ②）；
+         *   · A 藏（owner=A），B 又藏（owner=B）→ A 回来时 owner 已是 B
+         *     → **不恢复**（目标 ①，交给 B 自己收尾）。
+         */
+        captureBusyGen += 1;
+        var myGen = captureBusyGen;
         var stage = null;
         if (hideStage) {
             stage = document.getElementById('stage');
-            if (stage) stage.style.visibility = 'hidden';
+            if (stage) {
+                stage.style.visibility = 'hidden';
+                stageHideOwner = myGen;      // 这一代负责把它恢复回来
+            }
         }
         // 为什么必须等帧：BitBlt 抓的是**合成后的屏幕**。stage 置 hidden
         // 只是改 DOM，WebView2 要到本帧合成才把"全透明"呈现给 DWM；
@@ -536,16 +596,24 @@ var barGhost = false;
         }) : invoke('glass_capture');
         // 返回整条链：调用方（refresh / 探针）能 await「这一次抓取真的落完」。
         return chain.then(function (r) {
-            if (stage) stage.style.visibility = '';
-            captureBusy = false;
+            if (stage && stageHideOwner === myGen) {
+                stage.style.visibility = '';
+                stageHideOwner = 0;
+            }
             if (r instanceof ArrayBuffer && upload(r)) {
                 stats.captures++;
                 kick();
             }
         }).catch(function (e) {
-            if (stage) stage.style.visibility = '';
-            captureBusy = false;
+            if (stage && stageHideOwner === myGen) {
+                stage.style.visibility = '';
+                stageHideOwner = 0;
+            }
             console.error('glass: 抓屏失败', e);
+        }).then(function () {
+            // 只有最新一代才有资格清"在途"标志（旧代清掉会让新一轮的
+            // 去重失效，出现两路抓屏叠着跑）
+            if (myGen === captureBusyGen) captureBusy = false;
         });
     }
 
@@ -694,8 +762,28 @@ var barGhost = false;
         stopLive: function () {
             if (liveRaf) { cancelAnimationFrame(liveRaf); liveRaf = 0; }
             liveStarting = false;
-            captureBusy = false;   // 循环停了，在途抓屏结果也不再需要
+            /* 只放开"在途占位"，**不碰代次、不碰 stageHideOwner**。
+             *
+             * 放开的理由：循环停了，新的抓屏应当能立刻开始。
+             * 不碰代次的理由：在途那次抓屏的 `.then` 还要靠 `stageHideOwner`
+             * 判断"stage 是不是我藏的还是别人（新一轮）藏的" —— 我在 stopLive
+             * 里自增代次的话，它会被判成"别人藏的"而**不去恢复 visibility**，
+             * 舞台就永久隐藏、横条整个消失（这是我自己第一版引入的漏洞）。
+             * 现在把所有权交给 `stageHideOwner`，两种情形都对：
+             *   · 没有新一轮 → 它恢复（横条正常）；
+             *   · 有新一轮 → 新一轮自己收尾（避免纹理自拍）。 */
+            captureBusy = false;
             this.exclSet(false);
+        },
+
+        /** 注册 WebGL 上下文丢失/恢复的回调（可选）。
+         *
+         *  为什么会需要：GPU 重置之后上下文作废，玻璃层自己只能把 gl 置空、
+         *  等下一次 initGL 重建；但"下一次"要有人触发 —— bar.js 在这里
+         *  重新走一次 show 流程（重新抓背景 + 重新上传纹理）最省事。 */
+        onContextEvents: function (lost, restored) {
+            onContextLost = lost || null;
+            onContextRestored = restored || null;
         },
 
         /** 探针 / 调试用 */

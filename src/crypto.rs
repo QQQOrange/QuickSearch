@@ -39,13 +39,16 @@ pub fn looks_encrypted(text: &str) -> bool {
 }
 
 /// 用 Argon2id 把口令派生成 32 字节的 AES 密钥。盐每次加密随机生成。
-fn derive_key(password: &str, salt: &[u8]) -> Result<[u8; 32], String> {
+///
+/// `m_kib` / `t` / `p` 由调用方给 —— **解密时必须用文件里记下的那组值**，
+/// 不能拿常量硬套：哪天调了默认参数，老备份就再也解不开了（而且报的还是
+/// "密码不对"，用户只会以为密码记错了）。
+fn derive_key(password: &str, salt: &[u8], m_kib: u32, t: u32, p: u32) -> Result<[u8; 32], String> {
     use argon2::Algorithm::Argon2id;
     use argon2::Params;
     use argon2::Version::V0x13;
 
-    let params = Params::new(ARGON_M_KIB, ARGON_T, ARGON_P, Some(32))
-        .map_err(|e| format!("KDF 参数不对：{e}"))?;
+    let params = Params::new(m_kib, t, p, Some(32)).map_err(|e| format!("KDF 参数不对：{e}"))?;
     let a2 = argon2::Argon2::new(Argon2id, V0x13, params);
     let mut key = [0u8; 32];
     a2.hash_password_into(password.as_bytes(), salt, &mut key)
@@ -56,8 +59,17 @@ fn derive_key(password: &str, salt: &[u8]) -> Result<[u8; 32], String> {
 /// 加密。返回一段**自带格式说明**的 JSON 字符串（可以直接当备份文件内容存）。
 /// password 为空 = 不加密，原样返回。
 pub fn encrypt(plain: &str, password: &str) -> Result<String, String> {
-    if password.trim().is_empty() {
+    /* ⚠ 空白密码**不能**静默降级成明文。
+     *
+     * 原来这里 `return Ok(plain)` 一声不响 —— 设置页允许只输空格，用户以为
+     * "填了密码所以备份是加密的"，实际落盘的是明文（含 OCR Key、WebDAV 密码）。
+     * 现在明确报错，让调用方（备份按钮）把提示弹给用户。
+     * 真正"不要密码"的路径是传空串，那条路仍按旧行为原样返回。 */
+    if password.is_empty() {
         return Ok(plain.to_string());
+    }
+    if password.trim().is_empty() {
+        return Err("备份密码不能只有空格 —— 换个能真正加密的密码，或者清空密码改用不加密备份".into());
     }
     use rand::RngCore;
     let mut salt = [0u8; SALT_LEN];
@@ -65,7 +77,7 @@ pub fn encrypt(plain: &str, password: &str) -> Result<String, String> {
     rand::thread_rng().fill_bytes(&mut salt);
     rand::thread_rng().fill_bytes(&mut nonce);
 
-    let key = derive_key(password, &salt)?;
+    let key = derive_key(password, &salt, ARGON_M_KIB, ARGON_T, ARGON_P)?;
     let cipher = Aes256Gcm::new_from_slice(&key).map_err(|e| format!("初始化失败：{e}"))?;
     // 把版本号一并送进认证数据（AAD）：改版本 = 解不开，防降级攻击
     let ct = cipher
@@ -78,9 +90,17 @@ pub fn encrypt(plain: &str, password: &str) -> Result<String, String> {
         )
         .map_err(|_| "加密失败".to_string())?;
 
+    /* ⚠ KDF 参数必须写进文件。
+     *
+     * 原来只有 `"kdf": "argon2id"`，m/t/p 全在常量里 —— 以后调参（或者不同
+     * 版本默认值不一样）时，旧备份会**永久解不开**，而错误信息还写成"密码不对"，
+     * 用户只会一遍遍重试密码。写进文件之后，解密按**文件自己的参数**派生。 */
     let doc = serde_json::json!({
         MAGIC: 1,
         "kdf": "argon2id",
+        "m": ARGON_M_KIB,
+        "t": ARGON_T,
+        "p": ARGON_P,
         "salt": b64_encode(&salt),
         "nonce": b64_encode(&nonce),
         "data": b64_encode(&ct),
@@ -116,7 +136,16 @@ pub fn decrypt(text: &str, password: &str) -> Result<String, String> {
         return Err("备份的加密参数不对（文件可能被改过）".into());
     }
 
-    let key = derive_key(password, &salt)?;
+    /* 按**文件里记下的** KDF 参数派生。
+     * 老备份（没有 m/t/p 三个键）→ 回落到当前默认值，行为和升级前完全一致。 */
+    let m = v.get("m").and_then(|x| x.as_u64()).unwrap_or(ARGON_M_KIB as u64) as u32;
+    let t = v.get("t").and_then(|x| x.as_u64()).unwrap_or(ARGON_T as u64) as u32;
+    let p = v.get("p").and_then(|x| x.as_u64()).unwrap_or(ARGON_P as u64) as u32;
+    // 防呆：手改过的文件可能给出荒谬参数（内存 16GiB / 迭代 100 万次 → 卡死）
+    if !(8_192..=1_048_576).contains(&m) || !(1..=16).contains(&t) || !(1..=16).contains(&p) {
+        return Err("备份里的 KDF 参数不合理（文件可能被改过）".into());
+    }
+    let key = derive_key(password, &salt, m, t, p)?;
     let cipher = Aes256Gcm::new_from_slice(&key).map_err(|e| format!("初始化失败：{e}"))?;
     let plain = cipher
         .decrypt(

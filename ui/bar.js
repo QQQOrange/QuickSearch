@@ -898,8 +898,20 @@ function renderBar(force) {
     //   （下一帧 boot 完成后会自己补一次渲染）。
     if (!CATALOG || !CONF) return;
     const list = barList();
+    /* ⚠ 签名必须覆盖**所有会改变渲染结果**的输入。
+     *
+     * 曾经漏掉的两项，症状都是"点了没反应"：
+     *  · `unifyIcons`（统一图标大小开关）—— 它决定每颗图标跑不跑光学补偿
+     *    （见 `qsApplyOpticalScale`）。开关一改，横条上一颗图标都不动。
+     *  · `dirIcons`（icons 目录里"文件名 = 引擎名"那批默认图）—— 用户往目录里
+     *    丢一张图，横条不重画，得等下一次触发才看到。
+     *
+     * 另外 `overrideIcons` 不能用 `JSON.stringify`（几 MB base64，每次广播都拼），
+     * 用 shared.js 的轻量指纹（键 + 长度 + 首尾片段）。 */
     const sig = (ocrOnly ? 'OCR|' : '') + list.join('\u0001') + '|'
-        + JSON.stringify(CONF.overrideIcons || {})
+        + (window.qsIconSigOf ? window.qsIconSigOf(CONF.overrideIcons) : '')
+        + '|' + (window.qsIconSigOf ? window.qsIconSigOf(CONF.dirIcons) : '')
+        + '|' + (unifyIcons() ? '1' : '0')
         // 外部软件的增删改名也要能触发重画 —— 哨兵串里带的是 id，
         // 光看 id 是发现不了"名字换了"的。
         + '|' + JSON.stringify(CONF.apps || []);
@@ -1336,14 +1348,58 @@ function panelFillOne(it) {
     // r70：见 schedulePanelPush 的注释 —— 补填改变了面板高度，窗口要跟上
     schedulePanelPush();
 }
-function panelFillAllNow() {
-    for (const it of panelFillers) panelFillOne(it);
+
+/* ------------------------------------------------------------------ */
+/* r81：分片填充（搜索/过滤时不再一次性建 777 个格子）                  */
+/*                                                                     */
+/* 用户实测：在「更多引擎」里敲下**第一个字符**，界面会卡住一两秒。     */
+/* 原因就是原来过滤入口那句 `if (q) panelFillAllNow()` —— 过滤是按      */
+/* `.cell` 找的，所以有词时必须先把所有空壳填满；而一次建 777 个格子、 */
+/* 每个格子还要跑一次「统一图标大小」的 canvas 像素测量，全在主线程上   */
+/* 同步做完。                                                          */
+/*                                                                     */
+/* 现在改成**按时间片分批**：每片最多 8ms（约半帧），片与片之间让出     */
+/* 主线程。用户看到的是"结果一片片出现"，而不是"卡死两秒然后突然全出来"。*/
+/* 填完之后再按当前词收一次过滤，保证最终结果和一次性填充**完全一致**。 */
+/* ------------------------------------------------------------------ */
+let panelFillJob = 0;
+
+/** 把还没填的格子分批填完；返回"是否真的还有活要干"。
+ *
+ *  没有待填格子 → 返回 false（调用方可以立刻做后面的过滤）。
+ *  有 → 起一个后台分片任务，返回 true（这一趟先只用已有格子过滤）。 */
+function panelFillAllChunked() {
+    const todo = panelFillers.filter((it) => !it.done);
+    if (!todo.length) return false;
+    const id = ++panelFillJob;   // 新的任务作废旧任务
+    let i = 0;
+    const step = () => {
+        if (id !== panelFillJob) return;          // 被更新的输入取代了，收手
+        const t0 = performance.now();
+        // 8ms ≈ 半帧：再长就会掉帧
+        while (i < todo.length && performance.now() - t0 < 8) {
+            panelFillOne(todo[i++]);
+        }
+        if (i < todo.length) {
+            setTimeout(step, 0);
+            return;
+        }
+        panelFillJob = 0;
+        // 填完了：按当前过滤词再收一遍（新出现的格子必须参与过滤，
+        // 否则用户会看到"搜索了，但列表里还留着没命中的旧格子"）
+        if (engineFilterText) applyEngineFilter(engineFilterText);
+    };
+    setTimeout(step, 0);
+    return true;
 }
 function panelWatch() {
     if (panelIO) { panelIO.disconnect(); panelIO = null; }
     // 搜索/过滤词在的时候偷不了懒；没有 IntersectionObserver 也一样
     if (engineFilterText || panelSearchMode || typeof IntersectionObserver !== 'function') {
-        panelFillAllNow();
+        /* ⚠ 这里同样走**分批**（r81）：面板在"有过滤词"状态下重画时，
+         *   一次性填 777 格依然是主线程上的一两秒卡顿。
+         *   分批本身会在填完后按当前词再过滤一遍，结果与一次性填充一致。 */
+        panelFillAllChunked();
         return;
     }
     panelIO = new IntersectionObserver((ents) => {
@@ -1735,9 +1791,16 @@ function applyEngineFilter(raw) {
     }
 
     let shown = 0;
-    // r51：有过滤词就先把还没填的格子全填出来 —— 过滤是按 .cell 找的，
-    // 壳子里没有 .cell，那些引擎就永远"筛不到"（懒建的代价必须在这儿补上）
-    if (q) panelFillAllNow();
+    /* r81：有过滤词就把还没填的格子填出来 —— 但要**分批**。
+     *
+     * 以前这里直接 `panelFillAllNow()`：一次建 777 个格子、每格还跑一次
+     * canvas 像素测量，敲第一个字符就卡住一两秒（用户实测反馈）。
+     * 现在先只用**已经填好的**格子筛一遍（几乎是瞬时的，用户立刻看到一部分
+     * 结果），剩下的在后台分片填，填完自动按同一个词再收一次。
+     *
+     * ⚠ 空壳 grid 在下面的循环里被当成"不确定"，所以不会因为"格子里没命中"
+     *   被整块隐藏 —— 分片填到它之后那次重算会给出最终结论。 */
+    if (q) panelFillAllChunked();
     for (const cell of panelBody.querySelectorAll('.grid > .cell')) {
         // 软件格子（#135 进平铺视图的那批）没有 dataset.engine，名字在
         // dataset.appName 上 —— 两种格子的过滤口径必须一致。
@@ -1944,6 +2007,21 @@ function syncActiveCatNav() {
 let lastLayoutPayload = null;
 /** 正在拖收藏面板。拖动期间冻结"面板最大高度"那条重排，松手再恢复。 */
 let favDragging = false;
+
+/** 一帧合并一次 `pushLayout`（拖拽/缩放这类高频指针回调专用）。
+ *
+ *  为什么不直接调 pushLayout：一次 pushLayout = 4~6 次 getBoundingClientRect
+ *  （每次强制同步布局）+ 一条 IPC + Rust 侧一次 SetWindowPos + 一次跨线程
+ *  SetBounds。pointermove 在 120Hz 鼠标上每 8ms 就来一条，直接调等于每帧跑
+ *  两三遍，拖起来发飘。 */
+let layoutPushRaf = 0;
+function scheduleLayoutPush() {
+    if (layoutPushRaf) return;
+    layoutPushRaf = requestAnimationFrame(() => {
+        layoutPushRaf = 0;
+        pushLayout();
+    });
+}
 
 function pushLayout() {
     // ⚠ 收藏面板是绝对定位（见 renderFavPanel），向 stage 下方伸出，
@@ -2513,6 +2591,11 @@ panelBody.addEventListener('click', (e) => {
 });
 
 inputQ.addEventListener('keydown', (e) => {
+    /* ⚠ 输入法保护：中文/日文输入法在**上屏候选词**时也会发 Enter
+     *   （`isComposing` 为真，或旧内核给 keyCode 229）。不拦的话，用户打拼音
+     *   按回车选词，会直接拿半截拼音去搜索并把横条收起来 —— 全项目此前
+     *   一次 IME 判断都没有。 */
+    if (e.isComposing || e.keyCode === 229) return;
     if (e.key === 'Enter') {
         runEngineSearch(defaultEngine());
     } else if (e.key === 'Escape') {
@@ -2527,6 +2610,8 @@ inputQ.addEventListener('keydown', (e) => {
 if (inputEngFilter) {
     inputEngFilter.addEventListener('input', () => applyEngineFilter(inputEngFilter.value));
     inputEngFilter.addEventListener('keydown', (e) => {
+        // IME 上屏的 Enter / Esc 不算（理由见关键词框那处注释）
+        if (e.isComposing || e.keyCode === 229) return;
         if (e.key === 'Enter') {
             // 回车 = 「就用筛出来最前面那个」。用户多半是打了个名字片段想直接开跑，
             // 让他再回鼠标点一下是多余的；一个都没筛出来时什么都不做，不误触。
@@ -2648,12 +2733,18 @@ function openMenu(x, y, engineName) {
     menuEl.style.left = Math.max(0, x) + 'px';
     menuEl.style.top = Math.max(0, y) + 'px';
 
-    const mr = menuEl.getBoundingClientRect();
-    const items = [...menuEl.querySelectorAll('.menu-item')]
-        .map((b) => { const r = b.getBoundingClientRect(); return `${b.textContent}@${Math.round(r.left)},${Math.round(r.top)},${Math.round(r.width)}x${Math.round(r.height)}`; });
-    invoke('log_msg', {
-        msg: `menu rect ${Math.round(mr.left)},${Math.round(mr.top)} ${Math.round(mr.width)}x${Math.round(mr.height)} dpr=${window.devicePixelRatio} | ${items.join(' | ')}`
-    }).catch(() => {});
+    /* ⚠ 这段"把菜单和每一项的矩形打进日志"只在调试构建里跑。
+     *   右键是高频动作，而它每次都要对容器 + 每个菜单项各做一次
+     *   getBoundingClientRect（强制同步布局）再发一条 IPC —— 正式使用时
+     *   没有任何消费方，纯属给每次右键加一次卡顿。 */
+    if (CONF && CONF.debug) {
+        const mr = menuEl.getBoundingClientRect();
+        const items = [...menuEl.querySelectorAll('.menu-item')]
+            .map((b) => { const r = b.getBoundingClientRect(); return `${b.textContent}@${Math.round(r.left)},${Math.round(r.top)},${Math.round(r.width)}x${Math.round(r.height)}`; });
+        invoke('log_msg', {
+            msg: `menu rect ${Math.round(mr.left)},${Math.round(mr.top)} ${Math.round(mr.width)}x${Math.round(mr.height)} dpr=${window.devicePixelRatio} | ${items.join(' | ')}`
+        }).catch(() => {});
+    }
 
     // 菜单不参与 stage 的尺寸计算，所以得把窗口撑开才看得见
     pushLayout();
@@ -2787,7 +2878,11 @@ listen('qs://show', (ev) => {
     //   补两次延迟重报，让后端拿最终尺寸重新钳制位置。
     setTimeout(() => { if (!panelEl.hidden || !barEl.hidden) pushLayout(); }, 260);
     setTimeout(() => { if (!panelEl.hidden || !barEl.hidden) pushLayout(); }, 700);
-    setTimeout(dumpState, 60);
+    /* ⚠ 诊断上报只在调试构建里跑（`QS_DEBUG=1` 时后端把 debug 塞进配置）。
+     *   以前这里无条件 `setTimeout(dumpState, 60)` —— 而 dumpState 会读一整套
+     *   盒模型再发一条 IPC，`qs://show` 实测一次触发 6 次，等于每次划词都白做
+     *   六遍布局 + 六条 IPC。正式使用对这条数据没有任何消费方。 */
+    if (CONF && CONF.debug) setTimeout(dumpState, 60);
     // 液态玻璃：建上下文（首次）/ 重新起渲染循环。背景字节等 Rust 的
     // qs://glass 事件（layout_bar 抓完了才发），到了再 onFresh。
     if (window.QSGlass) QSGlass.onShow();
@@ -3145,7 +3240,10 @@ function startFavResize(e, dir) {
         panelEl.style.left = (m0 + need - westOv) + 'px';
         panelEl.style.width = (baseW + westOv) + 'px';
         if (need > favPad()) setFavPad(need, true);
-        pushLayout();
+        /* ⚠ 每个 pointermove 都推一次布局 = 一次 IPC + 一次 SetWindowPos +
+         *   一次跨线程 SetBounds，而 pointermove 在 120Hz 鼠标上是每 8ms 一条。
+         *   这里和隔壁收藏面板拖动用同一套 rAF 合并：一帧最多推一次。 */
+        scheduleLayoutPush();
     };
     const applySize = (ev) => {
         const dx = ev.screenX - startSX, dy = ev.screenY - startSY;
@@ -3155,7 +3253,7 @@ function startFavResize(e, dir) {
         if (dir === 's' || dir === 'sw' || dir === 'se') {
             panelEl.style.height = Math.min(Math.max(startH + dy, FAV_RZ_MIN_H), maxH) + 'px';
         }
-        pushLayout();
+        scheduleLayoutPush();
     };
     const onMove = (ev) => {
         if (dir === 'w' || dir === 'sw') applyWest(ev);
@@ -3230,6 +3328,25 @@ listen('qs://hidden', () => {
     syncOcrBtn();
     closeMenu();
     if (!panelEl.hidden) togglePanel(false);
+    /* ⚠ 钉住状态随收起复位（后端 dismiss_bar 也会清 FAV_PINNED 并补发
+     *   qs://fav-pinned，这里同步一次是为了前端状态**立刻**一致 ——
+     *   否则下次弹出时图钉按钮还显示"已钉住"，但后端已经不认了）。 */
+    favPinned = false;
+    barEl.classList.remove('ghost');
+    if (window.QSGlass && window.QSGlass.setBarGhost) {
+        window.QSGlass.setBarGhost(false);
+    }
+});
+
+/* 后端复位钉住状态时同步前端（dismiss_bar 里发的）。 */
+listen('qs://fav-pinned', (ev) => {
+    const on = !!(ev.payload && ev.payload.on);
+    if (on === favPinned) return;
+    favPinned = on;
+    barEl.classList.toggle('ghost', favPinned);
+    if (window.QSGlass && window.QSGlass.setBarGhost) {
+        window.QSGlass.setBarGhost(favPinned);
+    }
 });
 
 /* ------------------------------------------------------------------ */

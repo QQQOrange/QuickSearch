@@ -35,12 +35,32 @@
 use crate::aimodels;
 use crate::matting::{self, Tri};
 
-/// 与 `try_ai` 相同，但可**临时指定模型**（`model_override` 优先于配置里的选择）。
+/// 与 `try_ai_prepared` 相同，但吃**原始字节**（自己解码一次）。
 ///
-/// 用户要求「某一个我抠的不满意，我能立刻换另一个来抠」——
-/// 换模型是一次性动作，不该改用户的默认设置，所以走参数而不是写配置。
+/// 生产路径已经不走这里了（`iconedit::remove_background_ex` 必须先拿到尺寸来
+/// 对齐涂抹蒙版，所以它解码一次、再把解好的图交给 `try_ai_prepared`）。
+/// 这个入口留给单测和将来可能的外部调用，`#[allow(dead_code)]` 是因为
+/// 非测试构建里确实没有调用方。
+#[allow(dead_code)]
 pub fn try_ai_with(
     bytes: &[u8],
+    keep: Option<&[bool]>,
+    params: &crate::aimatte::Params,
+    model_override: Option<&str>,
+) -> Result<(Vec<u8>, usize, bool), String> {
+    let rgba = matting::prepare(bytes)?;
+    try_ai_prepared(rgba, keep, params, model_override)
+}
+
+/// [`try_ai_with`] 的**已解码**版本：调用方已经把图 decode + 缩到上限了。
+///
+/// # 为什么要有它
+///
+/// `iconedit::remove_background_ex` 需要先拿到尺寸才能把涂抹蒙版对齐，于是它会
+/// 先 `prepare` 一次；随后把**原始字节**递进来，这里再 `prepare` 一次 —— 一张
+/// 4000px 的原图就这么被完整解码 + 缩放了两遍。现在它把解好的图直接传进来。
+pub fn try_ai_prepared(
+    rgba: image::RgbaImage,
     keep: Option<&[bool]>,
     params: &crate::aimatte::Params,
     model_override: Option<&str>,
@@ -89,7 +109,6 @@ pub fn try_ai_with(
     }
 
     // ---- 2. 准备图 ----
-    let rgba = matting::prepare(bytes)?;
     let (w, h) = rgba.dimensions();
     if w < 2 || h < 2 {
         return Err("图太小了（至少 2×2）".to_string());

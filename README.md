@@ -6,11 +6,15 @@
 
 Windows 10/11 桌面应用，**Tauri 2 + Rust + WebView2**，无运行时装依赖，单个 exe 即可运行。
 
-> **体积说明（r80g）**：程序本体 **12.04MB**（不含任何 AI 模型）。
+> **体积说明（v1.2.0）**：程序本体 **12.27MB**（不含任何 AI 模型）。
 > 「AI 抠图」要用到的推理运行库（`onnxruntime.dll`，11.84MB）与模型
 > **都不打进安装包**，由你在设置里点「下载」时一起下到
-> `<程序目录>/抠图模型/` —— 官方 zip 是 69MB，解出 dll 后即刻可用
-> （**不需要重启程序**）。不打开 AI 抠图的话，这些一个都不下。
+> `<程序目录>/抠图模型/` —— 下完即刻可用（**不需要重启程序**）。
+> 不打开 AI 抠图的话，这些一个都不下。
+>
+> ⚠ **模型资产固定在 v1.1.1 那个发布页**（一共 300+ MB，不随每个小版本重传）。
+> 程序会自己去那里下，你不需要手动找：`src/aimodels.rs` 的 `ASSET_RELEASE_TAG`
+> 就是那个 tag，且有一条单测钉着"程序版本"与"资产版本"不会脱节。
 
 ---
 
@@ -26,6 +30,7 @@ Windows 10/11 桌面应用，**Tauri 2 + Rust + WebView2**，无运行时装依�
 | **收藏夹** | 两级目录，文字 / 图片 / 富文本，可拖拽排序 |
 | **图标编辑器** | AI 自动抠图（可选模型）+ 涂抹修饰（保留/擦除，可放大 1~8×）+ 换模型重抠 + 导出 |
 | **备份** | 本地加密备份（AES-256-GCM + Argon2id）、WebDAV 云端同步 |
+| **自动更新** | 「关于」里可勾选的自动检查；发现新版**在程序内**下载、校验、替换旧程序（v1.2.0 新） |
 | **主题** | 亮 / 暗 / 跟随系统，横条支持液态玻璃（WebGL2 真折射） |
 
 ---
@@ -51,6 +56,10 @@ src/              Rust 源码（Tauri 后端）
   crypto.rs         备份加密
   export.rs         配置导入导出
   webdav.rs         WebDAV 客户端
+  aimodels.rs       AI 模型清单 / 下载（**模型资产固定在 v1.1.1 发布页**，见 ASSET_RELEASE_TAG）
+  aimatte.rs        ONNX 推理（U²-Net / RMBG）
+  iconedit_ai.rs    抠图的"AI 出语义 + 本地出边缘"胶水
+  update.rs         自动更新（查 GitHub → 程序内下载 → 校验 → 替换正在运行的 exe）
 ui/               前端（原生 JS + CSS，无框架）
   index.html       横条页面
   bar.js/.css      横条交互（约 190KB / 63KB）
@@ -65,6 +74,8 @@ ui/               前端（原生 JS + CSS，无框架）
   data/icons/        图标资源
 docs/
   PRD.md           产品需求文档（目标 / 页面结构 / 功能边界 / 验收标准）
+  RELEASE-v1.2.0.md 这一版的发布说明（含修掉的 93 处缺陷、验证记录）
+  RELEASE-v1.1.x.md 往期发布说明
   PUSH-GUIDE.md    GitHub 推送指引
   probes/          探针说明（为什么用 CDP、踩过的坑）
   evidence/        历史实测截图 —— **不入库**，见下方"关于证据"
@@ -92,7 +103,7 @@ tools/             验证脚本（探针）
 ### 命令
 
 ```powershell
-cargo test            # 250 个单元测试
+cargo test            # 274 个单元测试
 cargo clippy          # 0 warning
 cargo build --release # 产物：target\release\QuickSearch.exe
 ```
@@ -100,6 +111,33 @@ cargo build --release # 产物：target\release\QuickSearch.exe
 发布配置见 `Cargo.toml` 的 `[profile.release]`：`opt-level="s"` + `lto="fat"` +
 `codegen-units=1` + `strip=true`。**没有用 `panic="abort"`** —— 单线程 panic 不该把
 整个程序带走，配了自定义 panic hook 写日志。
+
+> ⚠ `panic` hook 走的是 **`log_sync`**（同步落盘），不是后台队列版 —— 否则
+> panic 之后进程立刻退出，那一行日志根本没机会写下去，排查时"程序没了但日志里
+> 什么都没有"，比崩溃本身更难查。
+
+### 自动更新怎么测（v1.2.0）
+
+「发现新版 → 下载 → 校验 → 替换正在运行的 exe」这条链没法等 GitHub 上真出现
+一个更高版本才测，所以留了两个 **run-and-exit 探针** + 两个**仅测试用**的地址逃生口：
+
+```powershell
+# QS_UPDATE_API / QS_UPDATE_WEB 指向一个本地假服务（见 tools/fake-github-update.py）
+$env:QS_UPDATE_API = 'http://127.0.0.1:8731/api/repos/x/releases/latest'
+$env:QS_UPDATE_WEB = 'http://127.0.0.1:8731/web/releases/latest'
+
+QuickSearch.exe --update-probe     # 只查一次，把 NEWER/TAG/SIZE/SHA 打到 stdout
+QuickSearch.exe --update-install   # 真下载 + 真替换（**只在隔离目录里跑！**）
+```
+
+实测记录（替换那一步是整条链里风险最高的）：
+
+```
+update: 检查完成 —— 远端 v9.9.9，当前 1.2.0，有新版=true
+DOWNLOADED=…\QuickSearch.exe.new
+OK old=…\QuickSearch.exe.old
+update: 已清理残留 …\QuickSearch.exe.old   ← 下次启动自动清
+```
 
 ---
 

@@ -99,6 +99,25 @@ impl Family {
     }
 }
 
+/// 模型与运行库的**资产所在版本**（GitHub Release 的 tag）。
+///
+/// # ⚠ 这个值**不等于**程序版本，故意如此（v1.2.0 起）
+///
+/// 用户明确要求：**模型不随每个版本重复上传** —— 它们一共 300+ MB
+/// （4.4MB + 42MB + 84MB + 168MB + 11.8MB 的 dll），每发一个小版本都重传一遍
+/// 既慢又占仓库空间。所以这些大文件固定在**某一个** release 上，
+/// 程序升级到新版本后仍然去那个页下载。
+///
+/// 换句话说：
+///   · **程序本体**跟着本文件里的 `CARGO_PKG_VERSION` / `tauri.conf.json` 走；
+///   · **模型资产**永远指向这里写的 tag。
+///
+/// 哪天真要挪（比如那个 release 被删了、或者换了新的模型文件），
+/// **只改这一个常量**即可 —— 下面所有 URL 都是用 `format!` 拼它的。
+/// 版本说明（`docs/RELEASE-*.md`）里也要同步告诉用户"模型在哪个页面下载"，
+/// 两处必须一致。
+pub const ASSET_RELEASE_TAG: &str = "v1.1.1";
+
 /// 全部可选模型。**顺序即界面顺序**（推荐的在最前）。
 ///
 /// # 关于 `urls`：为什么是一组而不是一个（r80 实测修出来的）
@@ -289,8 +308,14 @@ pub fn runtime_path() -> PathBuf {
 /// 不校验 SHA256 的理由同 `is_ready`：读 11.8MB 每次都算太浪费，
 /// 大小对不上一定是坏的；下完那次校验已经兜住了完整性。
 pub fn runtime_ready() -> bool {
+    /* ⚠ 必须和实际下载到的字节数**精确**比（`RUNTIME_DLL_BYTES` 就在本文件里）。
+     *
+     * 原来写的是 `> 8MB`：直下中断留下的 9MB 残 dll、或者解压到一半的文件都算
+     * "就绪"，于是 `runtime=true` 但 ort 加载时 panic（被 catch_unwind 吞成
+     * "缺少运行时"），用户看到的是"明明下载好了却说没有"，而且反复重下也没用
+     * （文件已经"就绪"了，下载入口直接跳过）。 */
     match std::fs::metadata(runtime_path()) {
-        Ok(m) => m.len() > 8 * 1024 * 1024,   // 实测 11.8MB；低于 8MB 一定是坏的/没下完
+        Ok(m) => m.len() == RUNTIME_DLL_BYTES,
         Err(_) => false,
     }
 }
@@ -369,8 +394,15 @@ pub fn migrate_all(from: &std::path::Path, to: &std::path::Path) -> (usize, Vec<
 /// 大小对得上但内容坏的极端情况，由**下载时**那次 SHA256 校验兜住。
 pub fn is_ready(id: &str) -> bool {
     let Some(spec) = find(id) else { return false };
+    /* ⚠ 只认**精确大小**。
+     *
+     * 以前多了一条 `|| m.len() > 1_000_000` —— 本意是"换个源下到的文件字节数
+     * 可能略有出入"，实际后果是：一个 168MB 的模型下到 5MB 断线，文件还在，
+     * 这里判"就绪"，用户点抠图 → 推理时才炸（而且报的是"模型加载失败"，
+     * 看不出是没下完）。四个模型的体积都是官方 Content-Length 实测值，
+     * 下完还有 SHA256 兜底，大小对不上**一定**是坏的。 */
     match std::fs::metadata(model_path(id)) {
-        Ok(m) => m.len() == spec.bytes || m.len() > 1_000_000,
+        Ok(m) => m.len() == spec.bytes,
         Err(_) => false,
     }
 }
@@ -1227,6 +1259,42 @@ mod tests {
             assert!(m.bytes > 0, "{} 体积必须为正", m.id);
             assert!(m.input_edge == 320 || m.input_edge == 1024, "{} 边长异常", m.id);
             assert!(m.score <= 8);
+        }
+    }
+
+    /// **自托管的那几个源必须指向 `ASSET_RELEASE_TAG` 那一个 release。**
+    ///
+    /// 为什么值得一条测试：用户要求"模型不随每个版本重复上传"，于是
+    /// **程序版本**和**模型资产所在版本**被故意拆成了两个东西。
+    /// 这个拆分最怕的就是"改了常量忘了改 URL"（或反过来）——
+    /// 结果要么下载 404，要么文档里写的页面和程序实际去的地方不是同一个。
+    /// 这里把两者钉在一起：只改一处是**改不动**的，测试会立刻红。
+    #[test]
+    fn 自托管源指向同一个资产版本() {
+        for m in MODELS {
+            for u in m.urls {
+                // 量自己的 release（QQQOrange/QuickSearch）才算自托管；
+                // modelscope / hf-mirror / rembg 官方那些是第三方源，不在此列。
+                if !u.contains("github.com/QQQOrange/QuickSearch/releases/download/") {
+                    continue;
+                }
+                assert!(
+                    u.contains(&format!("/releases/download/{ASSET_RELEASE_TAG}/")),
+                    "{} 的自托管源没指向 ASSET_RELEASE_TAG={ASSET_RELEASE_TAG}：{u}\n\
+                     （要么改 URL，要么改常量 —— 两者必须一致）",
+                    m.id
+                );
+            }
+        }
+        // 运行库那三条同理
+        for u in RUNTIME_DLL_URLS {
+            if !u.contains("github.com/QQQOrange/QuickSearch/releases/download/") {
+                continue;
+            }
+            assert!(
+                u.contains(&format!("/releases/download/{ASSET_RELEASE_TAG}/")),
+                "运行库的自托管源没指向 ASSET_RELEASE_TAG={ASSET_RELEASE_TAG}：{u}"
+            );
         }
     }
 

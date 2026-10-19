@@ -519,6 +519,62 @@ fn join_url(base: &str, path: &str) -> String {
     format!("{}{}", base.trim_end_matches('/'), path)
 }
 
+/// JSON 请求的 Content-Type —— **签名与发送必须用同一个值**。
+///
+/// 腾讯云 TC3 的规范请求里要写 `content-type:` 这一行，服务端会拿**收到的头**
+/// 重算签名。以前签名里写 `application/json; charset=utf-8`、发送时却只发
+/// `application/json`，两边不一致 → 每次都 SignatureFailure（该引擎事实上不可用，
+/// 而单测只断言"请求里出现了 Signature="，抓不到这个字节级差异）。
+const JSON_CT: &str = "application/json";
+
+
+/// 要不要对这次失败**重试**。
+///
+/// # 为什么需要（除了百度之外全军覆没）
+///
+/// 原先全仓只有 `ocr.rs` 里百度那条路有自己的重试；OCR.space / 有道 / 腾讯 /
+/// Mistral / 九家 OpenAI 兼容引擎全部是"一次失败就报错"。ureq 自己只对
+/// **幂等 GET** 重试，而这些全是带 body 的 POST —— 国内网络下偶发 429、
+/// 5xx、连接被重置的概率不低，用户看到的就是"这家引擎时好时坏"。
+///
+/// 只重试**明显是瞬态**的：连接层错误、429、5xx。鉴权/参数错（4xx 里除 429）
+/// 重试没有意义，只会让用户多等一轮。
+fn should_retry(err: &ureq::Error) -> bool {
+    match err {
+        ureq::Error::Status(code, _) => *code == 429 || *code >= 500,
+        ureq::Error::Transport(_) => true,
+    }
+}
+
+/// 带重试的 `send_string`（JSON 那几个引擎共用）。
+///
+/// 退避 250ms / 700ms，最多 3 次尝试 —— 总代价可控（最坏多等约 1 秒），
+/// 但能把"偶发一次就失败"的体验抹平。
+fn send_with_retry(
+    make: impl Fn() -> ureq::Request,
+    body: &str,
+) -> Result<ureq::Response, Box<ureq::Error>> {
+    let mut last: Option<Box<ureq::Error>> = None;
+    for attempt in 0..3 {
+        match make().send_string(body) {
+            Ok(r) => return Ok(r),
+            Err(e) => {
+                let retry = should_retry(&e);
+                last = Some(Box::new(e));
+                if !retry || attempt == 2 {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(if attempt == 0 {
+                    250
+                } else {
+                    700
+                }));
+            }
+        }
+    }
+    Err(last.expect("循环至少跑过一次"))
+}
+
 fn post_json(
     url: &str,
     headers: &[(&str, &str)],
@@ -526,15 +582,22 @@ fn post_json(
     timeout_secs: u64,
 ) -> Result<Value, String> {
     let a = crate::ocr::agent(timeout_secs);
-    let mut req = a.post(url).set("Content-Type", "application/json");
-    for (k, v) in headers {
-        req = req.set(k, v);
-    }
-    let resp = req.send_string(&body.to_string()).map_err(|e| {
+    let payload = body.to_string();
+    let resp = send_with_retry(
+        || {
+            let mut req = a.post(url).set("Content-Type", JSON_CT);
+            for (k, v) in headers {
+                req = req.set(k, v);
+            }
+            req
+        },
+        &payload,
+    )
+    .map_err(|e| {
         // ureq 的 Status 错误里也带着响应体，错误信息要尽量给出真原因
         // ⚠ 这里必须**按值** match：读响应体要消费掉 Response（ureq 2.x 没有
         //   借用的读法），拿 &e 去 match 根本读不到 body。
-        match e {
+        match *e {
             ureq::Error::Status(code, r) => {
                 // ⚠ 这里以前用 `r.status_text()` —— 那只是 "Forbidden" 这种**状态短语**，
                 //   对方真正说的话在**响应体**里（硅基流动会回 {"message":"…"}）。
@@ -561,19 +624,50 @@ fn post_form(
 ) -> Result<Value, String> {
     let a = crate::ocr::agent(timeout_secs);
     let pairs: Vec<(&str, &str)> = form.iter().map(|(k, v)| (*k, v.as_str())).collect();
-    let mut req = a
-        .post(url)
-        .set("Content-Type", "application/x-www-form-urlencoded");
-    for (k, v) in headers {
-        req = req.set(k, v);
-    }
-    let resp = req.send_form(&pairs).map_err(|e| match e {
-            ureq::Error::Status(code, r) => {
-                let body = r.into_string().unwrap_or_default();
-                format!("{url} 返回 HTTP {code}：{}", vendor_msg(&body))
+    /* ⚠ `send_form` 吃的是引用切片，重试时必须重新构造一次请求 ——
+     *   而 ureq 的 Request 是**消费型**的（send_* 拿 self），所以闭包里
+     *   每次都得从 Agent 重新 post 一遍。 */
+    let mut last: Option<ureq::Error> = None;
+    let mut ok: Option<ureq::Response> = None;
+    for attempt in 0..3 {
+        let mut req = a
+            .post(url)
+            .set("Content-Type", "application/x-www-form-urlencoded");
+        for (k, v) in headers {
+            req = req.set(k, v);
+        }
+        match req.send_form(&pairs) {
+            Ok(r) => {
+                ok = Some(r);
+                break;
             }
-            other => crate::ocr::explain(&other),
-        })?;
+            Err(e) => {
+                let retry = should_retry(&e);
+                last = Some(e);
+                if !retry || attempt == 2 {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(if attempt == 0 {
+                    250
+                } else {
+                    700
+                }));
+            }
+        }
+    }
+    let resp = match ok {
+        Some(r) => r,
+        None => {
+            return Err(match last {
+                Some(ureq::Error::Status(code, r)) => {
+                    let body = r.into_string().unwrap_or_default();
+                    format!("{url} 返回 HTTP {code}：{}", vendor_msg(&body))
+                }
+                Some(other) => crate::ocr::explain(&other),
+                None => "请求没发出去".to_string(),
+            })
+        }
+    };
     let text = resp
         .into_string()
         .map_err(|e| format!("读响应失败：{e}"))?;
@@ -794,8 +888,10 @@ fn tencent(
     let ts = now_secs();
     let date = utc_date(ts);
     let scope = format!("{date}/ocr/tc3_request");
+    /* ⚠ 这里的 content-type 必须和 post_json 实际发出去的头**逐字节相同**
+     *   （见 `JSON_CT` 的注释）。改任何一边都要同步另一边。 */
     let canonical = format!(
-        "POST\n/\n\ncontent-type:application/json; charset=utf-8\nhost:{host}\n\ncontent-type;host\n{}",
+        "POST\n/\n\ncontent-type:{JSON_CT}\nhost:{host}\n\ncontent-type;host\n{}",
         sha256_hex(payload.as_bytes())
     );
     let sts = format!(

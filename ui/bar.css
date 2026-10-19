@@ -117,7 +117,6 @@ body {
     --qs-shadow: 0 0 0 0 rgba(0, 0, 0, 0);
 }
 
-
 /* 浮层投影开启时：两层本色 + 给投影留绘制空间（--qs-shadow-pad 撑到 14px，
    窗口尺寸跟着变大，投影不会被窗口边界切出硬边） */
 .stage.qs-shadow { --qs-shadow-pad: 14px; }
@@ -170,7 +169,12 @@ body {
 .stage[data-blur]:not([data-blur="0"]) .menu {
     -webkit-backdrop-filter: blur(var(--qs-blur)) saturate(var(--qs-blur-sat, 1.4)) brightness(var(--qs-blur-bright, 1));
     backdrop-filter: blur(var(--qs-blur)) saturate(var(--qs-blur-sat, 1.4)) brightness(var(--qs-blur-bright, 1));
-    will-change: transform, opacity, backdrop-filter;
+    /* ⚠ `will-change` 只声明真正会变的那两个（transform / opacity）。
+     *   `backdrop-filter` 不是"会变的属性"，写进 will-change 等于让浏览器
+     *   为它长期维持一个额外的合成层 —— 开着磨砂时三块浮层各背一层，
+     *   GPU 内存白涨、低端显卡还会掉帧。磨砂本身已经由上面的规则常驻了，
+     *   不需要"提前告知"。 */
+    will-change: transform, opacity;
 }
 
 /* ------------------- 收藏夹（横条上的 @fav:<id> + 面板） ------------------- */
@@ -731,9 +735,9 @@ button.fav-grp-head:focus-visible {
     transition: background-color .13s ease, border-color .13s ease, transform .13s ease, color .13s ease;
 }
 
-/* 按下去缩一下：玻璃上的「按压力反馈」。iOS 控件都这手感，
-   桌面端也照样成立 ——  transition 里已经有 transform，不用另起炉灶。 */
-.ico:active { transform: scale(.9); }
+/* ⚠ 按压力反馈只有下面那一条 .ico:active（带背景色 + scale(.94)）。
+   这里原本还有一条只写 scale(.9) 的，被下面那条同特异度、后出现的整条覆盖 ——
+   删掉以免以后改错地方。 */
 
 .ico > img {
     display: block;
@@ -784,14 +788,18 @@ button.fav-grp-head:focus-visible {
 
 /* 深色背景下，给所有非黑品牌图标加一层轻遮罩：原图普遍贴白屏或亮底色，
  * 直接挂在深色横条上"白成一块"刺眼。把亮度稍压、饱和度稍提，让图标融进深色场景。
- * 黑品牌走上面那条 invert 规则，这条不再覆盖。 */
-.stage.qs-dark .ico > img:not(.qs-mono-img) {
+ *
+ * ⚠ 用 `:not(.ico.qs-mono)`（看**容器**上的类）而不是 `:not(.qs-mono-img)`
+ *   （看 img 自己）—— 因为标记是挂在 `.ico` 上的，img 从来没有 `.qs-mono-img`
+ *   这个类。以前这条与上面那条反白规则特异度相同（0,4,1）、又排在后面，
+ *   于是 `.qs-mono` 那几个纯黑品牌（X / GitHub / Threads / 维基百科）的
+ *   `invert(1)` 被整条顶掉，在暗色横条上仍然是黑的（等于隐形）。 */
+.stage.qs-dark .ico:not(.qs-mono) > img {
     filter: brightness(0.92) saturate(1.06);
 }
-/* 同理：面板里被选中的引擎（.on）以及自定义图标的 img 也走这条。 */
-.stage.qs-dark .eng > img:not(.qs-mono-img) {
-    filter: brightness(0.92) saturate(1.06);
-}
+/* ⚠ 这里原本还有一条 .stage.qs-dark .eng > img:not(.qs-mono-img) ——
+   类名 eng 在 bar.js 里从未出现（只有 .engines / .engine / .cell），
+   那条规则一次都没命中过，是上一次改选择器时留下的僵尸副本。已删。 */
 
 /* 功能按钮用字符画，调一下字号 */
 .ico.qs-more   { font-size: 17px; font-weight: 700; letter-spacing: 0; }
@@ -982,7 +990,12 @@ button.fav-grp-head:focus-visible {
     border: none;
     background-color: var(--qs-bg-fill, var(--qs-bg));
     box-shadow: var(--qs-shadow);
-    opacity: var(--qs-alpha, 1);
+    /* ⚠ 这里**不能**跟横条共用 `--qs-alpha`。
+     *   那个滑块控制的是"横条待机时有多透明"，用户调到 30 是想让横条低调，
+     *   不是想让**展开的面板**也变成半透明 —— 面板里有引擎名、搜索框、按钮，
+     *   一旦跟着降到 0.3 就完全读不了（文字和桌面背景叠在一起）。
+     *   面板永远是实心的：它只在用户主动展开时出现，不存在"打扰桌面"的问题。 */
+    opacity: 1;
     animation: qs-panel-in .16s cubic-bezier(.22, 1, .36, 1);
     will-change: transform, opacity;
     display: flex;
@@ -1239,154 +1252,6 @@ button.fav-grp-head:focus-visible {
     color: var(--qs-accent);
 }
 
-/* ------------------ 面板一级/二级卡片（三大类 / 子类） ------------------
- * 面板从「一锅端平铺」改成三级下钻：第一层三张大类卡片，第二层两/三张
- * 子类卡片。卡片是 button（键盘可达），flex 列布局：
- * 徽标 + 标题 + 描述 + 子类摘要 + 底部「共 N 个 ›」。 */
-.grp-grid {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 8px;
-    padding: 6px 2px 10px;
-}
-
-/* 第二层只有 2~3 张卡，两列更舒展（快捷键组没有第二层，见不到这列） */
-.grp-grid.sub-grid {
-    grid-template-columns: repeat(2, 1fr);
-}
-
-.grp-card {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 4px;
-    padding: 12px 12px 10px;
-    border: 1px solid var(--qs-border);
-    border-radius: 10px;
-    background: color-mix(in srgb, var(--qs-fg) 3%, transparent);
-    color: var(--qs-fg);
-    font: inherit;
-    text-align: left;
-    cursor: pointer;
-    transition: background-color .12s ease, border-color .12s ease;
-}
-.grp-card:hover {
-    background: var(--qs-hover);
-    border-color: color-mix(in srgb, var(--qs-accent) 55%, transparent);
-}
-.grp-card:active { background: var(--qs-active); }
-
-/* 徽标：36px 圆底，口径照 .fav-entry-badge（同款 accent 淡底 + 描边） */
-.grp-ic {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 36px;
-    height: 36px;
-    margin-bottom: 2px;
-    border-radius: 50%;
-    font-size: 15px;
-    font-weight: 700;
-    color: var(--qs-accent);
-    border: 1px solid color-mix(in srgb, var(--qs-accent) 60%, transparent);
-    background: color-mix(in srgb, var(--qs-accent) 12%, transparent);
-    flex: none;
-}
-
-.grp-t {
-    font-size: 13.5px;
-    font-weight: 700;
-    color: var(--qs-fg);
-}
-
-.grp-d {
-    font-size: 11.5px;
-    line-height: 1.45;
-    color: var(--qs-tip);
-}
-
-/* 子类摘要（「搜索引擎 312 · 直达网页 421」）与底部计数（「共 733 个 ›」） */
-.grp-subs {
-    font-size: 11px;
-    line-height: 1.5;
-    color: var(--qs-fg-dim);
-}
-
-.grp-n {
-    margin-top: auto;
-    padding-top: 4px;
-    font-size: 11.5px;
-    font-weight: 600;
-    color: var(--qs-accent);
-}
-
-/* 面包屑：挂在 .panel-sticky 头里的一行。「‹」返回上一级，前面的层级可点。 */
-.crumb {
-    display: flex;
-    align-items: center;
-    gap: 2px;
-    min-width: 0;
-    overflow: hidden;
-    font-size: 11.5px;
-    white-space: nowrap;
-}
-
-.crumb-back {
-    flex: none;
-    width: 22px;
-    height: 22px;
-    margin-right: 2px;
-    border: 1px solid var(--qs-border);
-    border-radius: 6px;
-    background: transparent;
-    color: var(--qs-fg-dim);
-    font: inherit;
-    font-size: 13px;
-    line-height: 1;
-    cursor: pointer;
-    transition: background-color .12s ease, color .12s ease, border-color .12s ease;
-}
-.crumb-back:hover {
-    background: var(--qs-hover);
-    color: var(--qs-fg);
-    border-color: var(--qs-border);
-}
-
-.crumb-item {
-    flex: none;
-    padding: 2px 6px;
-    border: 0;
-    border-radius: 6px;
-    background: transparent;
-    color: var(--qs-fg-dim);
-    font: inherit;
-    font-size: 11.5px;
-    cursor: pointer;
-    transition: background-color .12s ease, color .12s ease;
-}
-.crumb-item:hover {
-    background: var(--qs-hover);
-    color: var(--qs-fg);
-}
-
-/* 当前层：加粗、不可点（点它没有可去的地方） */
-.crumb-item.cur {
-    color: var(--qs-fg);
-    font-weight: 700;
-    cursor: default;
-}
-.crumb-item.cur:hover {
-    background: transparent;
-    color: var(--qs-fg);
-}
-
-.crumb-sep {
-    flex: none;
-    color: var(--qs-tip);
-    opacity: .7;
-    user-select: none;
-}
-
 .grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(112px, 1fr));
@@ -1466,7 +1331,13 @@ button.fav-grp-head:focus-visible {
     width: 100%;
     height: 100%;
     object-fit: contain;
-    transform: scale(var(--qs-inset, 1));
+    /* ⚠ 必须同时乘 `--qs-optical`。
+     *   面板里 700 多个格子每张图都会跑一次「统一图标大小」测量（
+     *   `qsApplyOpticalScale` 把系数写成 `--qs-optical`），这里只乘
+     *   `--qs-inset` 的话那个系数在面板里**完全没生效** ——
+     *   带透明留白的图标在横条上被放大了、在面板里却还是小的，
+     *   同一个引擎两处大小不一致。 */
+    transform: scale(calc(var(--qs-inset, 1) * var(--qs-optical, 1)));
     pointer-events: none;
 }
 
@@ -1588,7 +1459,10 @@ button.fav-grp-head:focus-visible {
     padding: 0 2px;
     font-size: 12px;
     font-weight: 600;
-    color: var(--fg-dim);
+    /* ⚠ 这里是 --qs-fg-dim 而不是 --fg-dim：后者是设置页（settings.css）
+       的变量名，bar.css 里从来没有定义过 —— 写错的后果是这条声明整条失效，
+       小类标题退回继承色，看着比引擎名还重。 */
+    color: var(--qs-fg-dim);
 }
 .cat-sub .n { font-weight: 400; opacity: .8; }
 .sub-nav .sub-item { font-size: 11px; }

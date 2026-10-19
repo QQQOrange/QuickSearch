@@ -210,14 +210,28 @@ main::-webkit-scrollbar-thumb:hover { background: var(--fg-dim); }
  * 优先级低于类选择器，不加这条 hidden 属性等于没写。 */
 .row[hidden] { display: none; }
 /* 同理：给 display:flex/grid 的容器补 [hidden] 兜底。
- * 添加引擎的两张表单（.cform）和方式卡（.addways）都靠 hidden 属性显隐。 */
-.cform[hidden], .addways[hidden], .cform-kind[hidden] { display: none; }
+ * 添加引擎的两张表单（.cform）和方式卡（.addways）都靠 hidden 属性显隐。
+ *
+ * ⚠ 这份清单必须**跟着 JS 里用 `.hidden =` 控制的所有元素走**。漏一个，
+ *   那个元素就会永远显示 —— 类选择器的 display 压过 UA 的 [hidden]{display:none}。
+ *   （审计抓到的实例：`.bind-path` / `.cform-hotrow` 是 display:flex，
+ *   没勾「绑定应用」时「选择文件…」整行照样露在外面。） */
+.cform[hidden], .addways[hidden], .cform-kind[hidden],
+.bind-path[hidden], .bind-admin[hidden], .bind-delay[hidden],
+.cform-hotrow[hidden], .dep-tip[hidden] { display: none; }
 
 .rt b { display: block; font-weight: 500; }
 .rt small { display: block; font-size: 11.5px; color: var(--fg-dim); }
 
 .sw { flex: none; position: relative; width: 40px; height: 23px; cursor: pointer; }
 .sw input { position: absolute; opacity: 0; width: 0; height: 0; }
+/* ⚠ 开关的 input 被压成 0×0，全站那条 :focus-visible 描边挂在它身上**画不出来**
+ *   （零尺寸元素没有可描边的盒子）。键盘用户 Tab 过二十多个开关时完全看不见
+ *   焦点在哪 —— 所以把焦点环画到可见的轨道 `.sw i` 上。 */
+.sw:focus-within i {
+    outline: 2px solid color-mix(in srgb, var(--accent) 75%, transparent);
+    outline-offset: 2px;
+}
 .sw i {
     position: absolute; inset: 0;
     border-radius: 12px;
@@ -756,12 +770,7 @@ body.idx-on .to-top { bottom: 56px; }
     letter-spacing: .02em;
     color: var(--fg);
 }
-.eng-sub-h .eng-sub-up {
-    font-style: normal;
-    font-size: 11.5px;
-    font-weight: 600;
-    color: var(--fg-dim);
-}
+/* ⚠ 这里原本是 `.eng-sub-h .eng-sub-up` —— 该 class 在 HTML/JS 里零引用（r73 改版后遗留），选择器永远不命中。已删。 */
 .eng-sub-h::before {
     content: '';
     flex: 0 0 auto;
@@ -1137,6 +1146,114 @@ body.idx-on .to-top { bottom: 56px; }
 .btn:active:not([disabled]) { transform: translateY(1px); }
 .btn.danger { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 40%, transparent); }
 .btn.danger:hover { background: color-mix(in srgb, var(--danger) 12%, transparent); }
+/* 主行动按钮：下载并安装那一颗要"看着就该点" */
+.btn.primary {
+    color: #fff;
+    background: var(--accent);
+    border-color: var(--accent);
+}
+.btn.primary:hover { background: color-mix(in srgb, var(--accent) 88%, #000); }
+.btn[disabled] { opacity: .55; cursor: default; }
+.btn[disabled]:hover { background: transparent; }
+.btn.primary[disabled]:hover { background: var(--accent); }
+
+/* v1.2.0：链接样式的按钮（「项目地址」与「在网页上查看」）。
+   做成按钮而不是 <a>：点击要走 Rust 交给系统浏览器，见 settings.html 里的注释。 */
+.linkbtn {
+    padding: 0;
+    border: 0;
+    background: none;
+    font: inherit;
+    font-size: 12px;
+    color: var(--accent);
+    cursor: pointer;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    text-decoration-thickness: 1px;
+}
+.linkbtn:hover { color: color-mix(in srgb, var(--accent) 80%, var(--fg)); }
+.linkbtn[disabled] { opacity: .5; cursor: default; text-decoration: none; }
+
+/* ---------------------------- 更新区块 ---------------------------- */
+.upd { margin-top: 4px; }
+.upd-row {
+    display: flex;
+    gap: 10px;
+    align-items: flex-start;
+    padding: 9px 12px;
+    border-radius: 9px;
+    cursor: pointer;
+}
+.upd-row:hover { background: var(--hover); }
+.upd-txt { display: block; }
+.upd-txt b { font-weight: 600; font-size: 12.5px; }
+.upd-txt small {
+    display: block;
+    margin-top: 3px;
+    font-size: 11.5px;
+    line-height: 1.55;
+    color: var(--fg-dim);
+}
+.upd-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 10px 2px 2px;
+    flex-wrap: wrap;
+}
+.upd-hint { font-size: 11.5px; color: var(--fg-dim); }
+
+/* 进度条：细、圆、不抢视线 —— 它只在下载的十几秒里出现 */
+.upd-progress { display: flex; align-items: center; gap: 10px; margin: 10px 2px 2px; }
+.upd-bar {
+    flex: 1;
+    height: 6px;
+    border-radius: 3px;
+    background: color-mix(in srgb, var(--fg-dim) 22%, transparent);
+    overflow: hidden;
+}
+.upd-bar > i {
+    display: block;
+    width: 0;
+    height: 100%;
+    background: var(--accent);
+    border-radius: 3px;
+    transition: width .18s ease;
+}
+.upd-pct { flex: none; font-size: 11.5px; color: var(--fg-dim); font-variant-numeric: tabular-nums; }
+
+/* 有新版时的详情块：左侧一条高亮竖线，一眼看出"这里有东西要处理" */
+.upd-found {
+    margin: 10px 2px 2px;
+    padding: 11px 12px;
+    border-radius: 10px;
+    border: 1px solid color-mix(in srgb, var(--accent) 34%, transparent);
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+.upd-head { font-size: 12.5px; }
+.upd-head b { color: var(--accent); }
+.upd-size { margin-left: 8px; font-size: 11.5px; color: var(--fg-dim); }
+/* 版本说明可能很长（Release body），限高 + 可滚动；保留换行 */
+.upd-notes {
+    margin-top: 8px;
+    max-height: 190px;
+    overflow-y: auto;
+    padding-right: 4px;
+    font-size: 11.5px;
+    line-height: 1.6;
+    color: var(--fg-dim);
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+.upd-note-tip {
+    margin-top: 9px;
+    font-size: 11.5px;
+    color: #0E8A6D;
+}
+:root[data-theme="dark"] .upd-note-tip { color: #3ECFA5; }
+@media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) .upd-note-tip { color: #3ECFA5; }
+}
 
 .hint { margin-top: 10px; font-size: 11.5px; color: var(--fg-dim); }
 
@@ -1744,8 +1861,12 @@ body.idx-on .to-top { bottom: 56px; }
     color: #0E8A6D;
     background: rgba(14, 138, 109, .12);
 }
-:root[data-theme="dark"] .item .nm .kb.open,
-:root:not([data-theme="light"]) .item .nm .kb.open { color: #3ECFA5; background: rgba(62, 207, 165, .14); }
+/* ⚠ 深色徽标**只在深色下生效**。
+ *   以前这里写的是 `:root:not([data-theme="light"])`，它不带 @media —— 于是
+ *   任何"没显式选亮色"的用户（= 默认「跟随系统」且系统是亮色）也会吃到深色
+ *   配色：`#3ECFA5` 落在白卡片上对比度只有 ~1.9:1，远低于 4.5:1，等于看不清。
+ *   规则收敛成两条：显式深色 + 系统深色（后者只对"跟随系统"生效）。 */
+:root[data-theme="dark"] .item .nm .kb.open { color: #3ECFA5; background: rgba(62, 207, 165, .14); }
 @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) .item .nm .kb.open { color: #3ECFA5; background: rgba(62, 207, 165, .14); }
 }
@@ -1755,8 +1876,7 @@ body.idx-on .to-top { bottom: 56px; }
     color: #B45309;
     background: rgba(217, 119, 6, .14);
 }
-:root[data-theme="dark"] .item .nm .kb.hot,
-:root:not([data-theme="light"]) .item .nm .kb.hot { color: #FBBF24; background: rgba(251, 191, 36, .16); }
+:root[data-theme="dark"] .item .nm .kb.hot { color: #FBBF24; background: rgba(251, 191, 36, .16); }
 @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) .item .nm .kb.hot { color: #FBBF24; background: rgba(251, 191, 36, .16); }
 }
