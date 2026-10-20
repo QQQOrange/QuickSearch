@@ -104,7 +104,13 @@ pub fn try_ai_prepared(
             aimodels::human_size(spec.bytes)
         ));
     }
-    if !crate::aimatte::runtime_available() {
+    /* r91：探测移到一次性线程里（与 ai_matting_status 同一个理由：
+     * ort 加载 dll 失败会 panic，不能让它在编辑器的命令线程上炸）。
+     * 详见 main.rs `ai_matting_status` 里那段完整说明。 */
+    let rt_ok = std::thread::spawn(crate::aimatte::runtime_available)
+        .join()
+        .unwrap_or_default();
+    if !rt_ok {
         return Err("缺少推理运行时（onnxruntime.dll），请重新下载完整程序包".to_string());
     }
 

@@ -9627,14 +9627,33 @@ fn ai_matting_status() -> Value {
     };
     drop(cfg);
 
-    /* r80g：运行库现在**随模型一起下载**（用户要求），所以这里要分三层判断：
-     *   · `runtimeFile` —— 文件在不在（不在 → 需要下载，界面给下载按钮）
-     *   · `runtime`     —— 能不能真加载（文件在但版本不对/损坏时为 false）
-     *   · `runtimeDir`  —— dll 与模型放在同一个目录（界面显示用）
-     * 分开的理由：文件不在是"下一下就好"，加载失败是"文件坏了要重下" ——
-     * 这两种情况给用户的提示完全不同。 */
+    /* r91：`runtime_available()` 移到**一次性独立线程**里跑。
+     *
+     * ## 为什么（全盘审视时发现的健壮性问题）
+     *
+     * `ort` 加载 dll 失败时会 `panic!`（`lib.rs:111` 的 `unwrap_or_else`）。
+     * `runtime_available()` 里虽有 `catch_unwind` 兜底，但：
+     *   1. panic 仍然会把线程局部状态弄脏（allocator / TLS），
+     *      在 **Tauri 的命令线程**上这么干，理论上能波及后续所有命令；
+     *   2. `catch_unwind` 捕获后，Rust 的 panic 语义里后续代码处于
+     *      "已观察到 panic"状态 —— 编译器可以据此做它想做的优化，
+     *      跨过这种边界继续跑属于未定义行为的灰色地带。
+     *
+     * 用户的真实日志里出现过一次这种 PANIC（程序没死，但那个线程废了）。
+     * 独立线程跑：panic 就 panic 在那个一次性线程里，主线程完全无感 ——
+     * 这才是"优雅降级"的正确姿势。代价是每次查询多一次线程创建（微秒级，
+     * 相对 dll 加载的毫秒级完全免费）。
+     *
+     * ⚠ 必须是 `join`（等结果），不能 detach —— 命令要返回值。 */
+    let runtime = match std::thread::spawn(crate::aimatte::runtime_available).join() {
+        Ok(v) => v,
+        Err(_) => {
+            // 线程里 panic 了（dll 缺失/损坏）—— 等价于"不可用"
+            win::log("ai_matting_status: 探测线程 panic（多半是 onnxruntime.dll 缺失或损坏）→ 当作不可用");
+            false
+        }
+    };
     let runtime_file = aimodels::runtime_ready();
-    let runtime = aimatte::runtime_available();
     let cur_ready = aimodels::is_ready(&cur_id);
     json!({
         "enable": enabled,
@@ -11786,7 +11805,14 @@ fn open_search(engine: String, text: Option<String>) {
                         "open_search: {engine} 模拟按键 {spec} -> {} 投向={}",
                         if ok { "已发送" } else { "按键序列无法解析" },
                         if aimed {
-                            format!("目标窗口 0x{target:x}")
+                            // r90b：带上窗口标题 —— "抢了焦点但键没生效"的报障
+                            // 一眼能看出抢到的是不是正确的窗口
+                            // （cmd/终端类应用的窗口由 WindowsTerminal 托管，
+                            //   find_app_window 可能找到别的宿主窗口，标题会暴露这一点）。
+                            format!(
+                                "目标窗口 0x{target:x}「{}」",
+                                win::window_title(HWND(target as *mut c_void))
+                            )
                         } else {
                             "当前前台（横条已先收起）".to_string()
                         }

@@ -1280,7 +1280,29 @@ pub fn load_from(path: &std::path::Path) -> Config {
     // 只在 `apply_view`（恢复云端备份那条路）里归一是不够的：本地 config.json
     // 同样可能存着 CHN，于是设置页两个语言按钮一个都不亮 —— 用户看着像设置丢了，
     // 而识别请求又一直返回参数错误。两头都对不上。
-    parsed.map(sanitize).unwrap_or_default()
+    //
+    // r91：sanitize 之后**有修改就写回磁盘**。
+    //
+    // 为什么以前不写也"没出事"：剪掉的东西只影响内存视图，下次启动还会再剪
+    // 一遍 —— 功能上无感。但有两个真实的代价：
+    //   1. 用户手动看 config.json 时，幽灵条目还躺在里面（他刚在界面上
+    //      确认过"已经没有了"，文件里却在 —— 像没修干净）；
+    //   2. 每次启动都要重跑一遍剪除（枚举内置引擎 + 建HashSet，纯浪费）。
+    //
+    // 判据用「序列化结果是否一致」：sanitize 改的字段不止 bar_list 一个
+    // （语言归一 / OCR 名单 / WebDAV 地址…），逐个 diff 太碎；整个 JSON
+    // 对比一次最省心，且只在启动时跑一次（几 KB 的序列化，微秒级）。
+    let before = parsed.as_ref().map(|c| serde_json::to_string(c).unwrap_or_default());
+    let raw = parsed.map(sanitize).unwrap_or_default();
+    if let (Some(before), true) = (&before, path.exists()) {
+        let after = serde_json::to_string(&raw).unwrap_or_default();
+        if before != &after {
+            // `save` 自己处理失败（它内部有日志），这里不用再包一层 Result
+            save(&raw);
+            crate::win::log("config: 启动归一有修改，已写回磁盘");
+        }
+    }
+    raw
 }
 
 // （下面的 sanitize 系列：把配置里那些「历史上写进去过、现在不该再出现的值」归一。）

@@ -867,13 +867,6 @@ function syncOcrBtn() {
     }
 }
 
-/** 外观项影响列表签名，配置变了要重建 DOM */
-function lookSignature() {
-    return [
-        (CONF && CONF.sepStyle) || 'line'
-    ].join('|');
-}
-
 /** 在横条的提示位上临时显示一句话（外部软件打不开时用）。
  *  ⚠ renderBar 管着 tipEl 的显隐（有引擎就藏），所以到点要按它的规则恢复，
  *  不能一藏了之 —— 否则下一次「没有可用的引擎」的提示位置被占着不显示。 */
@@ -1136,75 +1129,7 @@ function makeEngineCell(eng) {
     return cell;
 }
 
-/** 一个分类在某子类下要显示的条目（按 kind 过滤）。
- *  sub='both' 的分类（网页那 24 个）在这里按子类拆开：搜索引擎子类只留
- *  search 条目、直达网页子类只留 open 条目 —— 同一分类两处出现，但内容不混。 */
-function subCatEngines(sub, cat) {
-    return (cat.engines || []).filter((e) => sub.kinds.indexOf(qsEngineKind(e)) >= 0);
-}
 
-/** 大类胶囊行（#140）：全部引擎 | 网页引擎 | 软件引擎 | 快捷键引擎，
- *  同一行的小胶囊，和收藏夹入口、分类锚点导航共用同一个 sticky 头。
- *
- *  ⚠ 它**不是锚点导航**：点它不滚到哪一段，而是**过滤**（只显示该大类）。
- *    所以按钮上挂的是 data-grp 而不是 data-cat —— 分类锚点那套机器
- *    （paintCatNav / scrollPanelToCat / applyEngineFilter 里的导航收扩）
- *    全都按 data-cat 找按钮，不会误伤这颗。 */
-function appendGroupNav(head, groups) {
-    const nav = document.createElement('nav');
-    nav.className = 'cat-nav grp-nav';
-    nav.setAttribute('aria-label', '引擎大类过滤');
-    const items = [{ key: null, title: '全部引擎' }].concat(
-        groups.map((g) => ({ key: g.key, title: g.title })));
-    for (const it of items) {
-        const b = document.createElement('button');
-        b.type = 'button';
-        b.className = 'cat-nav-item grp-item';
-        b.textContent = it.title;
-        b.dataset.grp = it.key === null ? '' : it.key;
-        b.title = it.key === null ? '显示全部引擎' : '只显示' + it.title;
-        if (panelGroupFilter === it.key) b.classList.add('on');
-        b.addEventListener('click', () => {
-            if (panelGroupFilter === it.key) return;   // 已经是它了，别白重画
-            panelGroupFilter = it.key;
-            panelSubFilter = null;   // 换了大类，二/三级的选择作废（r53）
-            panelCatFilter = null;
-            renderPanel();
-            requestAnimationFrame(() => setTimeout(pushLayout, 0));
-        });
-        nav.appendChild(b);
-    }
-    head.appendChild(nav);
-}
-
-/** 分类锚点导航（第三层 / 全部结果视图）：把当前视图的小节做成胶囊。
- *  没它就得以滚定位 —— 700 多个引擎的面板体一屏装不下。 */
-function appendCatNav(head, sections) {
-    if (sections.length <= 1) return;
-    const nav = document.createElement('nav');
-    nav.className = 'cat-nav';
-    nav.setAttribute('role', 'tablist');
-    nav.setAttribute('aria-label', '引擎分类导航');
-    for (const sec of sections) {
-        const b = document.createElement('button');
-        b.type = 'button';
-        b.className = 'cat-nav-item';
-        b.textContent = sec.title;
-        b.dataset.cat = sec.key;
-        // 无障碍：键盘可达 + 选中态可被读屏软件识别
-        b.setAttribute('role', 'tab');
-        b.setAttribute('aria-selected', 'false');
-        b.addEventListener('click', () => scrollPanelToCat(sec.key, b));
-        nav.appendChild(b);
-    }
-    head.appendChild(nav);
-}
-
-/** 重画 + 等一帧报布局（面板交互后共用）。 */
-function panelRedraw() {
-    renderPanel();
-    requestAnimationFrame(() => setTimeout(pushLayout, 0));
-}
 
 /** 造一颗外部软件的格子（#135 之后软件引擎也进平铺视图，用的就是它）。
  *
@@ -1255,6 +1180,40 @@ function makeAppCell(row) {
 /** 一行平铺数据 → 一颗格子（网页/快捷键引擎 or 外部软件）。 */
 function panelRowCell(row) {
     return row.isApp ? makeAppCell(row) : makeEngineCell(row.eng);
+}
+
+/* 一级（大类）过滤导航：全部引擎 + 网页 / 软件 / 快捷键 三颗胶囊。
+ *
+ * ⚠ 这颗胶囊的激活态（panelGroupFilter）与分类锚点胶囊
+ *    不是锚点：激活态由 appendGroupNav 按 panelGroupFilter 画，这里
+ *    挂的是 data-grp 而不是 data-cat —— 分类锚点那套机器
+ *    （paintCatNav / scrollPanelToCat / applyEngineFilter 里的导航收扩）
+ *    全都按 data-cat 找按钮，不会误伤这颗。 */
+function appendGroupNav(head, groups) {
+    const nav = document.createElement('nav');
+    nav.className = 'cat-nav grp-nav';
+    nav.setAttribute('aria-label', '引擎大类过滤');
+    const items = [{ key: null, title: '全部引擎' }].concat(
+        groups.map((g) => ({ key: g.key, title: g.title })));
+    for (const it of items) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'cat-nav-item grp-item';
+        b.textContent = it.title;
+        b.dataset.grp = it.key === null ? '' : it.key;
+        b.title = it.key === null ? '显示全部引擎' : '只显示' + it.title;
+        if (panelGroupFilter === it.key) b.classList.add('on');
+        b.addEventListener('click', () => {
+            if (panelGroupFilter === it.key) return;   // 已经是它了，别白重画
+            panelGroupFilter = it.key;
+            panelSubFilter = null;   // 换了大类，二/三级的选择作废（r53）
+            panelCatFilter = null;
+            renderPanel();
+            requestAnimationFrame(() => setTimeout(pushLayout, 0));
+        });
+        nav.appendChild(b);
+    }
+    head.appendChild(nav);
 }
 
 /** 子类兜底元信息：groups 里没有这一族时用（用户把某类引擎删光了就会出现）。
@@ -3080,13 +3039,7 @@ let favBarOff0 = 24;
 
 /** 当前给内容让出的左侧 padding（CSS px）。西向缩放与拖动面板都靠它让出空间。 */
 function favPad() { return parseFloat(stage.style.paddingLeft) || 0; }
-function favPadT() { return parseFloat(stage.style.paddingTop) || 0; }
-function setFavPadT(px, noPush) {
-    const v = Math.max(0, Math.round(px));
-    if (v > 0) stage.style.paddingTop = v + 'px';
-    else stage.style.removeProperty('padding-top');
-    if (!noPush) pushLayout();
-}
+
 function setFavPad(px, noPush) {
     const v = Math.max(0, Math.round(px));
     if (v > 0) stage.style.paddingLeft = v + 'px';
@@ -3438,44 +3391,6 @@ boot().catch((err) => {
 /*  中类标题是 .cat-title[data-cat]（老机器，自带高亮），小类标题是        */
 /*  .cat-sub[data-sub="中类::小类"]（新加的，只跳转、不参与高亮）。        */
 /* ------------------------------------------------------------------ */
-function appendSubNav(head, groups, filterKey) {
-    const rows = window.qsAllEngineRows(groups);
-    const seen = [];
-    for (const r of rows) {
-        if (filterKey && r.group !== filterKey) continue;
-        const key = r.sub + '::' + (r.cat || '未分类');
-        if (seen.indexOf(key) < 0) seen.push(key);
-    }
-    if (seen.length <= 1) return;      // 只有一个小类就别再加一行
-    const nav = document.createElement('nav');
-    nav.className = 'cat-nav sub-nav';
-    nav.setAttribute('aria-label', '引擎小类导航');
-    for (const key of seen) {
-        const parts = key.split('::');
-        const b = document.createElement('button');
-        b.type = 'button';
-        b.className = 'cat-nav-item sub-item';
-        b.textContent = parts[1];
-        b.dataset.sub = key;
-        b.title = '跳到「' + parts[1] + '」';
-        b.addEventListener('click', () => scrollPanelToSub(key));
-        nav.appendChild(b);
-    }
-    head.appendChild(nav);
-}
-
-/** 跳到某个小类。算法和 scrollPanelToCat 一样：**减掉吸附头的实际高度**，
- *  目标才不会被目录盖住（面板这侧老代码已经这么算了，这里保持一致）。 */
-function scrollPanelToSub(key) {
-    const esc = (s) => (window.CSS && CSS.escape ? CSS.escape(s) : s.replace(/"/g, '\\"'));
-    const t = panelBody.querySelector('.cat-sub[data-sub="' + esc(key) + '"]');
-    if (!t) return;
-    const bodyTop = panelBody.getBoundingClientRect().top + panelBody.clientTop;
-    const top = panelBody.scrollTop
-        + (t.getBoundingClientRect().top - bodyTop)
-        - panelStickyH() - 8;
-    panelBody.scrollTo({ top: Math.max(0, top), behavior: 'smooth' });
-}
 /* ------------------------------------------------------------------ */
 /* r53：面板目录的渐进式展开                                             */
 /*   一级（大类）：平铺一行胶囊（老的 appendGroupNav，点它=过滤 + 露出二级） */
