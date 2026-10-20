@@ -1001,7 +1001,29 @@ function renderAllNav(nav, ctx) {
                 it.key === '*' ? '按首字母看全部引擎' : '只看' + it.title,
                 !ctx.searching && allGroupFilter === it.key,
                 () => {
-                    allGroupFilter = it.key;
+                    /* r89：**再点一次同一个大类要收起来**（用户报的 bug 1）。
+                     *
+                     * 用户原话：「我点击任意一个引擎，那么它就会展开内容，但是我
+                     * 再点击一下引擎目录，它不会自己收着，这个要修一下。」
+                     *
+                     * 原来的写法是「点了就设成这个大类」，于是点第二次仍然
+                     * `allGroupFilter === it.key` —— 状态没变、界面当然不变，
+                     * 看着就是"点了没反应、收不起来"。
+                     *
+                     * 现在做成开关语义：
+                     *   · 点**别的**大类 → 切过去；
+                     *   · 点**当前这个**大类 → 取消选择，回到"什么都没选"的空页
+                     *     （`null` 会让 renderAllList 走 mode='none'，
+                     *     也就是那句"上面选一个大类开始浏览"）。
+                     *
+                     * ⚠ 「全部引擎」那一档（key='*'）**不参与取消**：
+                     *   它本身就是"看全部"的默认视图，再点一下变成"什么都不选"
+                     *   只是让用户困惑 —— 那是唯一一个"点了必然有内容"的入口。 */
+                    if (it.key !== '*' && allGroupFilter === it.key) {
+                        allGroupFilter = null;
+                    } else {
+                        allGroupFilter = it.key;
+                    }
                     allMidFilter = null;
                     allCatFilter = null;
                     renderAllList();

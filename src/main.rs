@@ -1971,12 +1971,51 @@ fn window_is_labeled(h: HWND, label: &str) -> bool {
 ///
 /// 取不到进程名时**放行**（fail-open）：宁可多弹一次，也不要因为权限问题
 /// 让白名单用户在目标软件里彻底哑火。
-fn app_allowed() -> bool {
+///
+/// # ⚠ r89：判据从"前台进程"改成"**鼠标底下那个窗口**的进程"
+///
+/// 用户报黑名单不生效（实测：把 cmd.exe 加进黑名单，在 cmd 里划词**照样弹**）。
+///
+/// 根因：原来用的是 `win::foreground_exe()`。而"划词"这个动作有一条很容易
+/// 被忽略的时序——用户划完、横条弹出来（我们抢了前台）、他再划一次时
+/// `GetForegroundWindow()` 返回的**可能还是我们自己的窗口**（或者上一次划词
+/// 那个软件），于是黑名单比对的是错的程序，`cmd.exe` 根本没参与判定。
+///
+/// 正确的判据是"用户此刻在**哪个软件里**划词"，那就该问**鼠标底下的窗口**：
+///   · 优先 `window_under_point(鼠标)` —— 和 `should_try_select` 同一个来源，
+///     两处口径一致；
+///   · 取不到（分层窗口 / disabled 窗口会让 WindowFromPoint 返回 null）
+///     才退回前台窗口。
+///
+/// 这样"横条刚弹过、前台还是我们"这种情形就自然解决了：鼠标在哪就是哪。
+fn app_allowed(at: Option<(i32, i32)>) -> bool {
     let cfg = cfg_snapshot();
     if cfg.filter_mode == "off" || cfg.filter_list.is_empty() {
         return true;
     }
-    let Some(exe) = win::foreground_exe() else {
+    /* 先看鼠标底下那个窗口；拿不到再退回前台。
+     * 两步都拿不到才走 fail-open（下面那个 `else` 分支）。 */
+    /* ⚠ 优先用**调用方给的坐标**（划词就是那次拖选的终点）。
+     *
+     * 为什么不能只用当前鼠标位置：横条弹出来之后鼠标可能已经移开，
+     * 或者上一个实例的横条还盖在上面 —— 实测就是这样翻车的：
+     * 判据拿到的是 LauncherSearchWindow（我们自己的搜索窗），
+     * 于是黑名单比对了错的进程、cmd.exe 压根没参与判定。
+     *
+     * 划词那条路有精确坐标（drag 的终点），一定要用上。 */
+    let (px, py) = at.unwrap_or_else(|| {
+        let c = win::cursor_pos();
+        (c.x, c.y)
+    });
+    let under = win::window_under_point(px, py);
+    let exe = if !under.0.is_null() {
+        win::process_exe(win::window_pid(under))
+    } else {
+        win::foreground_exe()
+    };
+    let Some(exe) = exe else {
+        /* ⚠ 这里**不能**因为我们自己就是前台就放行/拦截 —— 那会让判据
+         * 依赖"上一次是谁在前台"。取不到就是取不到，fail-open。 */
         return true;
     };
     let exe = exe.to_ascii_lowercase();
@@ -1991,7 +2030,7 @@ fn app_allowed() -> bool {
     };
     if !ok {
         win::log(&format!(
-            "filter: {exe} 被 {} 挡掉了",
+            "filter: {exe} 被 {} 挡掉了（判据=鼠标底下那个窗口）",
             if cfg.filter_mode == "blacklist" { "黑名单" } else { "白名单" }
         ));
     }
@@ -2026,7 +2065,7 @@ fn schedule_capture(target_pid: u32, drag: (i32, i32, i32, i32)) {
 }
 
 /// 一次触发的总闸门（只管**自动**触发那条线）。
-fn trigger_allowed() -> bool {
+fn trigger_allowed(at: Option<(i32, i32)>) -> bool {
     if is_paused() {
         win::log("trigger: 已暂停使用，忽略自动弹条");
         return false;
@@ -2035,11 +2074,12 @@ fn trigger_allowed() -> bool {
         win::log("trigger: 前台是我们自己的窗口，忽略");
         return false;
     }
-    app_allowed()
+    app_allowed(at)
 }
 
 fn start_capture(target_pid: u32, drag: (i32, i32, i32, i32)) {
-    if !trigger_allowed() {
+    // 划词的终点 = 用户真正在哪个软件里选字，黑名单该按这个判
+    if !trigger_allowed(Some((drag.2, drag.3))) {
         return;
     }
     /* 上一次取词还没结束怎么办？以前是 BUSY.swap 拿到 true 就 return
@@ -2083,14 +2123,33 @@ fn start_capture(target_pid: u32, drag: (i32, i32, i32, i32)) {
                     "start_capture: {via} 通道拿到 {} chars",
                     t.chars().count()
                 )),
-                None => win::log("start_capture: 没拿到文字，不弹"),
+                None => win::log("start_capture: 没拿到文字，仍然弹条（兜底）"),
             }
-            if let Some((t, _)) = out {
-                // 拖选这条路贴文字弹（下方放不下会自动翻上方）。
-                // via_copy=true：这是「用户刚复制/选中了东西」的语境 —— 收藏夹里点条目
-                // 应该继续复制到剪贴板（见 qs://show 的 viaCopy）。
-                show_bar(t, false, true);
-            }
+            /* r89：**取不到文字也要弹横条**。
+             *
+             * 用户原话：「我要求是说我在任何情况下我选中文字就一定要换出横条，
+             * 除非我把这个软件加入了黑名单。」
+             *
+             * 原来的写法是 `if let Some((t, _)) = out { show_bar(...) }` ——
+             * 三条取词通道（编辑控件 / UIA / OCR）**全都失败就不弹**。
+             * 而这在真实软件里并不罕见：
+             *   · 自绘 UI（游戏、部分 Electron 应用、Java/Qt 程序）没有标准编辑控件；
+             *   · 没有 UIA 文本模式，或对方的 UIA 实现不应答（超时）；
+             *   · OCR 兜底要"这块区域里有看得清的字"—— 小字、彩色背景、
+             *     半透明浮层上都可能认不出来。
+             * 用户看到的就是"划了半天，横条有时候不出来"，而且**没有任何提示**
+             * 告诉他为什么 —— 这是最糟的一类体验。
+             *
+             * 现在改成：拿不到文字就弹一个**空文字的横条**。它有实际用处
+             * （这正是"兜底"要保住的东西）：
+             *   · 用户还能点横条上的「识图搜索」对刚才那块区域做识图；
+             *   · 还能点「OCR」重新框选识别；
+             *   · 至少**一定能打开**，用户知道软件在工作，不会以为坏了。
+             *
+             * ⚠ 唯一的例外是黑名单（`app_allowed`），那个判断在
+             *   `trigger_allowed` 里、比这里更早，没有被我这条改动绕过。 */
+            let text = out.map(|(t, _)| t).unwrap_or_default();
+            show_bar(text, false, true);
         })
     else {
         BUSY.store(false, Ordering::SeqCst);
@@ -2319,8 +2378,22 @@ fn show_bar(text: String, at_mouse: bool, via_copy: bool) -> usize {
 
 fn should_try_select(x: i32, y: i32) -> bool {
     let target = win::window_under_point(x, y);
+    /* r89：**取不到窗口就放行**（fail-open）——用户要的是"任何情况都弹"。
+     *
+     * `WindowFromPoint` 有个已知限制：它**跳过** disabled 窗口、以及某些
+     * 分层（layered）/ 穿透（transparent-to-hit）窗口，这时会返回 null。
+     * 而那种窗口底下往往是个正常的应用（只是它上面盖了一层奇怪的东西）。
+     *
+     * 原来的写法是 `if target.is_null() { return false; }` —— 直接不弹。
+     * 用户看到的就是"某些软件里划词死活不弹横条"，还不知道为什么。
+     * 现在改成放行：宁可多弹一次（用户按 Esc / 点外面就收了），
+     * 也不要在他真的选中了文字时什么都不发生。
+     *
+     * ⚠ 黑名单（`app_allowed`）在上游的 `trigger_allowed` 里，不受影响 ——
+     *   用户明确拉黑的软件仍然不会弹。 */
     if target.0.is_null() {
-        return false;
+        win::log("select: WindowFromPoint 没命中（分层/disabled 窗口？）—— 放行，照弹");
+        return true;
     }
     let bar = bar_hwnd();
     if !bar.0.is_null() && win::root_window(target) == bar {
@@ -2352,8 +2425,31 @@ fn should_try_select(x: i32, y: i32) -> bool {
     if SKIP.contains(&cls.as_str()) {
         return false;
     }
-    // 只有从客户区起手才算划选，拖标题栏 / 拖边框直接排除
-    win::point_in_client(target, x, y)
+    /* 只有从客户区起手才算划选，拖标题栏 / 拖边框直接排除。
+     *
+     * ⚠ r89：**子窗口判不出来时要往上找父窗口再判一次**，不能直接 false。
+     *
+     * 原因：`WindowFromPoint` 经常返回**渲染子窗口**（浏览器/Electron 的
+     * `Chrome_RenderWidgetHostHWND`、Qt 的 `QWindowIcon` 之类）。这些子窗口
+     * 的客户区坐标和顶层窗口的并不总是对得上（有的子窗不处理
+     * `ScreenToClient`，有的干脆是 0×0 的占位窗），于是 `point_in_client`
+     * 返回 false → 整条划词被否掉 → **横条不弹**。
+     *
+     * 现在做两级判断：子窗不算就退到它的顶层窗口再算一次。顶层窗口的
+     * 客户区几乎总是可靠的，而"拖标题栏"这个要排除的情形正好也会被
+     * 顶层客户区判掉（标题栏在客户区之外）。 */
+    if win::point_in_client(target, x, y) {
+        return true;
+    }
+    let root = win::root_window(target);
+    if root.0 != target.0 && !root.0.is_null() && win::point_in_client(root, x, y) {
+        win::log("select: 子窗口客户区没命中，但顶层窗口命中 —— 放行");
+        return true;
+    }
+    win::log(&format!(
+        "select: 起点不在客户区（cls={cls}），按拖标题栏/边框排除"
+    ));
+    false
 }
 
 /// 点是不是**真的**落在某个自有窗口上（按 label 找）。
@@ -2737,7 +2833,7 @@ fn spawn_detector() {
                                 win::log("copy path: 忽略（这是软件自己模拟的 Ctrl+C）");
                                 continue;
                             }
-                            if !trigger_allowed() {
+                            if !trigger_allowed(None) {
                                 continue;
                             }
                             win::log("copy path: 收到 Ctrl+C，立刻弹条（不等剪贴板）");
@@ -4166,6 +4262,14 @@ fn backup_summary(r: &BackupOutcome) -> String {
 /// 互斥锁的持有/释放收在**这一层**：里面无论从哪条路 return（没开同步、
 /// 没填地址、读不到时间、上传失败），锁都由外层统一放掉，不会漏。
 fn webdav_sync_on_start() {
+    /* ⚠ 隔离实例绝不碰云端。启动同步是**下载并覆盖本机**那个方向，
+     *   测试实例若把云端内容拉下来，会污染它自己的临时配置（无害），
+     *   但更要紧的是它退出时又会把那份东西传回去（有害）。
+     *   一刀切掉最干净。 */
+    if is_isolated_instance() {
+        win::log("webdav: 隔离实例，跳过启动同步（不碰用户云端）");
+        return;
+    }
     // 启动同步启动得晚（setup 里缓了 6 秒等面板就绪），用户完全可能在这之前
     // 就手点了上传/恢复 —— 互斥锁两边都认，抢不到就让位。
     // 抢锁用 RAII 守卫：`_inner` 里任何一步 panic 都不会把标志永久留在 true
@@ -4585,10 +4689,37 @@ fn webdav_preview_url(url: String) -> serde_json::Value {
     }
 }
 
+/// 这个进程是不是**隔离的测试实例**（不碰用户真实的云端/网络副作用）。
+///
+/// # 为什么必须有这道闸（血的教训）
+///
+/// 我用临时 APPDATA 起实例做自动化验证，本以为"数据都在临时目录、不会影响用户"。
+/// 结果漏了一件事：**WebDAV 云同步**。
+///   · 测试实例退出了 → `webdav_on_exit=true` → 它把**自己的测试配置**上传到了
+///     用户的坚果云（185MB 的备份目录里多了一份带测试数据的 config）；
+///   · 用户下次启动软件 → `webdav_on_start=true` → 云端那份"较新" →
+///     **覆盖回本机**；
+///   · 用户横条上的引擎、自定义快捷键引擎**全没了**。
+///
+/// 所以：只要带 `QS_INSTANCE_TAG` 或 `QS_NO_CLOUD=1`，就**一律不许碰云端**。
+/// 这条闸放在产品代码里（而不是测试脚本里），因为脚本可以忘，产品不该给机会。
+fn is_isolated_instance() -> bool {
+    if std::env::var("QS_INSTANCE_TAG").map(|v| !v.trim().is_empty()).unwrap_or(false) {
+        return true;
+    }
+    std::env::var("QS_NO_CLOUD").map(|v| v == "1").unwrap_or(false)
+}
+
 /// 退出前同步。只做上传（覆盖云端），不会反过来动本机配置。
 fn exit_sync_if_needed() {
     static ONCE: AtomicBool = AtomicBool::new(false);
     if ONCE.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    /* ⚠ 隔离实例绝不碰云端（见 `is_isolated_instance` 的注释：
+     *   这正是导致用户横条引擎被覆盖的那条路）。 */
+    if is_isolated_instance() {
+        win::log("exit: 隔离实例，跳过 WebDAV 上传（不碰用户云端）");
         return;
     }
     let cfg = cfg_snapshot();
@@ -11019,7 +11150,19 @@ fn add_custom_engine(
             app_launch_delay.unwrap_or(config::default_app_launch_delay()),
             None,
         )?;
+        let name_for_bar = e.name.clone();
         cfg.custom_engines.push(e);
+        /* r89：新加的自定义引擎**顺手放进横条末尾**。
+         *
+         * 用户报的那个 bug 里有一半是这个：他"把一个快捷键引擎加入到了横条"，
+         * 但引擎库里找不到 —— 说明"加进横条"和"引擎存在"这两件事在他那里
+         * 脱节了。默认帮他放进去，用户想移出随时在「横条上的引擎」里点一下
+         * 就行（移出只删哨兵、不删引擎本身）。
+         *
+         * ⚠ 只在**还没在里面**时追加，避免重复条目。 */
+        if !cfg.bar_list.iter().any(|n| n == &name_for_bar) {
+            cfg.bar_list.push(name_for_bar);
+        }
         config::save(&cfg);
     }
     broadcast();
@@ -11540,7 +11683,41 @@ fn open_search(engine: String, text: Option<String>) {
                  * 才发键。全都失败时仍然发一次（打到当前前台），并在日志里写明
                  * 是"没抢到焦点"—— 这样用户下次报障时能一眼看出是哪一类。 */
                 let mut aimed = false;
-                if target != 0 {
+                /* r89：**应用本来就在跑 → 定向投键，不抢焦点、不把窗口换出来。**
+                 *
+                 * 用户原话：「你确保软件是打开的，你没有必要把软件给换起来呀，
+                 * 你就看一下它是不是开的，要不是开的你就打开，要是开的你就不用
+                 * 把它的窗口换出来，让它继续保留在后台就可以了呀。」
+                 *
+                 * 所以分两条路：
+                 *   · `was_running == true`（**它早就在跑，可能正缩在后台**）
+                 *     → `post_hotkey` 把按键消息直接投给它的窗口。前台不动，
+                 *       用户手上正在做的事不被打断。
+                 *   · `was_running == false`（是我们刚把它拉起来的）
+                 *     → 走原来的路（抢焦点 + SendInput）。刚启动的程序需要
+                 *       前台才稳，而且"刚被打开"本身就意味着它要露出来，
+                 *       这时候弹到前面恰恰是用户期待的。
+                 *
+                 * ⚠ 定向投递**可能不被响应**（少数程序只吃 RawInput，或者
+                 *   窗口句柄不对）。所以失败了就**退回**原来的抢焦点路径，
+                 *   保证功能不退化 —— 宁可偶尔弹一下窗口，也不能让快捷键失灵。 */
+                let mut posted = false;
+                if !launched {
+                    if let Some(h) = bound_window {
+                        if win::is_visible(h) && !win::is_minimized(h) {
+                            posted = win::post_hotkey(h, spec);
+                            win::log(&format!(
+                                "open_search: {engine} 应用已在后台运行 → 定向投键（不抢焦点）→ {}",
+                                if posted { "成功" } else { "未响应，将退回抢焦点" }
+                            ));
+                        } else {
+                            win::log(&format!(
+                                "open_search: {engine} 应用在跑但窗口不可见/已最小化 → 走抢焦点"
+                            ));
+                        }
+                    }
+                }
+                if !posted && target != 0 {
                     let t = HWND(target as *mut c_void);
                     if win::is_visible(t) && !win::is_minimized(t) {
                         for attempt in 0..10 {
@@ -11569,16 +11746,24 @@ fn open_search(engine: String, text: Option<String>) {
                         ));
                     }
                 }
-                let ok = win::send_hotkey(spec);
-                win::log(&format!(
-                    "open_search: {engine} 模拟按键 {spec} -> {} 投向={}",
-                    if ok { "已发送" } else { "按键序列无法解析" },
-                    if aimed {
-                        format!("目标窗口 0x{target:x}")
-                    } else {
-                        "当前前台".to_string()
-                    }
-                ));
+                /* r89：定向投递成功就不再走全局广播 —— 那样会**又**把键
+                 * 打到别人的前台窗口上（等于发两遍，可能误触别的软件的热键）。 */
+                if posted {
+                    win::log(&format!(
+                        "open_search: {engine} 模拟按键 {spec} -> 已定向投递（前台未变动）"
+                    ));
+                } else {
+                    let ok = win::send_hotkey(spec);
+                    win::log(&format!(
+                        "open_search: {engine} 模拟按键 {spec} -> {} 投向={}",
+                        if ok { "已发送" } else { "按键序列无法解析" },
+                        if aimed {
+                            format!("目标窗口 0x{target:x}")
+                        } else {
+                            "当前前台".to_string()
+                        }
+                    ));
+                }
             }
             None => win::log(&format!("open_search: {engine} 是快捷键类但没配按键")),
         }
@@ -12524,6 +12709,59 @@ fn main() {
         }
         std::process::exit(0);
     }
+    /* --webdav-peek <文件名> <备份密码>：下载云端某一份并**解密后**打印它的
+     * bar_list 与 custom_engines 名字。
+     *
+     * # 为什么要这条命令（真实事故）
+     *
+     * 我的自动化测试实例把测试配置推到了用户云端，用户的真实配置被覆盖后
+     * 又"从云端恢复"回来 —— 结果横条上的引擎全没了。
+     * 事后要判断"云端这 100 多份里哪一份还是好的"，只能一份份下载+解密+肉眼看。
+     * GUI 一次只能恢复一份、而且是破坏性的（会覆盖本机）。
+     *
+     * 有了这条命令就能**只读地**扫一遍，确定哪一份是对的，再去操作。
+     * 它只打印摘要（引擎名列表），不打印正文，避免把用户数据洒到终端里。 */
+    if let Some(i) = args.iter().position(|a| a == "--webdav-peek") {
+        let name = args.get(i + 1).cloned().unwrap_or_default();
+        let pw = args.get(i + 2).cloned().unwrap_or_default();
+        let cfg = config::load();
+        let o = webdav::Opts {
+            url: cfg.webdav_url.clone(),
+            user: cfg.webdav_user.clone(),
+            pass: cfg.webdav_pass.clone(),
+            timeout_secs: 25,
+        };
+        match webdav::download_named(&o, &name) {
+            Ok(raw) => match crypto::decrypt(&raw, &pw) {
+                Ok(plain) => match serde_json::from_str::<serde_json::Value>(&plain) {
+                    Ok(v) => {
+                        let bar = v
+                            .get("barList")
+                            .and_then(|x| x.as_array())
+                            .map(|a| a.len())
+                            .unwrap_or(0);
+                        let ces: Vec<String> = v
+                            .get("customEngines")
+                            .and_then(|x| x.as_array())
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|e| {
+                                        e.get("name").and_then(|n| n.as_str()).map(String::from)
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        println!("OK\tbar={bar}\tcustom={}", ces.join(","));
+                    }
+                    Err(e) => println!("ERR\tJSON {e}"),
+                },
+                Err(e) => println!("ERR\t解密失败 {e}"),
+            },
+            Err(e) => println!("ERR\t下载失败 {e}"),
+        }
+        std::process::exit(0);
+    }
+
     // --stress N：反复 show/hide 横条 N 次，每次采一次内存，用来做泄漏检测
     let stress: Option<usize> = args
         .iter()

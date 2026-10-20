@@ -290,6 +290,70 @@ pub fn prune_dangling_app_sentinels(cfg: &mut Config) -> usize {
     before - cfg.bar_list.len()
 }
 
+/// r89：剪掉 `bar_list` 里**找不到定义**的引擎名。返回剪掉的条数。
+///
+/// # 为什么需要（这条是给用户报的真 bug 收尾）
+///
+/// 用户报：「我之前把一个快捷键引擎加入到了横条，但是现在在引擎库里面我找不到
+/// 那个引擎，但横条里有客观存在这个，我通过搜索方式也搜索不出来。」
+///
+/// 查下来是**`bar_list` 里留着一个没有定义的孤儿名字**：
+/// `custom_engines` 里没有它、内置目录里也没有它，于是
+///   · 引擎库（数据源是"目录 + custom_engines"）**看不到**它；
+///   · 搜索也搜不到（搜的就是引擎库那份数据）；
+///   · 横条那边按名字查不到定义，渲染成一颗点不动的幽灵图标。
+///
+/// 造成孤儿的最直接原因是"定义被覆盖/删除、但 `bar_list` 没跟着清"。
+/// 正常路径（`remove_custom_engine`）是**会**清 `bar_list` 的，所以这次是
+/// 一份被覆盖的配置留下的历史垃圾；而程序**没有任何机制**去发现并修复它，
+/// 于是它就那么一直躺着，用户只看到"横条上有、引擎库里没有"。
+///
+/// 所以补这一道启动自检：凡是横条里既不是分隔线、也不是哨兵、又不在
+/// 「内置引擎 + 自定义引擎」名单里的名字，一律剪掉。
+///
+/// ⚠ 只剪"**确定无定义**"的条目，判断口径必须和前端完全一致：
+///   · 分隔线 `|`、OCR 哨兵 `@ocr`、识图哨兵 `@img`、外部软件哨兵
+///     `@app:<id>` 都不是引擎名，跳过（前三个由别处校验，`@app:` 由
+///     `prune_dangling_app_sentinels` 管）；
+///   · 剩下的必须在 `engines::engines()`（内置）或 `custom_engines` 里找得到。
+///   口径不一致的后果很严重：剪错了就等于**用户横条上的引擎无故消失**。
+pub fn prune_undefined_bar_engines(cfg: &mut Config) -> usize {
+    let builtin = crate::engines::engines();
+    let custom: std::collections::HashSet<&str> =
+        cfg.custom_engines.iter().map(|e| e.name.as_str()).collect();
+    let before = cfg.bar_list.len();
+    cfg.bar_list.retain(|n| {
+        /* 分隔线与**所有**哨兵：不在这里判（各有各的归属校验）。
+         *
+         * ⚠ 这一串必须穷举干净 —— 漏一个就等于"用户横条上那格无故消失"。
+         *   实测漏 `@fav:` 时，既有测试 `sanitize_prunes_dangling_sentinels`
+         *   立刻变红（它构造了 `@fav:alive` 并期望它留着）。**这条测试救了我**：
+         *   我第一版只排除了 `|` / `@ocr` / `@img` / `@app:` 四种。
+         *
+         * 现有哨兵全集（改这里时对着 config.rs 里的常量清单核一遍）：
+         *   `|`        分隔线（SEP）
+         *   `@ocr`     OCR 按钮
+         *   `@img`     识图搜索按钮
+         *   `@app:<id>`  外部软件
+         *   `@fav:<id>`  收藏夹
+         */
+        if n == SEP
+            || n == BAR_OCR
+            || n == BAR_IMG
+            || is_app_sentinel(n)
+            || is_fav_sentinel(n)
+        {
+            return true;
+        }
+        // 空白名没意义，剪掉
+        if n.trim().is_empty() {
+            return false;
+        }
+        builtin.contains_key(n.as_str()) || custom.contains(n.as_str())
+    });
+    before - cfg.bar_list.len()
+}
+
 /// r72：把识图按钮并进 `bar_list`（`@img` 哨兵）。返回是否改动过。
 ///
 /// 以前识图是横条上一个**位置固定**的按钮（`#btnImg`），不在 bar_list 里，
@@ -1444,6 +1508,18 @@ fn sanitize(mut c: Config) -> Config {
             "config: 清掉 {pruned_apps} 个指向已删除外部软件的横条哨兵"
         ));
     }
+    /* r89：横条里**找不到定义**的引擎名（用户报的那个 bug）。
+     *
+     * 症状是"横条上明明有、引擎库里搜不到"—— 因为引擎库的数据源是
+     * 「内置目录 + custom_engines」，孤儿名字在哪都查不到，只在 bar_list 里躺着。
+     * 放在这里（读配置的统一归一点）而不是只放 UI 侧，理由和上面两条一样：
+     * 配置可能从本地 / 备份 / 云端恢复 / 导入进来，每一路都该干净。 */
+    let pruned_undefined = prune_undefined_bar_engines(&mut c);
+    if pruned_undefined > 0 {
+        crate::win::log(&format!(
+            "config: 清掉 {pruned_undefined} 个横条里没有定义的引擎名（孤儿条目）"
+        ));
+    }
     // r56：「最近使用」名单里那些已经不存在的引擎（用户在设置里删了它），
     // 读配置时就剔掉。不清的话，面板那一栏会给一颗点了 404 的格子。
     let pruned_recent = normalize_recent(&mut c);
@@ -2424,6 +2500,69 @@ mod sanitize_tests {
             c.fav_panel_sizes.is_empty(),
             "指向已删目录的尺寸键应在载入时清掉"
         );
+    }
+
+    /// r89：横条里**找不到定义**的引擎名要被剪掉，但**各类哨兵一个都不能误剪**。
+    ///
+    /// 这条守的是用户报的那个 bug：
+    /// 「我之前把一个快捷键引擎加入到了横条，但是现在在引擎库里面我找不到那个
+    ///   引擎，但横条里有客观存在这个，我通过搜索方式也搜索不出来。」
+    ///
+    /// 根因是 `bar_list` 里留着一个孤儿名字 —— `custom_engines` 里没有它、
+    /// 内置目录里也没有它，于是引擎库（数据源 = 目录 + custom_engines）看不到、
+    /// 搜索也搜不到，只有横条上那一格按名字查不到定义。
+    ///
+    /// ⚠ 另一半是"**不能剪错**"：分隔线、OCR、识图、外部软件、收藏夹这几类哨兵
+    ///   都不是引擎名，各有各的归属校验。我第一版漏了 `@fav:`，
+    ///   既有测试 `sanitize_prunes_dangling_sentinels` 立刻变红。
+    ///   所以这条测试把**全部五种**哨兵都摆进来一起验。
+    #[test]
+    fn prune_undefined_bar_engines_prunes_orphans_only() {
+        let mut c = Config::default();
+        // 一个真实的内置引擎（从目录里取，避免写死名字后目录改了测试就挂）
+        let builtin = crate::engines::engines()
+            .keys()
+            .next()
+            .cloned()
+            .expect("内置引擎目录不该是空的");
+        c.custom_engines = vec![CustomEngine {
+            name: "我的自定义".into(),
+            kind: EngineKind::Hotkey,
+            hotkey: "alt+v".into(),
+            ..Default::default()
+        }];
+        c.bar_list = vec![
+            builtin.clone(),
+            "我的自定义".to_string(),
+            "这个引擎没有定义".to_string(),        // ← 孤儿，该剪
+            "   ".to_string(),                     // ← 空白名，该剪
+            SEP.to_string(),
+            BAR_OCR.to_string(),
+            BAR_IMG.to_string(),
+            format!("{}abc", APP_PREFIX),
+            format!("{}xyz", FAV_PREFIX),
+        ];
+
+        let pruned = prune_undefined_bar_engines(&mut c);
+        assert_eq!(pruned, 2, "只该剪掉孤儿与空白名这两个");
+
+        assert!(c.bar_list.contains(&builtin), "内置引擎要留着");
+        assert!(c.bar_list.iter().any(|n| n == "我的自定义"), "自定义引擎要留着");
+        for keep in [
+            SEP.to_string(),
+            BAR_OCR.to_string(),
+            BAR_IMG.to_string(),
+            format!("{}abc", APP_PREFIX),
+            format!("{}xyz", FAV_PREFIX),
+        ] {
+            assert!(
+                c.bar_list.contains(&keep),
+                "哨兵「{keep}」被误剪了 —— 会导致横条上那一格无故消失"
+            );
+        }
+
+        // 幂等：干净的数据再剪一次不该动
+        assert_eq!(prune_undefined_bar_engines(&mut c), 0);
     }
 
     /// 外部软件地址的三类正当形态都要放行：网页、软件自己的协议、

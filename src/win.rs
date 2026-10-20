@@ -1997,6 +1997,85 @@ fn parse_main_key(p: &str) -> Option<VIRTUAL_KEY> {
     Some(vk)
 }
 
+/// 把一串组合键**定向发给某个窗口**，全程不动前台、不抢焦点。
+///
+/// # 为什么需要它（用户报的 bug 3）
+///
+/// 用户原话：「快捷键引擎，你确保软件是打开的，你没有必要把软件给换起来呀，
+/// 你就看一下它是不是开的，要不是开的你就打开，要是开的你就不用把它的窗口
+/// 换出来，让它继续保留在后台就可以了呀。」
+///
+/// 原来的实现是 `SendInput`（见 `send_hotkey`）—— 那是**全局广播**，键只会
+/// 落到"当时的前台窗口"身上。所以想让它打到绑定应用上，就只能把那个应用
+/// **抢到前台**。用户不喜欢这个副作用：应用本来缩在后台干得好好的，点一下
+/// 横条就被弹到最前面，打断了他手上的事。
+///
+/// 正解是 `PostMessage(WM_KEYDOWN/WM_KEYUP)` **直接投给目标窗口**：
+/// 消息进那个窗口自己的消息队列，由它自己处理，前台是谁完全无关。
+///
+/// # 代价与前提（必须写清楚，免得以后误用）
+///
+///   · 只有**按窗口消息收键盘**的程序会响应。绝大多数 Win32 原生程序都走
+///     `WM_KEYDOWN`（游戏常用 DirectInput/RawInput 的除外 —— 那种连
+///     `SendInput` 都得前台才行，本来就不适用"后台发键"）；
+///   · 该窗口必须在**同一个会话/权限级别**下（我们以管理员运行，普通程序
+///     也收得到；反过来提权程序给普通程序投也没问题，UIPI 只挡低→高）。
+///
+/// 所以调用方要**先试这个**，失败（比如目标不响应）再退回"抢焦点 + SendInput"，
+/// 保证功能不退化。
+///
+/// ⚠ 修饰键**不需要**单独投：收到 `WM_KEYDOWN` 的程序一般用
+///   `GetKeyState` 查修饰键状态，而那是**线程输入队列**的全局状态。
+///   为了保证它查得到（哪怕用户此刻没按着 Ctrl），我们在投递前后临时
+///   把修饰键的键盘状态设上，投完复原 —— 和 `send_ctrl_c` 里那段
+///   `SetKeyboardState` 的手法一模一样，理由也一样。
+pub fn post_hotkey(hwnd: HWND, spec: &str) -> bool {
+    let Some(h) = parse_hotkey(spec) else {
+        return false;
+    };
+    unsafe {
+        let tid = GetWindowThreadProcessId(hwnd, None);
+        let me = GetCurrentThreadId();
+        // 附加到目标线程的输入队列：这样 SetKeyboardState 影响的是它看到的
+        // 修饰键状态，而不是我们自己线程的。
+        // ⚠ `AttachThreadInput` 返回的是裸 `BOOL`（不是 Result），所以是
+        //   `.as_bool()` 而不是 `.is_ok()` —— 和上面 `send_ctrl_c` 里用法一致。
+        let attached = tid != 0 && tid != me && AttachThreadInput(me, tid, true).as_bool();
+
+        let mut saved = [0u8; 256];
+        let have_saved = GetKeyboardState(&mut saved).is_ok();
+        if attached {
+            let mut down = saved;
+            // 修饰键标成"按着"
+            for m in h.mods.iter() {
+                if (m.0 as usize) < 256 {
+                    down[m.0 as usize] = 0x80;
+                }
+            }
+            let _ = SetKeyboardState(&down);
+        }
+
+        let scan = MapVirtualKeyW(h.key.0 as u32, MAPVK_VK_TO_VSC) as usize;
+        // lParam 位段与 `send_ctrl_c` 一致：bit0=重复次数, bit16-23=扫描码,
+        // bit31=抬起标志（抬起那份必须带 0xC000_0001）。
+        let dn = LPARAM((1 | (scan << 16)) as isize);
+        let up = LPARAM((0xC000_0001usize | (scan << 16)) as isize);
+        let a = PostMessageW(Some(hwnd), WM_KEYDOWN, WPARAM(h.key.0 as usize), dn).is_ok();
+        // 小睡一下：有些程序在 WM_KEYDOWN 的处理里读键状态，太快投 KEYUP
+        // 会让它读到"已经抬起"。
+        std::thread::sleep(Duration::from_millis(30));
+        let b = PostMessageW(Some(hwnd), WM_KEYUP, WPARAM(h.key.0 as usize), up).is_ok();
+
+        if attached {
+            if have_saved {
+                let _ = SetKeyboardState(&saved);
+            }
+            let _ = AttachThreadInput(me, tid, false);
+        }
+        a && b
+    }
+}
+
 /// 把一串组合键**模拟发给当前前台窗口**（引擎「快捷键」类点击用）。
 ///
 /// 返回 `false` = 序列里有不认识的键名（一个键都没发，调用方记日志）。
