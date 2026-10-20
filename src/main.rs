@@ -10971,6 +10971,8 @@ fn clean_custom_engine(
     app_path: &str,
     app_admin: bool,
     app_launch_delay: u32,
+    // r90：触发时要不要把目标应用的主窗口调到前台（只对快捷键类有意义）。
+    app_bring_front: bool,
     skip: Option<usize>,
 ) -> Result<config::CustomEngine, String> {
     let name = name.trim();
@@ -11108,6 +11110,8 @@ fn clean_custom_engine(
         } else {
             0
         },
+        // r90：同上 —— 只对快捷键类有效，其余类强制 false
+        app_bring_front: kind == config::EngineKind::Hotkey && app_bring_front,
         })
 }
 
@@ -11127,6 +11131,9 @@ fn add_custom_engine(
     app_path: Option<String>,
     app_admin: Option<bool>,
     app_launch_delay: Option<u32>,
+    // r90：触发这个快捷键时要不要把目标应用的主窗口调到前台。
+    // 用 Option 向后兼容（不传 = 默认 false，即"不动它的窗口"）。
+    app_bring_front: Option<bool>,
 ) -> Result<(), String> {
     {
         let mut cfg = match st().cfg.lock() {
@@ -11148,6 +11155,7 @@ fn add_custom_engine(
             app_path.as_deref().unwrap_or(""),
             app_admin.unwrap_or(false),
             app_launch_delay.unwrap_or(config::default_app_launch_delay()),
+            app_bring_front.unwrap_or(false),
             None,
         )?;
         let name_for_bar = e.name.clone();
@@ -11183,6 +11191,8 @@ fn update_custom_engine(
     app_path: Option<String>,
     app_admin: Option<bool>,
     app_launch_delay: Option<u32>,
+    // r90：触发时要不要把目标应用的主窗口调到前台。
+    app_bring_front: Option<bool>,
 ) -> Result<(), String> {
     {
         let mut cfg = match st().cfg.lock() {
@@ -11204,6 +11214,7 @@ fn update_custom_engine(
             app_path.as_deref().unwrap_or(""),
             app_admin.unwrap_or(false),
             app_launch_delay.unwrap_or(config::default_app_launch_delay()),
+            app_bring_front.unwrap_or(false),
             Some(index),
         )?;
         let old = cfg.custom_engines[index].name.clone();
@@ -11685,61 +11696,44 @@ fn open_search(engine: String, text: Option<String>) {
                  * 现在最多试 10 次、每次 120ms，**每一次都核对前台真的到了目标**
                  * 才发键。全都失败时仍然发一次（打到当前前台），并在日志里写明
                  * 是"没抢到焦点"—— 这样用户下次报障时能一眼看出是哪一类。 */
+                /* r90：**按每个引擎自己的开关**决定要不要把它的窗口调出来。
+                 *
+                 * 用户原话：
+                 *   「如果这个软件已经存在于后台，那没有必要说我触发这个快捷键的
+                 *     时候把这个快捷键给换出来。比如说我设置了一个 alt+a 的微信
+                 *     截图快捷键，那微信在后台挂着的时候，那就算它需要检测微信
+                 *     留存，那没有必要把微信的窗口换出来，然后再 alt+a。」
+                 *   「在每一个快捷引擎里面添加个按钮……打开这个按钮之后，点击这个
+                 *     快捷引擎图标触发快捷键会把主窗口打开，如果把这个按钮关闭，
+                 *     那么触发快捷引擎功能就不会把相应软件的主窗口打开。」
+                 *
+                 * # 判断依据
+                 *
+                 *   ① `app_bring_front == false`（**默认**）且应用**本来就在跑**
+                 *      → **不抢焦点**，直接注入按键交给系统路由。
+                 *        微信截图 / 章鱼速贴这类靠全局热键的后台工具走这条，
+                 *        用户手上的事一点不被打断。
+                 *
+                 *   ② `app_bring_front == true`，或者应用**是我们刚拉起来的**
+                 *      → 抢焦点（多次重试 + 每次核对）再发键。
+                 *        刚拉起来的必须让它就位（不然按键发出去无处可去）；
+                 *        用户主动打开那个开关，也说明他要看着它执行。
+                 *
+                 * ⚠ v1.3.2 里这段是"无条件抢焦点" —— 那是我为了修章鱼速贴
+                 *   （它失败的真实原因是**横条自己占着前台**，已在
+                 *   `dismiss_bar` 顺序里修掉）而做的临时妥协。病根没了之后，
+                 *   就不该继续用"每次都把人家窗口弹出来"这种粗暴手段。 */
+                let want_front = entry.as_ref().map(|e| e.app_bring_front).unwrap_or(true);
+                // 刚拉起来的必须让它就位（否则按键可能打空）；其余听开关的。
+                let must_front = launched || want_front;
+                win::log(&format!(
+                    "open_search: {engine} 抢焦点={must_front}（开关键={want_front} 刚拉起={launched}）"
+                ));
                 let mut aimed = false;
-                /* r89：**应用本来就在跑 → 定向投键，不抢焦点、不把窗口换出来。**
-                 *
-                 * 用户原话：「你确保软件是打开的，你没有必要把软件给换起来呀，
-                 * 你就看一下它是不是开的，要不是开的你就打开，要是开的你就不用
-                 * 把它的窗口换出来，让它继续保留在后台就可以了呀。」
-                 *
-                 * 所以分两条路：
-                 *   · `was_running == true`（**它早就在跑，可能正缩在后台**）
-                 *     → `post_hotkey` 把按键消息直接投给它的窗口。前台不动，
-                 *       用户手上正在做的事不被打断。
-                 *   · `was_running == false`（是我们刚把它拉起来的）
-                 *     → 走原来的路（抢焦点 + SendInput）。刚启动的程序需要
-                 *       前台才稳，而且"刚被打开"本身就意味着它要露出来，
-                 *       这时候弹到前面恰恰是用户期待的。
-                 *
-                 * ⚠ 定向投递**可能不被响应**（少数程序只吃 RawInput，或者
-                 *   窗口句柄不对）。所以失败了就**退回**原来的抢焦点路径，
-                 *   保证功能不退化 —— 宁可偶尔弹一下窗口，也不能让快捷键失灵。 */
-                /* r89c：**老老实实模拟按键，不做任何"聪明"的处理**（用户要求）。
-                 *
-                 * 用户原话：「我就希望快捷键引擎，你能够老老实实的模仿按键输出
-                 * 就可以了，不要做一些自以为是的改变」。
-                 *
-                 * # 我前几版都错在哪
-                 *
-                 * 我一直在给它加"避免抢焦点"的聪明机制，结果把功能弄坏了：
-                 *
-                 *   · v1.3.0 加了 `post_hotkey`（PostMessage 定向投递）；
-                 *   · v1.3.1 又加了"没窗口就直接发"的分支。
-                 *
-                 * 而用户日志显示的实际结果是：
-                 *
-                 *     open_search: 章鱼速贴快捷输入 有可见窗口 → 定向投键 → 成功
-                 *     模拟按键 alt+v -> 已定向投递（前台未变动）
-                 *
-                 * **"成功"是假的** —— `PostMessage` 返回成功只代表"消息塞进了
-                 * 消息队列"，那个隐藏窗口根本不处理它。Octoclip 的 alt+v 是
-                 * **系统级全局热键**（RegisterHotKey），只有真正的键盘输入
-                 * （SendInput / keybd_event）才会被 Windows 路由给它。
-                 *
-                 * # 现在的做法：只有一条路
-                 *
-                 * **先确保目标应用在前台 → 再用 SendInput 发键。**
-                 * 这就是用户说的"老老实实模仿按键"。没有定向投递、
-                 * 没有"没有窗口就特殊处理"、没有花活。
-                 *
-                 * ⚠ 关于"不要把窗口换出来"（v1.3.0 的 bug 3）：那条要求我保留在
-                 * **另一个地方** —— `restore_focus_to` 只在**确实需要**时才调用，
-                 * 而且下面依然会先试着让目标就位。但**功能正确优先于观感**：
-                 * 按键发不对，界面再"不打扰"也没有意义。
-                 *
-                 * 这一点用户已经明确表态过两次，我按他的来。 */
-                if target != 0 {
-
+                /* 只有 must_front 时才去抢焦点。
+                 * 关掉开关、且应用本来就在跑 → 直接跳过这一整段，
+                 * 让按键走系统路由（不打断用户手上正在做的事）。 */
+                if must_front && target != 0 {
                     let t = HWND(target as *mut c_void);
                     if win::is_visible(t) && !win::is_minimized(t) {
                         for attempt in 0..10 {
@@ -13472,7 +13466,7 @@ mod tests {
     #[test]
     fn custom_engine_accepts_valid_input() {
         let c = empty_cfg();
-        let e = clean_custom_engine(&c, "  内网搜索  ", "  https://s/?q=%s  ", "", config::EngineKind::Search, "", false, "", false, 900, None)
+        let e = clean_custom_engine(&c, "  内网搜索  ", "  https://s/?q=%s  ", "", config::EngineKind::Search, "", false, "", false, 900, false, None)
             .expect("正常输入应当通过");
         assert_eq!(e.name, "内网搜索", "首尾空格要 trim 掉");
         assert_eq!(e.url, "https://s/?q=%s");
@@ -13483,7 +13477,7 @@ mod tests {
     #[test]
     fn custom_engine_keeps_explicit_category() {
         let c = empty_cfg();
-        let e = clean_custom_engine(&c, "备用 Kimi", "https://k/?q=%s", "AI 工具", config::EngineKind::Search, "", false, "", false, 900, None).unwrap();
+        let e = clean_custom_engine(&c, "备用 Kimi", "https://k/?q=%s", "AI 工具", config::EngineKind::Search, "", false, "", false, 900, false, None).unwrap();
         assert_eq!(e.category, "AI 工具");
         // 分类含 "AI" 的必须被当成 AI 引擎，否则提问后缀不会生效
         let mut cfg = c;
@@ -13517,7 +13511,7 @@ mod tests {
             ("一二三四五六七八九十一二三四五六七八九十一二三四五", "超长名字"),
         ];
         for (name, why) in cases {
-            let r = clean_custom_engine(&c, name, "https://x/?q=%s", "", config::EngineKind::Search, "", false, "", false, 900, None);
+            let r = clean_custom_engine(&c, name, "https://x/?q=%s", "", config::EngineKind::Search, "", false, "", false, 900, false, None);
             assert!(r.is_err(), "应当拒绝：{why}");
         }
     }
@@ -13529,7 +13523,7 @@ mod tests {
         let b = builtin_name();
         assert!(!b.is_empty(), "engines.json 应当能解析出内置引擎");
         assert!(
-            clean_custom_engine(&c, &b, "https://x/?q=%s", "", config::EngineKind::Search, "", false, "", false, 900, None).is_err(),
+            clean_custom_engine(&c, &b, "https://x/?q=%s", "", config::EngineKind::Search, "", false, "", false, 900, false, None).is_err(),
             "不该允许和内置引擎「{b}」重名"
         );
 
@@ -13543,12 +13537,12 @@ mod tests {
             ..Default::default()
         });
         assert!(
-            clean_custom_engine(&c, "我的引擎", "https://b/?q=%s", "", config::EngineKind::Search, "", false, "", false, 900, None).is_err(),
+            clean_custom_engine(&c, "我的引擎", "https://b/?q=%s", "", config::EngineKind::Search, "", false, "", false, 900, false, None).is_err(),
             "不该允许自定义引擎之间重名"
         );
         // 但编辑它自己时（skip 指向自己）必须放行，否则改个分类都存不了
         assert!(
-            clean_custom_engine(&c, "我的引擎", "https://b/?q=%s", "", config::EngineKind::Search, "", false, "", false, 900, Some(0)).is_ok(),
+            clean_custom_engine(&c, "我的引擎", "https://b/?q=%s", "", config::EngineKind::Search, "", false, "", false, 900, false, Some(0)).is_ok(),
             "编辑自己时不该被自己的名字挡住"
         );
     }
@@ -13557,17 +13551,17 @@ mod tests {
     fn custom_engine_rejects_bad_urls() {
         let c = empty_cfg();
         let s = config::EngineKind::Search;
-        assert!(clean_custom_engine(&c, "x", "", "", s, "", false, "", false, 900, None).is_err(), "空地址");
+        assert!(clean_custom_engine(&c, "x", "", "", s, "", false, "", false, 900, false, None).is_err(), "空地址");
         assert!(
-            clean_custom_engine(&c, "x", "example.com/?q=%s", "", s, "", false, "", false, 900, None).is_err(),
+            clean_custom_engine(&c, "x", "example.com/?q=%s", "", s, "", false, "", false, 900, false, None).is_err(),
             "缺协议"
         );
         assert!(
-            clean_custom_engine(&c, "x", "https://example.com/search", "", s, "", false, "", false, 900, None).is_err(),
+            clean_custom_engine(&c, "x", "https://example.com/search", "", s, "", false, "", false, 900, false, None).is_err(),
             "搜索类没有 %s 占位符"
         );
         assert!(
-            clean_custom_engine(&c, "x", "https://example.com/s?q=%s a", "", s, "", false, "", false, 900, None).is_err(),
+            clean_custom_engine(&c, "x", "https://example.com/s?q=%s a", "", s, "", false, "", false, 900, false, None).is_err(),
             "地址里有空格"
         );
     }
@@ -13579,21 +13573,21 @@ mod tests {
         let o = config::EngineKind::Open;
         // 打开类：没 %s 才收，有 %s 反而拒（原样打开，占位符没人替换）
         assert!(
-            clean_custom_engine(&c, "B 站", "https://www.bilibili.com/", "", o, "", false, "", false, 900, None).is_ok(),
+            clean_custom_engine(&c, "B 站", "https://www.bilibili.com/", "", o, "", false, "", false, 900, false, None).is_ok(),
             "打开类应当是纯终点地址"
         );
         assert_eq!(
-            clean_custom_engine(&c, "B 站", "https://www.bilibili.com/", "", o, "", false, "", false, 900, None).unwrap().kind,
+            clean_custom_engine(&c, "B 站", "https://www.bilibili.com/", "", o, "", false, "", false, 900, false, None).unwrap().kind,
             o,
             "种类要原样落到配置里"
         );
         assert!(
-            clean_custom_engine(&c, "B 站", "https://www.bilibili.com/video/%s", "", o, "", false, "", false, 900, None).is_err(),
+            clean_custom_engine(&c, "B 站", "https://www.bilibili.com/video/%s", "", o, "", false, "", false, 900, false, None).is_err(),
             "打开类带 %s 必须拒"
         );
         // 搜索类：有 %s 才收
         assert!(
-            clean_custom_engine(&c, "B 站", "https://search.bilibili.com/all?keyword=%s", "", s, "", false, "", false, 900, None).is_ok(),
+            clean_custom_engine(&c, "B 站", "https://search.bilibili.com/all?keyword=%s", "", s, "", false, "", false, 900, false, None).is_ok(),
             "搜索类必须带 %s"
         );
         // 非法种类串按搜索类处理（和 EngineKind::parse 的约定一致）
@@ -13614,17 +13608,17 @@ mod tests {
         let c = empty_cfg();
         let h = config::EngineKind::Hotkey;
         // 勾了开关、路径空 → 拒
-        let r = clean_custom_engine(&c, "我的快捷键", "", "", h, "ctrl+shift+t", true, "", false, 900, None);
+        let r = clean_custom_engine(&c, "我的快捷键", "", "", h, "ctrl+shift+t", true, "", false, 900, false, None);
         assert!(r.is_err(), "勾了开关却没选应用，必须拒：{r:?}");
         // 路径指向不存在的东西 → 拒（否则点图标那一刻才发现拉不起来）
         let r = clean_custom_engine(
             &c, "我的快捷键", "", "", h, "ctrl+shift+t", true,
-            r"C:\definitely\not\here-qs\app.exe", false, 900, None,
+            r"C:\definitely\not\here-qs\app.exe", false, 900, false, None,
         );
         assert!(r.is_err(), "不存在的应用路径必须拒：{r:?}");
         // 指向一个**真实存在**的文件 → 收（这里用当前 exe 自己，一定在）
         let me = std::env::current_exe().expect("取当前 exe").to_string_lossy().to_string();
-        let ok = clean_custom_engine(&c, "我的快捷键", "", "", h, "ctrl+shift+t", true, &me, false, 900, None);
+        let ok = clean_custom_engine(&c, "我的快捷键", "", "", h, "ctrl+shift+t", true, &me, false, 900, false, None);
         assert!(ok.is_ok(), "真实存在的应用应当收：{ok:?}");
         let e = ok.unwrap();
         assert!(e.bind_app, "开关要落库");
@@ -13646,7 +13640,7 @@ mod tests {
             } else {
                 "https://x/"
             };
-            let e = clean_custom_engine(&c, "某引擎", url, "", kind, "", true, &me, true, 900, None)
+            let e = clean_custom_engine(&c, "某引擎", url, "", kind, "", true, &me, true, 900, false, None)
                 .expect("应当能存");
             assert!(!e.bind_app, "{kind:?} 不该带 bind_app");
             assert!(e.app_path.is_empty(), "{kind:?} 不该带 app_path");
@@ -13688,6 +13682,7 @@ mod tests {
                 &me,
                 false,
                 ms,
+                false,
                 None,
             )
             .expect(why);
@@ -13711,6 +13706,7 @@ mod tests {
             &me,
             false,
             999_999,
+            false,
             None,
         )
         .expect("应当能存");
@@ -13726,7 +13722,7 @@ mod tests {
             (config::EngineKind::Search, "https://x/?q=%s"),
             (config::EngineKind::Open, "https://x/"),
         ] {
-            let e = clean_custom_engine(&c, "某引擎", url, "", kind, "", true, &me, true, 4321, None)
+            let e = clean_custom_engine(&c, "某引擎", url, "", kind, "", true, &me, true, 4321, false, None)
                 .expect("应当能存");
             assert_eq!(e.app_launch_delay, 0, "{kind:?} 不该带延迟");
         }
@@ -13760,9 +13756,20 @@ mod tests {
             app_path: String::new(),
             app_admin: false,
             app_launch_delay: 2500,
+            app_bring_front: false,
         });
         let e = engines::engine_entry_in(&cfg, "带延迟的键").expect("应当能查到");
         assert_eq!(e.app_launch_delay, 2500, "快捷键类要透出用户设的延迟");
+        /* r90 新增：`app_bring_front` 也要一路透到运行时视图。
+         *
+         * 用户要求「每一个快捷引擎里面添加个按钮」控制"要不要把主窗口调到前台"。
+         * 这个值存在 config::CustomEngine 上，但 `open_search` 读的是
+         * `EngineEntry`（运行时合并视图）—— 如果这里没透出，开关就永远读成
+         * 默认 false，用户勾了也没用。 */
+        assert!(
+            !e.app_bring_front,
+            "默认应当是 false（不动目标窗口），这个引擎没打开开关"
+        );
         // 内置条目取默认值（数据文件里没这个字段）
         let b = engines::engine_entry_in(&cfg, &builtin_name()).expect("内置引擎应当能查到");
         assert_eq!(

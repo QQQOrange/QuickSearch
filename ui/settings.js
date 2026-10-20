@@ -1830,6 +1830,10 @@ function syncCeBind() {
     if (adminRow) adminRow.hidden = !(bound && hasPath);
     // r76：启动延迟行同条件
     if (delayRow) delayRow.hidden = !(bound && hasPath);
+    /* r90：「把应用窗口调到前台」这一行也同条件 ——
+     * 没绑应用就谈不上"调谁到前台"。 */
+    const frontRow = $('ceBringFrontRow');
+    if (frontRow) frontRow.hidden = !(bound && hasPath);
 }
 
 function bindCeBind() {
@@ -2157,6 +2161,8 @@ function fillCeForm(idx) {
      * 老配置没有这个字段 → 900（后端 serde default 也是 900），与升级前的
      * 写死行为一致。 */
     $('w-ceAppDelay').value = Number(ce.app_launch_delay) > 0 ? ce.app_launch_delay : 900;
+    // r90：老配置没有这个字段 → undefined → false（默认不抢前台）
+    $('w-ceBringFront').checked = ce.app_bring_front === true;
     // 类型读回那条引擎自己的 kind（老配置没这个字段 → 搜索类）
     ceKind = ce.kind === 'open' ? 'open' : ce.kind === 'hotkey' ? 'hotkey' : 'search';
     // 编辑老引擎：按它自己的类型选一种方式把表单放出来（keep=true 别重置刚填的字段）
@@ -2189,6 +2195,8 @@ function resetCeForm() {
     $('w-ceAppAdmin').checked = false;
     // r76：启动延迟拨回默认 900（不是 0 —— 见 submitCeForm 里的同款注释）
     $('w-ceAppDelay').value = 900;
+    // r90：新引擎默认"不把窗口调到前台"
+    $('w-ceBringFront').checked = false;
     /* r88：表单清空时也要把"待取图标"那个待办清掉 ——
      * 不然用户取消/重置之后，下一次提交会把**上一条**引擎选的图标挂到
      * 新引擎上（串味，而且界面上看不出来）。 */
@@ -2248,6 +2256,8 @@ async function submitCeForm() {
     const bindApp = isHot && $('w-ceBindApp').checked;
     const appPath = isHot ? $('w-ceAppPath').value : '';
     const appAdmin = isHot && $('w-ceAppAdmin').checked;
+    /* r90：要不要把目标应用的主窗口调到前台（每个快捷键引擎独立） */
+    const appBringFront = isHot && $('w-ceBringFront').checked;
     // 延迟：不传 0 兜底，而是传**默认 900** —— 那是 r60 起"新拉起的应用多等一拍"
     // 的既有行为，用户没动过这个框时不该悄悄变成 0（会退回到"键打空"的老 bug）。
     const appLaunchDelay = (isHot && bindApp)
@@ -2266,13 +2276,13 @@ async function submitCeForm() {
         if (editing) {
             await invoke('update_custom_engine', {
                 index: ceEditIndex, name, url, category, kind: ceKind, hotkey,
-                bindApp, appPath, appAdmin, appLaunchDelay,
+                bindApp, appPath, appAdmin, appLaunchDelay, appBringFront,
             });
             toast('已保存');
         } else {
             await invoke('add_custom_engine', {
                 name, url, category, kind: ceKind, hotkey,
-                bindApp, appPath, appAdmin, appLaunchDelay,
+                bindApp, appPath, appAdmin, appLaunchDelay, appBringFront,
             });
             toast('已添加「' + name.trim() + '」');
         }
@@ -6513,6 +6523,14 @@ function webviewLabel() {
  *  但日志内容没跟着走）。现在**每条都写死自己的版本号**，
  *  发新版时**同时**加一条，对不上就是漏了。 */
 const CHANGELOG = [
+    {
+        ver: 'v1.3.3',
+        items: [
+            '<b>快捷键引擎：后台挂着的应用不再被强行换到前台</b> —— 你原来就提过这个：微信截图、章鱼速贴这类工具在后台挂着的时候，点横条上那颗图标，<b>没必要把它的主窗口整个弹出来</b>再发快捷键。现在默认就是<b>不动它的窗口</b>，直接把按键发给系统。',
+            '<b>每个快捷键引擎多了一个开关</b>：绑定应用那一组里新增「<b>把应用窗口调到前台再发键</b>」。<ul style="margin:4px 0 0 18px;padding:0"><li><b>不勾（默认）</b>：应用已经在后台跑 → 不弹它的窗口，你手上的事不被打断；</li><li><b>勾上</b>：每次触发都先把它的主窗口摆到最前面再按键 —— 适合必须在那个窗口里才生效的程序。</li></ul>应用<b>本来没开</b>时，两种情况都会先把它打开（那时会露出来，这是应该的）。',
+            '<b>说明</b>：老配置里没有这个字段，一律按"不勾"处理 —— 也就是升级后你会立刻得到想要的行为，不需要挨个去改。',
+        ],
+    },
     {
         ver: 'v1.3.2',
         items: [

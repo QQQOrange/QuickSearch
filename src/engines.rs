@@ -116,6 +116,14 @@ pub struct EngineEntry {
     /// 所以这里也要带一份 —— 否则 open_search 里读不到用户刚设的值。
     /// 内置条目一律取默认值（见 `config::default_app_launch_delay`）。
     pub app_launch_delay: u32,
+    /// **触发这个快捷键时，要不要把目标应用的主窗口调到前台**（r90）。
+    ///
+    /// 与 `config::CustomEngine::app_bring_front` 同义 —— 同 `app_launch_delay`
+    /// 的理由，运行时视图要带一份，否则 `open_search` 读不到用户刚设的值。
+    ///
+    /// 默认 `false`：应用已在后台就**不动它的窗口**，直接把按键交给系统路由。
+    /// 内置的快捷键条目一律 false（`engines.json` 里没有这个字段）。
+    pub app_bring_front: bool,
 }
 
 /// 直接从打包进去的 engines.json 里取 name -> (url, 种类)。
@@ -192,6 +200,8 @@ pub fn engines() -> &'static HashMap<String, EngineEntry> {
                                 app_path: String::new(),
                                 app_admin: false,
                                 app_launch_delay: config::default_app_launch_delay(),
+                                // 内置快捷键条目：默认"不抢前台"
+                                app_bring_front: false,
                             },
                         );
                     }
@@ -226,6 +236,7 @@ pub fn engine_entry_in(cfg: &config::Config, name: &str) -> Option<EngineEntry> 
                 app_path: String::new(),
                 app_admin: false,
                 app_launch_delay: config::default_app_launch_delay(),
+                app_bring_front: false,
             });
         }
     }
@@ -260,6 +271,8 @@ pub fn engine_entry_in(cfg: &config::Config, name: &str) -> Option<EngineEntry> 
             } else {
                 config::default_app_launch_delay()
             },
+            // r90：同 app_admin —— 只对快捷键类透出。
+            app_bring_front: e.kind == config::EngineKind::Hotkey && e.app_bring_front,
         });
     }
     engines().get(name).cloned()
