@@ -11621,8 +11621,11 @@ fn open_search(engine: String, text: Option<String>) {
                                 }
                             }
                         }
-                        // 已经在跑的也可能缩在后台：同样要等/找窗口来聚焦
-                        bound_window = win::wait_app_ready(&exe, 20000);
+                        /* 已经在跑的也可能缩在后台：同样要等/找窗口来聚焦。
+                         * ⚠ 但「本来就在跑」和「我们刚拉起」要区别对待：
+                         *   后者才需要为窗口多等（慢启动应用），前者（尤其是
+                         *   托盘常驻的 Octoclip 那种）多等纯粹是让用户干瞪眼。 */
+                        bound_window = win::wait_app_ready_ex(&exe, 20000, launched);
                         /* r60：**刚拉起来的应用，窗口出现 ≠ 能收键盘。**
                          *
                          * 用户报的正是这条：「应用没打开时点了快捷键，应用确实开了，
@@ -11701,23 +11704,54 @@ fn open_search(engine: String, text: Option<String>) {
                  * ⚠ 定向投递**可能不被响应**（少数程序只吃 RawInput，或者
                  *   窗口句柄不对）。所以失败了就**退回**原来的抢焦点路径，
                  *   保证功能不退化 —— 宁可偶尔弹一下窗口，也不能让快捷键失灵。 */
+                /* r89b：**三级投键策略**（每一级的理由都来自实测）。
+                 *
+                 * ① **有可见窗口 + 应用在后台** → `post_hotkey` 定向投递。
+                 *    完全不碰前台，用户手上正在做的事不被打断。
+                 *
+                 * ② **没有可见窗口**（托盘常驻 / 全局热键类应用）→
+                 *    `send_hotkey`（SendInput）**直接发，不抢焦点**。
+                 *
+                 *    这类应用的典型是 Octoclip（章鱼速贴）、各种剪贴板工具：
+                 *    实测它常驻托盘、主窗口 `Tauri Window` 是**隐藏**的，
+                 *    只有 `global_hotkey_app` 这种不可见窗口在。
+                 *    用户报的正是它们失灵：
+                 *      「用章鱼速贴快捷输入，它不能够换出来这个快捷键对应的效果」。
+                 *
+                 *    为什么 SendInput 反而对：它们的快捷键是**系统级全局热键**
+                 *    （RegisterHotKey 注册的），Windows 在 `SendInput` 之后就
+                 *    直接把它路由给注册者了 —— **根本不需要焦点**。
+                 *    而我上一版对这种应用去 `PostMessage` 一个隐藏窗口，
+                 *    那条消息没人处理，自然毫无反应。
+                 *
+                 * ③ 兜底：既没窗口、SendInput 也没成功 → 老路（抢焦点 + SendInput）。
+                 *
+                 * ⚠ ② 和 ③ 的区别只在"要不要抢焦点"。② 不抢，因为对方压根
+                 *   不需要前台；抢了反而把用户正在做的事打断（这正是用户
+                 *   报 bug 3 时明确反对的）。 */
                 let mut posted = false;
+                let mut sent_unfocused = false;
                 if !launched {
-                    if let Some(h) = bound_window {
-                        if win::is_visible(h) && !win::is_minimized(h) {
-                            posted = win::post_hotkey(h, spec);
-                            win::log(&format!(
-                                "open_search: {engine} 应用已在后台运行 → 定向投键（不抢焦点）→ {}",
-                                if posted { "成功" } else { "未响应，将退回抢焦点" }
-                            ));
-                        } else {
-                            win::log(&format!(
-                                "open_search: {engine} 应用在跑但窗口不可见/已最小化 → 走抢焦点"
-                            ));
-                        }
+                    let usable_win = bound_window
+                        .filter(|h| win::is_visible(*h) && !win::is_minimized(*h));
+                    if let Some(h) = usable_win {
+                        posted = win::post_hotkey(h, spec);
+                        win::log(&format!(
+                            "open_search: {engine} 有可见窗口 → 定向投键（不抢焦点）→ {}",
+                            if posted { "成功" } else { "未响应，将退回抢焦点" }
+                        ));
+                    } else {
+                        /* 没有可见窗口 → 当作"全局热键类应用"，直接发。
+                         * 不抢焦点：它不需要，抢了就是无谓的打扰。 */
+                        sent_unfocused = win::send_hotkey(spec);
+                        win::log(&format!(
+                            "open_search: {engine} 应用无可见窗口（托盘/全局热键类）\
+                             → 直接发键、不抢焦点 → {}",
+                            if sent_unfocused { "已发送" } else { "序列无法解析" }
+                        ));
                     }
                 }
-                if !posted && target != 0 {
+                if !posted && !sent_unfocused && target != 0 {
                     let t = HWND(target as *mut c_void);
                     if win::is_visible(t) && !win::is_minimized(t) {
                         for attempt in 0..10 {
@@ -11746,11 +11780,16 @@ fn open_search(engine: String, text: Option<String>) {
                         ));
                     }
                 }
-                /* r89：定向投递成功就不再走全局广播 —— 那样会**又**把键
-                 * 打到别人的前台窗口上（等于发两遍，可能误触别的软件的热键）。 */
+                /* r89：定向投递/无窗口直发成功后就不再走全局广播 —— 那样会
+                 * **又**把键打到别人的前台窗口上（等于发两遍，可能误触别的
+                 * 软件的热键）。 */
                 if posted {
                     win::log(&format!(
                         "open_search: {engine} 模拟按键 {spec} -> 已定向投递（前台未变动）"
+                    ));
+                } else if sent_unfocused {
+                    win::log(&format!(
+                        "open_search: {engine} 模拟按键 {spec} -> 已直接发送（全局热键类，前台未变动）"
                     ));
                 } else {
                     let ok = win::send_hotkey(spec);

@@ -61,3 +61,7 @@ tools/_*.json
 # `build.rs` 会自动拷到产物目录、随发布包分发。放法见 vendor/ort/README.md。
 vendor/ort/lib/*.dll
 vendor/ort/lib/*.lib
+
+# build artifacts: local target_build dir (used when exe is locked)
+/target_build/
+**/target_build/

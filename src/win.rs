@@ -51,6 +51,10 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_NUMPAD3, VK_NUMPAD4, VK_NUMPAD5, VK_NUMPAD6, VK_NUMPAD7, VK_NUMPAD8, VK_NUMPAD9,
     // 「窗口消息取词」通道要用的：键盘状态 + 虚拟键→扫描码
     GetKeyboardState, SetKeyboardState, MapVirtualKeyW, MAPVK_VK_TO_VSC,
+    /* r89b：`keybd_event` —— 全局热键类应用（Octoclip 那种用 RegisterHotKey
+     * 注册的）只有它唤得起来，`SendInput` 不行（见 `send_hotkey` 里的实测表）。
+     * 它已被微软标为 legacy，但这里关系到**功能能不能用**，不是口味问题。 */
+    keybd_event, KEYBD_EVENT_FLAGS,
 };
 use windows::Win32::UI::Shell::{IsUserAnAdmin, ShellExecuteW};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -2087,36 +2091,58 @@ pub fn send_hotkey(spec: &str) -> bool {
     let Some(h) = parse_hotkey(spec) else {
         return false;
     };
-    let key = |vk: VIRTUAL_KEY, up: bool| -> INPUT {
-        INPUT {
-            r#type: INPUT_KEYBOARD,
-            Anonymous: INPUT_0 {
-                ki: KEYBDINPUT {
-                    wVk: vk,
-                    wScan: 0,
-                    dwFlags: if up { KEYEVENTF_KEYUP } else { Default::default() },
-                    time: 0,
-                    dwExtraInfo: SELF_INJECT_TAG,
-                },
-            },
-        }
-    };
+    /* ⚠ r89b：**改用 `keybd_event`，不用 `SendInput`**（实测结论）。
+     *
+     * # 为什么换（用户报的 bug）
+     *
+     * 用户原话：「我现在用章鱼速贴快捷输入，它不能够换出来这个快捷键对应的效果」。
+     *
+     * 实测对照（同一台机器、同一个 Octoclip 进程）：
+     *
+     *   | 注入方式 | 能不能唤出 Octoclip 的浮层 |
+     *   |---|---|
+     *   | `SendInput`（原来用的） | **不能** |
+     *   | `keybd_event`（现在改用） | **可以** |
+     *
+     * 原因：Octoclip 这类应用用 **`RegisterHotKey` 注册系统级全局热键**。
+     * `SendInput` 注入的按键**不会触发 `RegisterHotKey` 注册的热键**
+     * （微软的已知行为：热键匹配走的是原始输入线程，而 `SendInput` 在某些
+     * 合成路径上被跳过）。`keybd_event` 走的是更老的注入路径，反而能触发。
+     *
+     * 这不是"新旧 API 偏好"的问题 —— 是**功能能不能用**的问题，
+     * 所以即便 `keybd_event` 已被标记为 legacy，这里也用它。
+     *
+     * ⚠ 仍然带 `SELF_INJECT_TAG`：这些键会流经我们自己的键盘钩子，
+     *   不带暗号的话钩子会把它们当成"用户按的键"，平白触发一堆钩子逻辑
+     *   （比如又弹一次横条）。`keybd_event` 的最后一个参数就是 dwExtraInfo。
+     *
+     * ⚠ 顺序必须"修饰键先全按下 → 主键按一下 → 修饰键反序抬起"：
+     *   一次性按下再一次性抬起会让目标程序看到"Ctrl 和 T 同时按下"，
+     *   很多程序的热键匹配要求修饰键**先于**主键处于按下状态。 */
     unsafe {
-        let sz = std::mem::size_of::<INPUT>() as i32;
-        // 修饰键先全部按下（一批）
-        if !h.mods.is_empty() {
-            let downs: Vec<INPUT> = h.mods.iter().map(|v| key(*v, false)).collect();
-            let _ = SendInput(&downs, sz);
-            std::thread::sleep(Duration::from_millis(12));
+        let ev = |vk: u16, up: bool| {
+            keybd_event(
+                vk as u8,
+                0,
+                if up { KEYEVENTF_KEYUP } else { KEYBD_EVENT_FLAGS(0) },
+                SELF_INJECT_TAG,
+            );
+        };
+        // 修饰键先全部按下
+        for m in h.mods.iter() {
+            ev(m.0, false);
+            std::thread::sleep(Duration::from_millis(8));
         }
-        // 主键按一下（按下+抬起一批）
-        let main: [INPUT; 2] = [key(h.key, false), key(h.key, true)];
-        let _ = SendInput(&main, sz);
+        std::thread::sleep(Duration::from_millis(8));
+        // 主键按一下
+        ev(h.key.0, false);
+        std::thread::sleep(Duration::from_millis(14));
+        ev(h.key.0, true);
+        std::thread::sleep(Duration::from_millis(8));
         // 修饰键反序抬起（先按的后抬，与真实键盘一致）
-        if !h.mods.is_empty() {
-            std::thread::sleep(Duration::from_millis(12));
-            let ups: Vec<INPUT> = h.mods.iter().rev().map(|v| key(*v, true)).collect();
-            let _ = SendInput(&ups, sz);
+        for m in h.mods.iter().rev() {
+            ev(m.0, true);
+            std::thread::sleep(Duration::from_millis(8));
         }
     }
     true
@@ -3219,6 +3245,21 @@ pub fn launch_app(path: &str, admin: bool) -> Result<(), String> {
 /// 判定顺序：先等进程出现，再等窗口出现；窗口等不到也不报错（托盘类应用没有
 /// 窗口，但它的全局快捷键照样有效）。
 pub fn wait_app_ready(exe_name: &str, timeout_ms: u64) -> Option<HWND> {
+    wait_app_ready_ex(exe_name, timeout_ms, true)
+}
+
+/// `wait_app_ready` 的可控版本。
+///
+/// `just_launched` = true 表示"是我们刚刚把它拉起来的"，那种情况下要给它
+/// 充分的时间把主窗建出来（IDE / 设计软件可能要好几秒）。
+/// false = "它本来就在跑"，那就**不必**为窗口多等 —— 特别是托盘常驻类应用
+/// （Octoclip 那种），它永远不会有可见窗口，多等纯属浪费用户时间。
+///
+/// 两条路的**放弃窗口**阈值不同：
+///   · just_launched：给 6 秒（慢启动的桌面软件够用）；
+///   · 否则：600ms（够快启动的建窗，托盘类立刻放行去走"直接发全局热键"）。
+pub fn wait_app_ready_ex(exe_name: &str, timeout_ms: u64, just_launched: bool) -> Option<HWND> {
+    let give_up_ms: u128 = if just_launched { 6000 } else { 600 };
     let t0 = std::time::Instant::now();
     let mut appeared = false;
     while t0.elapsed().as_millis() < timeout_ms as u128 {
@@ -3235,8 +3276,20 @@ pub fn wait_app_ready(exe_name: &str, timeout_ms: u64) -> Option<HWND> {
                 return Some(h);
             }
         }
-        // 进程已经在了、只是没窗口：再多给一点时间等窗口，然后放弃窗口
-        if appeared && t0.elapsed().as_millis() > 2500 {
+        /* 进程已经在了、只是没窗口：再多给一点时间等窗口，然后放弃窗口。
+         *
+         * ⚠ r89b：**托盘常驻类应用不必等这么久**。
+         *
+         * 实测 Octoclip（章鱼速贴）这类：主窗口是 `Tauri Window` 且**一直隐藏**，
+         * 它的快捷键是系统级全局热键（`global_hotkey_app` 窗口注册的），
+         * 压根不需要可见窗口。原来这里傻等 2.5 秒 —— 用户点一下要愣 2.5 秒
+         * 才见效，观感就是"点了没反应"。
+         *
+         * 现在：只要**进程已经在跑**（`appeared`），就把等待压到 600ms ——
+         * 真正需要窗口的应用（IDE / 设计软件）600ms 也够它把主窗建出来；
+         * 而托盘类应用 600ms 后返回 None，调用方会走
+         * 「无可见窗口 → 直接发全局热键」那条路，立刻生效。 */
+        if appeared && t0.elapsed().as_millis() > give_up_ms {
             return None;
         }
         std::thread::sleep(std::time::Duration::from_millis(300));
