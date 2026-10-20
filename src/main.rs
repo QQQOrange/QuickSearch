@@ -11704,54 +11704,42 @@ fn open_search(engine: String, text: Option<String>) {
                  * ⚠ 定向投递**可能不被响应**（少数程序只吃 RawInput，或者
                  *   窗口句柄不对）。所以失败了就**退回**原来的抢焦点路径，
                  *   保证功能不退化 —— 宁可偶尔弹一下窗口，也不能让快捷键失灵。 */
-                /* r89b：**三级投键策略**（每一级的理由都来自实测）。
+                /* r89c：**老老实实模拟按键，不做任何"聪明"的处理**（用户要求）。
                  *
-                 * ① **有可见窗口 + 应用在后台** → `post_hotkey` 定向投递。
-                 *    完全不碰前台，用户手上正在做的事不被打断。
+                 * 用户原话：「我就希望快捷键引擎，你能够老老实实的模仿按键输出
+                 * 就可以了，不要做一些自以为是的改变」。
                  *
-                 * ② **没有可见窗口**（托盘常驻 / 全局热键类应用）→
-                 *    `send_hotkey`（SendInput）**直接发，不抢焦点**。
+                 * # 我前几版都错在哪
                  *
-                 *    这类应用的典型是 Octoclip（章鱼速贴）、各种剪贴板工具：
-                 *    实测它常驻托盘、主窗口 `Tauri Window` 是**隐藏**的，
-                 *    只有 `global_hotkey_app` 这种不可见窗口在。
-                 *    用户报的正是它们失灵：
-                 *      「用章鱼速贴快捷输入，它不能够换出来这个快捷键对应的效果」。
+                 * 我一直在给它加"避免抢焦点"的聪明机制，结果把功能弄坏了：
                  *
-                 *    为什么 SendInput 反而对：它们的快捷键是**系统级全局热键**
-                 *    （RegisterHotKey 注册的），Windows 在 `SendInput` 之后就
-                 *    直接把它路由给注册者了 —— **根本不需要焦点**。
-                 *    而我上一版对这种应用去 `PostMessage` 一个隐藏窗口，
-                 *    那条消息没人处理，自然毫无反应。
+                 *   · v1.3.0 加了 `post_hotkey`（PostMessage 定向投递）；
+                 *   · v1.3.1 又加了"没窗口就直接发"的分支。
                  *
-                 * ③ 兜底：既没窗口、SendInput 也没成功 → 老路（抢焦点 + SendInput）。
+                 * 而用户日志显示的实际结果是：
                  *
-                 * ⚠ ② 和 ③ 的区别只在"要不要抢焦点"。② 不抢，因为对方压根
-                 *   不需要前台；抢了反而把用户正在做的事打断（这正是用户
-                 *   报 bug 3 时明确反对的）。 */
-                let mut posted = false;
-                let mut sent_unfocused = false;
-                if !launched {
-                    let usable_win = bound_window
-                        .filter(|h| win::is_visible(*h) && !win::is_minimized(*h));
-                    if let Some(h) = usable_win {
-                        posted = win::post_hotkey(h, spec);
-                        win::log(&format!(
-                            "open_search: {engine} 有可见窗口 → 定向投键（不抢焦点）→ {}",
-                            if posted { "成功" } else { "未响应，将退回抢焦点" }
-                        ));
-                    } else {
-                        /* 没有可见窗口 → 当作"全局热键类应用"，直接发。
-                         * 不抢焦点：它不需要，抢了就是无谓的打扰。 */
-                        sent_unfocused = win::send_hotkey(spec);
-                        win::log(&format!(
-                            "open_search: {engine} 应用无可见窗口（托盘/全局热键类）\
-                             → 直接发键、不抢焦点 → {}",
-                            if sent_unfocused { "已发送" } else { "序列无法解析" }
-                        ));
-                    }
-                }
-                if !posted && !sent_unfocused && target != 0 {
+                 *     open_search: 章鱼速贴快捷输入 有可见窗口 → 定向投键 → 成功
+                 *     模拟按键 alt+v -> 已定向投递（前台未变动）
+                 *
+                 * **"成功"是假的** —— `PostMessage` 返回成功只代表"消息塞进了
+                 * 消息队列"，那个隐藏窗口根本不处理它。Octoclip 的 alt+v 是
+                 * **系统级全局热键**（RegisterHotKey），只有真正的键盘输入
+                 * （SendInput / keybd_event）才会被 Windows 路由给它。
+                 *
+                 * # 现在的做法：只有一条路
+                 *
+                 * **先确保目标应用在前台 → 再用 SendInput 发键。**
+                 * 这就是用户说的"老老实实模仿按键"。没有定向投递、
+                 * 没有"没有窗口就特殊处理"、没有花活。
+                 *
+                 * ⚠ 关于"不要把窗口换出来"（v1.3.0 的 bug 3）：那条要求我保留在
+                 * **另一个地方** —— `restore_focus_to` 只在**确实需要**时才调用，
+                 * 而且下面依然会先试着让目标就位。但**功能正确优先于观感**：
+                 * 按键发不对，界面再"不打扰"也没有意义。
+                 *
+                 * 这一点用户已经明确表态过两次，我按他的来。 */
+                if target != 0 {
+
                     let t = HWND(target as *mut c_void);
                     if win::is_visible(t) && !win::is_minimized(t) {
                         for attempt in 0..10 {
@@ -11780,18 +11768,25 @@ fn open_search(engine: String, text: Option<String>) {
                         ));
                     }
                 }
-                /* r89：定向投递/无窗口直发成功后就不再走全局广播 —— 那样会
-                 * **又**把键打到别人的前台窗口上（等于发两遍，可能误触别的
-                 * 软件的热键）。 */
-                if posted {
-                    win::log(&format!(
-                        "open_search: {engine} 模拟按键 {spec} -> 已定向投递（前台未变动）"
-                    ));
-                } else if sent_unfocused {
-                    win::log(&format!(
-                        "open_search: {engine} 模拟按键 {spec} -> 已直接发送（全局热键类，前台未变动）"
-                    ));
-                } else {
+                /* r89c：**只有一条路 —— 模拟按键**。
+                 * 不再有"定向投递/无窗口直发"那些分支（它们把功能弄坏了，
+                 * 见上面那段长注释）。 */
+                /* ⚠⚠ r89c：**必须先把横条收起来，再发键**（这是真 bug）。
+                 *
+                 * 用户日志里的证据：`dismiss_bar` 排在发键**之后**，于是发键那一
+                 * 瞬间**横条自己还占着前台**（用户刚点完图标，焦点在我们窗口里）。
+                 * `keybd_event` 发出去的 alt+v 打到了我们自己身上 ——
+                 * 而 Octoclip 的 alt+v 是**系统级全局热键**，它要求"前台不是
+                 * 我们自己"才不会被自己的窗口吃掉。
+                 *
+                 * 所以我前几版无论用 PostMessage 还是 keybd_event 都唤不动它：
+                 * 不是注入方式的问题，是**发键的时候我们自己还在前台**。
+                 *
+                 * 修法：先收横条（前台会自动回到用户刚才那个窗口），
+                 * 再发键。横条本来也就在收起的路上，顺序换一下而已。 */
+                dismiss_bar();
+                std::thread::sleep(Duration::from_millis(60));
+                {
                     let ok = win::send_hotkey(spec);
                     win::log(&format!(
                         "open_search: {engine} 模拟按键 {spec} -> {} 投向={}",
@@ -11799,10 +11794,11 @@ fn open_search(engine: String, text: Option<String>) {
                         if aimed {
                             format!("目标窗口 0x{target:x}")
                         } else {
-                            "当前前台".to_string()
+                            "当前前台（横条已先收起）".to_string()
                         }
                     ));
                 }
+                return;
             }
             None => win::log(&format!("open_search: {engine} 是快捷键类但没配按键")),
         }
