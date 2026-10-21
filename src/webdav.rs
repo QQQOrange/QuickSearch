@@ -509,6 +509,11 @@ fn encode_seg(s: &str) -> String {
 fn agent(o: &Opts) -> ureq::Agent {
     let t = o.timeout_secs.clamp(3, 60);
     ureq::AgentBuilder::new()
+        // ★ r94：IPv4 优先。坚果云（dav.jianguoyun.com）同样有 AAAA 记录，
+        //   本机 IPv6 连不通 → 不挂这个每个请求都要先白等一次 IPv6 超时。
+        //   同步是"启动时同步 / 退出时同步"，白等的那几秒直接变成开机感知变慢。
+        //   原因与量据见 crate::net::ipv4_first。
+        .resolver(crate::net::ipv4_first)
         .timeout_connect(Duration::from_secs(t.min(6)))
         .timeout(Duration::from_secs(t))
         // ⚠ **不复用空闲连接**（0 = 一个都不留）。

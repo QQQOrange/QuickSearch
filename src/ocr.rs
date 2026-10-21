@@ -20,7 +20,6 @@
 //! 于是「高精度没开通」的账号照样能用，只是精度差一点；真的识别成功时会在结果里
 //! 标出用的是哪一档，用户想升级去百度控制台开通即可。
 
-use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -97,30 +96,11 @@ pub struct Outcome {
 
 /// 解析结果重排：IPv4 排在 IPv6 前面。
 ///
-/// ⚠ 这不是「优化」，是绕开一个**只能靠超时才发现**的坑。
-///
-/// Windows 的 getaddrinfo 按「前缀策略」排序，默认 IPv6（`::/0`，优先级 40）
-/// 排在 IPv4（`::ffff:0:0/96`，优先级 35）前面。可如果这台机器**有**全局 IPv6
-/// 地址、**也有** IPv6 默认路由，而实际上游是黑的（路由器播发了 IPv6 前缀、
-/// 整条链路却不通），那连 IPv6 就是「包发出去没人理」——既不会立刻报错，
-/// 也没有 RST，只能干等超时。这类「假 IPv6」机器一点都不罕见。
-///
-/// 而 ureq 是**按 getaddrinfo 返回的顺序逐个地址试**的
-/// （ureq `stream.rs::connect_host`：`for sock_addr in sock_addrs`），
-/// 所以每个请求都得先白等一次 IPv6 连接超时，才回退到 IPv4。
-/// 实测（本机）：IPv4 直连 0.02s 就能通，但因为 IPv6 排在前面，
-/// 每次请求要多等 3s —— `timeout_connect` 设的是 6s，ureq 发现有两个地址时
-/// 会把它一分为二，IPv6 独占一半。
-///
-/// 把 IPv4 排到前面即可整段绕开；只有真没有 A 记录（纯 IPv6 主机）时才会走
-/// IPv6，行为不变。同族地址之间保持原有相对顺序（`sort_by_key` 是稳定排序）。
-///
-/// 注意：`netloc` 形如 `"aip.baidubce.com:443"`。
-fn ipv4_first(netloc: &str) -> std::io::Result<Vec<SocketAddr>> {
-    let mut addrs: Vec<SocketAddr> = netloc.to_socket_addrs()?.collect();
-    addrs.sort_by_key(|a| a.is_ipv6());
-    Ok(addrs)
-}
+/// ⚠ 这个函数已经搬到 `net::ipv4_first`（r94）—— 因为除了 OCR，识图上传、
+/// 模型下载、WebDAV 同步、检查更新全中同一个招。这里保留一行转出，
+/// 免得把这个文件里所有 `.resolver(...)` 和单测都改一遍；
+/// **原因与实测量据见 `crate::net::ipv4_first` 的注释**（那边是权威版本）。
+use crate::net::ipv4_first;
 
 pub(crate) fn agent(timeout_secs: u64) -> ureq::Agent {
     let t = timeout_secs.clamp(5, 60);
@@ -1225,17 +1205,8 @@ mod tests {
         assert!(ocr_error(120, "").contains("余额"));
     }
 
-    #[test]
-    fn ipv4_is_preferred_over_ipv6() {
-        // 只有一族地址时这条退化成「重排不产生副作用」，不会失败；
-        // 两族都有（localhost 在多数机器上是 ::1 + 127.0.0.1）时才是真断言。
-        let addrs = ipv4_first("localhost:80").expect("localhost 应该能解析");
-        let first_v6 = addrs.iter().position(SocketAddr::is_ipv6);
-        let last_v4 = addrs.iter().rposition(SocketAddr::is_ipv4);
-        if let (Some(v6), Some(v4)) = (first_v6, last_v4) {
-            assert!(v4 < v6, "IPv4 必须排在 IPv6 前面，实际顺序：{addrs:?}");
-        }
-    }
+    // r94：`ipv4_is_preferred_over_ipv6` 这条单测搬去了 `net.rs`（原函数）
+    // —— 同一个断言只留一份，改行为时不会只改了一处。
 
     #[test]
     fn paragraphs_restore_reading_order() {

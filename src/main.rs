@@ -27,6 +27,10 @@ mod engines;
 //      图标编辑器「自动描边 + 消除背景」的核心算法，独立成模块以便单测与阅读。
 //      纯算法，不依赖 Tauri / 窗口 / 配置锁。
 mod matting;
+// r94：网络小工具（IPv4 优先的 DNS 解析器）。本机是「假 IPv6」环境——
+//      getaddrinfo 把不通的 IPv6 排前面，ureq 于是每个请求白等 4~6 秒。
+//      所有自建 ureq Agent 的地方都要挂 `net::ipv4_first`，见那个函数的注释。
+mod net;
 // r80：AI 抠图。`aimodels` 管模型清单/下载，`aimatte` 管 ONNX 推理。
 //      两者都自包含（不依赖窗口/配置锁），方便单测；模型由用户按需下载，
 //      不随程序分发。运行时需要同目录的 onnxruntime.dll。
@@ -2680,10 +2684,39 @@ fn spawn_detector() {
                     }
                     Ev::Up(x, y, t) => {
                         let d = down.take();
-                        let was = dragging;
+                        /* ══════════════════════════════════════════════════
+                         * r93：**拖动判定不能只靠 Move 事件**（用户报"有时候不弹"）
+                         *
+                         * 用户原话：「有时候选中文本它并不会弹出横条，比如说我现在在
+                         *   deepseekhass 里面，我选中文本框里面的有时候不会弹，
+                         *   但有时候又会弹，所以这中间就让我有些困惑，感觉是个 bug。」
+                         *
+                         * 他的日志里每一行都是 `mouseup: drag=false` ——
+                         * 明明在划选，却被判成"点击"。
+                         *
+                         * 根因：`dragging` 只由 `Ev::Move` 置位（位移 > 4px 才置）。
+                         * 而低级鼠标钩子在高频拖动 / 事件队列压力下**会丢 Move 事件**
+                         * （系统会合并快速移动，或者我们的消费线程来不及处理）。
+                         * Move 丢光 → `dragging` 恒 false → 整条取词被否掉。
+                         *
+                         * 为什么"有时候又弹"：慢慢划（Move 事件密集）能置上；
+                         * 快速划（Move 被合并）就置不上。这正是"时灵时不灵"的来源。
+                         *
+                         * 修法：**在 Up 时直接用起点与终点的距离判定**。
+                         * 这是最可靠的信号 —— 它不依赖中间过程有没有事件丢失。
+                         * Move 那条路保留（它能让 `dragging` 更早为真，
+                         * 供别的地方参考），但**不再是唯一依据**。
+                         * ══════════════════════════════════════════════════ */
+                        let moved_far = match d {
+                            Some((sx, sy, _)) => {
+                                (x - sx).abs() > 4 || (y - sy).abs() > 4
+                            }
+                            None => false,
+                        };
+                        let was = dragging || moved_far;
                         dragging = false;
                         win::log(&format!(
-                            "mouseup: drag={} from={:?} at=({},{})",
+                            "mouseup: drag={} (move={was} moved_far={moved_far}) from={:?} at=({},{})",
                             was, d, x, y
                         ));
                         // OCR 框选遮罩铺满了全屏还置顶：此刻的一次拖动只是用户
@@ -6010,6 +6043,7 @@ fn img_upload(e: &imgsearch::Engine, jpeg: &[u8]) -> Result<String, String> {
     if e.upload == Upload::None {
         return Err("这家没有上传接口".into());
     }
+
     let boundary = format!(
         "----qsBoundary{:016x}{:016x}",
         std::time::SystemTime::now()
@@ -6099,6 +6133,17 @@ fn img_upload(e: &imgsearch::Engine, jpeg: &[u8]) -> Result<String, String> {
         static POOL: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
         POOL.get_or_init(|| {
             ureq::AgentBuilder::new()
+                /* ★ r94：**IPv4 优先** —— 这才是用户报"百度识图好慢"的真根因。
+                 *
+                 * 本机是「假 IPv6」环境：`graph.baidu.com` 的 getaddrinfo 把
+                 * 两条 AAAA 排在两条 A 前面，而 IPv6 实测 **6 秒超时**（有地址、
+                 * 有默认路由，上游却是黑的），IPv4 只要 14~27ms 就通。
+                 * ureq 按 getaddrinfo 顺序逐个试 → 每个上传请求先白等一次
+                 * IPv6 超时。日志实证：`baidu 上传完成，开结果页（6613ms）`，
+                 * 而同一个请求换成 IPv4 只要 0.6~1.0 秒。
+                 *
+                 * 详见 crate::net::ipv4_first 的长注释。 */
+                .resolver(crate::net::ipv4_first)
                 .timeout_connect(Duration::from_secs(8))
                 .timeout(Duration::from_secs(12))
                 .max_idle_connections(16)
@@ -6745,10 +6790,6 @@ fn img_region(x: f64, y: f64, w: f64, h: f64, dpr: f64) {
             opened += open_one(e, &mut problems, &mut pending_upload);
         }
 
-        /* 上传类（真 POST 的那几家）在这一段里等回来 —— AI 六家都是 Page 类，
-         * 走不到这里；留着是为了将来若有人把 AI 家改成 Upload 档不出错。 */
-        drain_uploads(&mut pending_upload, &jpeg, &mut problems, &mut opened);
-
         /* r65：这一轮里有 AI 识图引擎 → 补一次 Ctrl+V（用户授权）。
          * 只对 AI 那几家；别的引擎一个键都不发。
          * r70：名单走注册表的 `is_ai_engine`（imgsearch::AI_ENGINES），
@@ -6756,14 +6797,81 @@ fn img_region(x: f64, y: f64, w: f64, h: f64, dpr: f64) {
          * r76：判据收进 `img_should_paste` —— 多了「勾多家就默认关掉按键」
          *   这一条（用户原话见那个函数的注释），延迟也改成可配。 */
         let want_paste = img_should_paste(&plan, pasted, &cfg);
+        /* ══════════════════════════════════════════════════════════════════
+         * r93：**AI 按键转独立线程，且上传与按键并行**（用户报"百度识图好慢"）
+         *
+         * # 用户报的两个问题（同一段代码）
+         *
+         *   · 「一定要优化一下识图搜索的速度，识图搜索用百度引擎来搜索图片，
+         *      速度真的好慢好慢，要等好多秒才能打开新标签，那这一定要修一下。」
+         *   · 「如果同时打开了识图以及看图，那这时候看图功能的通过按键延迟自动
+         *      输入的功能好像就没有了…如果是勾了一个识图一个看图，那这时候看图
+         *      页面也要有相关的按键触发呀，而且要触发完按键之后再打开识图的新
+         *      标签页。」
+         *
+         * # 实测真相
+         *
+         * 用户日志里的关键一行：`img: baidu 上传完成，开结果页（6613ms）`，
+         * 而我直接打百度 upload 接口只要 **0.92 秒**（`status:0 Success`）。
+         * 差的 5~6 秒全在这里：`img_paste_into_browser` 是**同步阻塞**的 ——
+         * 先 sleep(open_delay)（默认 1200ms），再 sleep(enter_delay)（900ms），
+         * 中间还有"等浏览器到前台"的循环（最多 30×150ms）；而它排在
+         * `drain_uploads`（真正开百度结果页的地方）**前面** ——
+         * 百度明明 0.9 秒就传完了，却要等 AI 那段走完才开页。
+         *
+         * # 必须同时满足
+         *
+         *   ① **AI 的按键先执行完**，再开识图页 —— 否则新标签抢前台，
+         *      Ctrl+V 会打进搜索引擎的搜索框（原设计的理由，成立）；
+         *   ② **别让百度这类上传白等** —— 它的 HTTP 0.9 秒就回来了；
+         *   ③ 两件事互不依赖（按键等浏览器前台；上传等 HTTP），可以并行 ——
+         *      `img_open_tab` 只是 ShellExecute 一个 URL，不抢前台。
+         *
+         * # 做法
+         *
+         * ① 先起按键线程：它一进去就先 sleep(open_delay) 等 AI 页面首屏；
+         * ② 上传在**这段时间里**飞出去（0.9s 被完全盖住，不额外等）；
+         * ③ 主流程用 channel 等"按键完成"，拿到才开识图页。
+         *
+         * ⚠ 顺序语义保留：AI 页面**先**开（上面的 ai_part 循环），按键线程在
+         *   页面已开之后才启动，所以 Ctrl+V 不会打到空标签页上。
+         * ⚠ 不开 AI（want_paste=false）时立刻开页，一秒不耽误。
+         * ══════════════════════════════════════════════════════════════════ */
+        let mut paste_done: Option<std::sync::mpsc::Receiver<()>> = None;
         if want_paste {
-            img_paste_into_browser(
-                cfg.img_ai_paste_delay as u64,
-                cfg.img_ai_enter_delay as u64,
-            );
+            let od = cfg.img_ai_paste_delay as u64;
+            let ed = cfg.img_ai_enter_delay as u64;
+            let (tx, rx) = std::sync::mpsc::channel::<()>();
+            std::thread::spawn(move || {
+                img_paste_into_browser(od, ed);
+                let _ = tx.send(());
+            });
+            win::log("img: AI 按键已启动（独立线程），等它完成后才开识图页");
+            paste_done = Some(rx);
         }
 
-        // —— 第二段：其余识图网址（AI 按键已经收尾，前台归它自己）——
+        /* 上传在**按键线程睡着等首屏**的同时飞出去。结果先攒着不开页 ——
+         * 开页要等按键完成（见上）。
+         *
+         * ⚠ AI 六家都是 Page 类，走不到这里；留着是为了将来若有人把 AI 家
+         *   改成 Upload 档不出错。 */
+        let ai_uploads = upload_all(&mut pending_upload, &jpeg, &mut problems);
+
+        if let Some(rx) = paste_done {
+            /* 等按键完成。上限 12 秒 —— 比按键路径的最坏耗时
+             * （open 1.2s + 30×0.15s + enter 0.9s ≈ 6.6s）留一倍余量；
+             * 超时也不卡死：照常开页（宁可开页晚一点，不能让识图整个不动）。 */
+            match rx.recv_timeout(Duration::from_secs(12)) {
+                Ok(()) => win::log("img: AI 按键完成，现在开识图页"),
+                Err(_) => win::log("img: 等 AI 按键超时（12s），仍然继续开识图页"),
+            }
+        }
+
+        /* AI 段的上传结果现在才开页（按键已经完成，前台安全）。
+         * 实测：上传早在 AI 按键那 2 秒里就跑完了，这里几乎是瞬开。 */
+        open_uploaded(&ai_uploads, &mut problems, &mut opened);
+
+        // —— 第二段：其余识图网址（AI 按键已完成，前台归它自己）——
         for e in &rest_part {
             opened += open_one(e, &mut problems, &mut pending_upload);
         }
@@ -6862,38 +6970,74 @@ fn drain_uploads(
     problems: &mut Vec<String>,
     opened: &mut usize,
 ) {
+    // 兼容入口：上传完立刻开页（不等 AI 按键）。保留给"没有 AI 按键"的那一轮。
+    let done = upload_all(pending, jpeg, problems);
+    open_uploaded(&done, problems, opened);
+}
+
+/// 上传结果：`(引擎 id, 结果)`。成功是结果页 URL，失败是原因。
+type UploadDone = Vec<(String, Result<String, String>)>;
+
+/// **只上传、不开页** —— 让 HTTP 请求尽早飞出去。
+///
+/// r93 拆出来是为了解决"百度识图要等 AI 按键好几秒"：
+/// 上传是纯网络操作（实测 0.9 秒），开页才是要排队的动作。
+/// 拆开之后可以在 AI 按键**同时**上传，等按键完成再统一开页。
+fn upload_all(
+    pending: &mut Vec<&'static imgsearch::Engine>,
+    jpeg: &[u8],
+    _problems: &mut Vec<String>,
+) -> UploadDone {
     if pending.is_empty() {
-        return;
+        return Vec::new();
     }
     let (tx, rx) = std::sync::mpsc::channel::<(String, Result<String, String>)>();
     for e in pending.drain(..) {
         let tx = tx.clone();
         let jpeg = jpeg.to_vec();
         std::thread::spawn(move || {
+            /* 每家的上传耗时单独记一行。
+             *
+             * 这一行是 r94 那个「IPv4 优先」的**发现过程**：用户报"百度识图好慢"，
+             * 全靠日志里 `（6613ms）` 这个数字才定位到 DNS 而不是对方服务器。
+             * 拆函数时它一度丢了，现在补回来 —— 网络慢是最容易复发的一类问题，
+             * 没有这行数字，下次只能靠猜。 */
+            let t0 = std::time::Instant::now();
             let r = img_upload(e, &jpeg);
+            win::log(&format!(
+                "img: {} 上传耗时 {}ms（{}）",
+                e.id,
+                t0.elapsed().as_millis(),
+                if r.is_ok() { "成功" } else { "失败" }
+            ));
             let _ = tx.send((e.id.to_string(), r));
         });
     }
     drop(tx);
-    let t_up = std::time::Instant::now();
+    let mut out: UploadDone = Vec::new();
     while let Ok((id, r)) = rx.recv() {
+        out.push((id, r));
+    }
+    out
+}
+
+/// 把上传结果**开成标签页**（成功的开结果页、失败的退回上传页）。
+fn open_uploaded(done: &UploadDone, problems: &mut Vec<String>, opened: &mut usize) {
+    for (id, r) in done {
         match r {
             Ok(u) => {
-                win::log(&format!(
-                    "img: {id} 上传完成，开结果页（{}ms）",
-                    t_up.elapsed().as_millis()
-                ));
-                img_open_tab(&u);
+                win::log(&format!("img: {id} 上传完成，开结果页"));
+                img_open_tab(u);
                 *opened += 1;
             }
             Err(msg) => {
-                /* r78：回到旧逻辑 —— 上传失败时**退回打开上传页**。
+                /* r78：上传失败时**退回打开上传页**。
                  * （r77 因为"进队列时已经先开过上传页"而删掉了这一手，
                  *  现在那个页面不再提前打开，所以这里必须补回来，
                  *  否则用户点了一家、失败后**什么页面都没有**。） */
                 win::log(&format!("img: {id} 上传失败（{msg}），退回打开页面"));
                 problems.push(format!("{id} 上传失败（{msg}）"));
-                if let Some(e) = imgsearch::find(&id) {
+                if let Some(e) = imgsearch::find(id) {
                     img_open_tab(e.page);
                     *opened += 1;
                 }
@@ -12711,6 +12855,42 @@ fn main() {
         match r {
             Ok(old) => println!("OK old={}", old.display()),
             Err(e) => println!("ERR={e}"),
+        }
+        std::process::exit(0);
+    }
+    // --img-upload-probe <引擎id> <图片路径>：只跑一次「上传」并把耗时打到 stdout。
+    //
+    // 存在的理由（r94）：用户报「识图搜索用百度引擎来搜索图片，速度真的好慢好慢，
+    // 要等好多秒才能打开新标签」。日志里是
+    //   `img: baidu 上传完成，开结果页（6613ms）`
+    // 但"慢"到底慢在 DNS、连接、还是对方服务器，光看这一行分不出来。
+    // 这条 run-and-exit 的探针把「上传」这一段单独拎出来计时，于是
+    // 「IPv4 优先到底快了多少」可以量化，而不是靠感觉说"好像快了点"。
+    //
+    // 用法（不进界面、不写配置）：
+    //   QuickSearch.exe --img-upload-probe baidu "%TEMP%\QuickSearch\img\shot.jpg"
+    if let Some(i) = args.iter().position(|a| a == "--img-upload-probe") {
+        let id = args.get(i + 1).cloned().unwrap_or_else(|| "baidu".into());
+        let path = args.get(i + 2).cloned().unwrap_or_default();
+        let Some(e) = imgsearch::find(&id) else {
+            println!("ERR=没有这个引擎：{id}");
+            std::process::exit(1);
+        };
+        let jpeg = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(err) => {
+                println!("ERR=读不出图片（{path}）：{err}");
+                std::process::exit(1);
+            }
+        };
+        println!("ENGINE={}", e.id);
+        println!("BYTES={}", jpeg.len());
+        let t0 = std::time::Instant::now();
+        let r = img_upload(e, &jpeg);
+        println!("MS={}", t0.elapsed().as_millis());
+        match r {
+            Ok(u) => println!("OK={u}"),
+            Err(m) => println!("ERR={m}"),
         }
         std::process::exit(0);
     }

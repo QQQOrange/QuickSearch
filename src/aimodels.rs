@@ -445,6 +445,11 @@ fn agent() -> ureq::Agent {
     static POOL: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
     POOL.get_or_init(|| {
         ureq::AgentBuilder::new()
+            // ★ r94：IPv4 优先。本机是「假 IPv6」环境（IPv6 有地址有路由但连不通），
+            //   ureq 按 getaddrinfo 顺序逐个试，会先白等一次 IPv6 超时才开始下载
+            //   —— 对 168MB 的模型下载来说，这一下就是"点了没反应"。
+            //   原因与实测量据见 crate::net::ipv4_first。
+            .resolver(crate::net::ipv4_first)
             .timeout_connect(std::time::Duration::from_secs(15))
             .timeout(std::time::Duration::from_secs(1800))
             .user_agent("QuickSearch/1.0 (Windows)")

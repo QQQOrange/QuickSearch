@@ -160,6 +160,11 @@ pub fn sha_from_notes(notes: &str) -> String {
 /// `ureq` 客户端（查更新用，带超时与 UA）。
 fn agent() -> ureq::Agent {
     ureq::AgentBuilder::new()
+        // ★ r94：IPv4 优先 —— 本机 IPv6 有地址有路由但连不通，不挂这个
+        //   每次请求都要先白等一次 IPv6 连接超时（实测 6s）。
+        //   「检查更新」本来就在启动后不久跑，用户最容易觉得"卡住了"。
+        //   原因与量据见 crate::net::ipv4_first。
+        .resolver(crate::net::ipv4_first)
         .timeout(std::time::Duration::from_secs(TIMEOUT_SECS))
         // GitHub API 对没有 UA 的请求会拒（403）。这个 UA 是"我们是谁"的最小声明。
         .user_agent(concat!("QuickSearch/", env!("CARGO_PKG_VERSION")))
@@ -219,6 +224,9 @@ pub fn check(current: &str) -> Result<UpdateInfo, String> {
 ///   现在两种形状都认：先看 `Ok(resp)` 的状态码，再兜底 match `Err(Status)`。
 fn latest_tag() -> Result<String, String> {
     let a = ureq::AgentBuilder::new()
+        // ★ r94：IPv4 优先（见 crate::net::ipv4_first）。这条是"查更新"的第一跳，
+        //   不挂它就要先白等一次 IPv6 超时，用户看到的是"检查更新半天没反应"。
+        .resolver(crate::net::ipv4_first)
         .timeout(std::time::Duration::from_secs(TIMEOUT_SECS))
         .user_agent(concat!("QuickSearch/", env!("CARGO_PKG_VERSION")))
         // 不跟随重定向：我们要的就是那个 Location

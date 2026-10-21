@@ -1893,52 +1893,107 @@ fn load_backup_of(path: &std::path::Path) -> Option<Config> {
         crate::win::log("config: 没拿到备份密码 —— 加密备份无法解开");
     }
 
-    /* r92：**不是"第一个能读的就用"，而是"挑最完整的那份"**。
+    /* ══════════════════════════════════════════════════════════════════
+     * r93：**默认恢复最新一份**，只在"疑似被清空"时才往回找
      *
-     * 原来是 `for bak in candidates { if 能读 { return } }` —— 按文件名顺序
-     * 取第一个能解析的。而 `config.auto(...)` 恰好排在最前，它可能是
-     * "配置已被清空之后"写下的默认配置 → 恢复出一份空配置。
+     * 用户原话：「备份肯定是要恢复最新的呀，这个逻辑就不能变，但要多一个
+     *   检测环节，如果确实是手动操作，从而使得备份内容减少，那这应该就是
+     *   正常的，而不是说一刀切看什么最多恢复什么。」
      *
-     * 现在：把所有能读的都读出来，按 `backup_quality` 打分，取最高分；
-     * 同分才比时间（文件名里带时间戳，字典序即时间序）。 */
-    let mut best: Option<(i32, std::path::PathBuf, Config)> = None;
+     * r92 我为了修"恢复出空配置"，改成"按完整度挑最高分"—— 那是**矫枉过正**：
+     * 用户手动删掉几个引擎、清空收藏，本来是最新状态，却被恢复成一份
+     * "内容更多但更旧"的备份。这是错的。
+     *
+     * 正确逻辑（两层）：
+     *   ① **默认取最新那份**（文件名含时间戳，字典序即时间序）；
+     *   ② **异常检测**：只有当最新那份"看起来被清空了"（见 `looks_wiped`）
+     *      才往回退到最近一份正常的。手动删减**不算**被清空 —— 判据是
+     *      "有没有残留的用户配置痕迹"，不是"内容多少"。
+     * ══════════════════════════════════════════════════════════════════ */
+    let mut readable: Vec<(String, std::path::PathBuf, Config)> = Vec::new();
     for bak in candidates {
-        let Some(c) = read_backup_config(&bak, &backup_pw) else {
-            continue;
-        };
-        let q = backup_quality(&c);
-        let name = bak.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string();
-        crate::win::log(&format!("config: 候选备份 {name} 完整度打分 = {q}"));
-        // 分数更高 → 换；同分时文件名更大（= 时间更新）→ 换
-        let better = match &best {
-            None => true,
-            Some((bq, bp, _)) => {
-                if q != *bq {
-                    q > *bq
-                } else {
-                    // 同分时比文件名（含时间戳，字典序即时间序）
-                    let prev = bp.file_name().and_then(|s| s.to_str()).unwrap_or("");
-                    name.as_str() > prev
-                }
-            }
-        };
-        if better {
-            best = Some((q, bak, c));
-        }
-    }
-    match best {
-        Some((q, path_bak, c)) => {
+        if let Some(c) = read_backup_config(&bak, &backup_pw) {
+            let name = bak.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string();
             crate::win::log(&format!(
-                "config: 从 {} 恢复（完整度 {q}）—— 已挑选最完整的一份",
-                path_bak.display()
+                "config: 候选备份 {name}（完整度 {}）",
+                backup_quality(&c)
             ));
-            Some(c)
-        }
-        None => {
-            crate::win::log("config: 所有候选备份都读不出来，只能落回默认配置");
-            None
+            readable.push((name, bak, c));
         }
     }
+    if readable.is_empty() {
+        crate::win::log("config: 所有候选备份都读不出来，只能落回默认配置");
+        return None;
+    }
+    // 按文件名（含时间戳）从新到旧
+    readable.sort_by(|a, b| b.0.cmp(&a.0));
+    let newest = readable.remove(0);
+
+    /* ② 异常检测：最新那份像不像"被清空了"？ */
+    if looks_wiped(&newest.2) {
+        if let Some((name, _, c)) = readable.into_iter().find(|(_, _, c)| !looks_wiped(c)) {
+            crate::win::log(&format!(
+                "config: 最新备份 {} 疑似被清空（没有任何用户配置痕迹），\
+                 回退到更早的 {name}（完整度 {}）",
+                newest.0,
+                backup_quality(&c)
+            ));
+            return Some(c);
+        }
+        crate::win::log("config: 所有备份都没有用户配置痕迹，用最新那份");
+        return Some(newest.2);
+    }
+
+    crate::win::log(&format!(
+        "config: 从 {} 恢复最新一份（完整度 {}）",
+        newest.1.display(),
+        backup_quality(&newest.2)
+    ));
+    Some(newest.2)
+}
+
+/// 一份配置看起来**像不像是"被清空了"**（而不是用户手动删减）。
+///
+/// # 为什么要区分这两件事
+///
+/// 用户可能自己删掉几个引擎、清空收藏夹 —— 那是**正常操作**，
+/// 备份就该忠实记录这个状态，恢复时也该用最新的。
+///
+/// 但如果是配置损坏/程序 bug 导致的"一切归零"，就必须救回来。
+///
+/// # 判据：看有没有**残留痕迹**
+///
+///   · 手动删减 → 总有痕迹：`overrides` 里还留着某个引擎的图标、
+///     `fav_panel_sizes` 里还留着某个收藏目录的尺寸、`url_overrides`
+///     里还有自定义 URL、`recent_engines` 里还有用过的引擎……
+///   · 意外清空 → 这些**一次性全没了**（都在同一个配置文件里，一起被默认值覆盖）。
+///
+/// 所以：**有痕迹 = 手动删的（正常）；零痕迹 = 被清空的（异常）**。
+/// 注意这跟"内容多少"无关 —— 删到只剩一个引擎但留着它的图标，就是正常的。
+///
+/// ⚠ r94：`bar_list` 也要算痕迹 —— 有一种"只有横条被改过"的用户：
+///   他不动引擎库、不设收藏、不填 OCR/WebDAV，只是把内置引擎在横条上
+///   删几个、挪个位置。这种人如果只按上面那些字段判，会被当成"被清空"，
+///   于是恢复出一份**更旧**的横条排列 —— 正是用户明令禁止的"一刀切".
+///   判据用"和默认排列不一样"（不是"非空"：`bar_list` 永远非空）。
+fn looks_wiped(c: &Config) -> bool {
+    let default_bar: Vec<String> = DEFAULT_BAR.iter().map(|s| s.to_string()).collect();
+    let has_traces = !c.custom_engines.is_empty()
+        || !c.overrides.is_empty()
+        || !c.url_overrides.is_empty()
+        || !c.favorites.is_empty()
+        || !c.fav_panel_sizes.is_empty()
+        || !c.ai_suffixes.is_empty()
+        || !c.ocr_key.trim().is_empty()
+        || !c.ocr_secret.trim().is_empty()
+        || !c.webdav_url.trim().is_empty()
+        || !c.webdav_user.trim().is_empty()
+        || !c.backup_password.trim().is_empty()
+        || !c.ai_matting_model.trim().is_empty()
+        || !c.apps.is_empty()
+        || !c.recent_engines.is_empty()
+        || c.bar_list != default_bar;
+    !has_traces
 }
 
 /* ══════════════════════════════════════════════════════════════════════
@@ -2513,6 +2568,47 @@ mod tests {
 
     // ENV_LOCK 声明在模块级（文件上方），main.rs 的测试拿的是同一把 ——
     // 那边也要写 icons 目录，必须和这里改 APPDATA 的测试串行。
+
+    /* ══════════════════════════════════════════════════════════════════
+     * r94：锁住"恢复最新 + 只在疑似被清空时才回退"这条口径
+     *
+     * 用户的硬要求（原话）：「备份肯定是要恢复最新的呀，这个逻辑就不能变，
+     *   但要多一个检测环节，如果确实是手动操作，从而使得备份内容减少，
+     *   那这应该就是正常的，而不是说一刀切看什么最多恢复什么。」
+     *
+     * 所以最容易改坏的两件事必须由测试钉住：
+     *   ① 一份**纯默认**配置 → 判为"被清空"（异常，要救）；
+     *   ② 一份**用户手动删减过**的配置 → 绝不能判成"被清空"（正常，照用）。
+     * ══════════════════════════════════════════════════════════════════ */
+
+    #[test]
+    fn default_config_looks_wiped() {
+        // 全新安装 = 全是默认值 = 零痕迹 → 必须判成"被清空"。
+        // 这就是事故现场那一份（默认配置把用户数据盖掉后又存进了备份）。
+        assert!(
+            looks_wiped(&Config::default()),
+            "纯默认配置必须被判定为「疑似被清空」"
+        );
+    }
+
+    #[test]
+    fn manual_trimming_is_not_wipe() {
+        // 场景一：只留一个引擎，但留着它的自定义图标 —— 这是人手改的。
+        let mut c = Config::default();
+        c.overrides
+            .insert("百度".into(), "baidu-1.png".into());
+        assert!(!looks_wiped(&c), "有图标覆盖痕迹 → 不是被清空");
+
+        // 场景二：只改过横条排列（不动引擎库 / 收藏 / 密钥）—— 也是人手改的。
+        let mut c = Config::default();
+        c.bar_list = vec!["必应".to_string(), "知乎".to_string()];
+        assert!(!looks_wiped(&c), "横条被改过 → 不是被清空");
+
+        // 场景三：清空了收藏，但还留着用过的引擎记录。
+        let mut c = Config::default();
+        c.recent_engines = vec!["Google".to_string()];
+        assert!(!looks_wiped(&c), "有最近使用记录 → 不是被清空");
+    }
 
     fn marked() -> Config {
         marked_in("")
