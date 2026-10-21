@@ -1317,11 +1317,34 @@ function setScanning(on) {
  *   后端 `ocr_rescan(engine)` 命令保留（不删接口），只是结果页不再调用它。 */
 
 document.addEventListener('keydown', (e) => {
-    // Esc 先收放大图；没有放大图时才关窗口（见上面 zoom 的那段）
-    if (e.key === 'Escape' && !$('zoom').classList.contains('show')
-        && document.activeElement !== $('text')) {
-        invoke('close_ocr_window');
+    /* Esc：先收放大图 → 再收窗口（用户报「点 OCR 之后按 Esc 退不出」）。
+     *
+     * # 原来为什么不灵
+     *
+     * 老条件是 `document.activeElement !== $('text')` —— 焦点在**结果文本框**
+     * 里时整条 Esc 被忽略。而用户点开 OCR 结果后，焦点通常就在那个文本框里
+     * （它自动聚焦、方便直接改字），于是 Esc 完全没反应，只能点右上角的 ×。
+     *
+     * # 现在
+     *
+     * 文本框里按 Esc 也关窗口 —— 这是**浮层**，Esc 的语义就是"退出去"。
+     * 唯一例外：文本框里有**选中内容**时，第一次 Esc 只取消选中（那是编辑
+     * 时的肌肉记忆），第二次才关窗。这样两种意图都不误伤。
+     *
+     * ⚠ 放大图（zoom）优先：它在最上层，Esc 先收它。
+     */
+    if (e.key !== 'Escape') return;
+    if ($('zoom').classList.contains('show')) return;   // 交给 zoom 那段的监听收图
+
+    const ta = $('text');
+    const inText = document.activeElement === ta;
+    if (inText && ta && typeof ta.selectionStart === 'number'
+        && ta.selectionStart !== ta.selectionEnd) {
+        // 有选区：这一次 Esc 只取消选中（用户可能只是想放弃这段选择）
+        ta.setSelectionRange(ta.selectionStart, ta.selectionStart);
+        return;
     }
+    invoke('close_ocr_window');
 });
 
 document.addEventListener('contextmenu', (e) => e.preventDefault());

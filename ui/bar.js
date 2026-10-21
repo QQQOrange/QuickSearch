@@ -1080,6 +1080,10 @@ function renderBar(force) {
 let panelGroupFilter = null;
 let panelSearchMode = false;
 
+/** r92：面板上一次渲染的指纹（避免 `qs://config` 广播导致的无谓重建 + 闪烁）。
+ *  详见 `renderPanel` 里那段说明。空串 = 还没画过。 */
+let panelRenderSig = '';
+
 /** 三大类的展示结构。每次现算 —— 自定义引擎合进目录后分类会变，不能缓存。 */
 function panelTree() {
     return qsCatalogGroups(CATALOG);
@@ -1567,6 +1571,47 @@ function renderPanel(focusFilter, keepScroll) {
         const scrH = (window.screen && screen.availHeight) || 900;
         panelEl.style.maxHeight = Math.round(scrH * 0.78) + 'px';
     }
+
+    /* r92：**内容没变就不要重建 DOM**（用户报「更多引擎页面闪烁」的修复）。
+     *
+     * # 为什么会闪
+     *
+     * 这里原来是 `panelBody.textContent = ''` 无条件清空，然后把几百个格子
+     * 重新 createElement 一遍。一次重建要几十毫秒，这期间浏览器可能已经
+     * 把"空面板"画到屏幕上了 —— 视觉上就是一帧白闪。
+     *
+     * 什么时候会重复渲染？`qs://config` 广播（收藏面板拖尺寸 600ms 一次、
+     * 改任何设置、横条尺寸变化都会触发）都会走到这里。用户翻着引擎列表时
+     * 面板每隔几百毫秒重建一次，闪得很有节奏 —— 就是他看到的那样。
+     *
+     * # 判据
+     *
+     * 用「渲染输入」的指纹：大类/中类/小类过滤 + 当前是否收藏模式 + 收藏
+     * 数据 + 自定义引擎/外部软件名单 + 图标覆盖。这些都没变，重画出来的
+     * DOM 一模一样，重建没有任何收益，只剩闪烁。
+     *
+     * ⚠ 和设置页 `renderAllList` 的指纹是同一套思路（那边早就这么做了，
+     *   面板这边一直漏着）。指纹**不含滚动位置** —— 位置由 prevScroll 单独管。 */
+    const sig = [
+        panelGroupFilter || '',
+        panelSubFilter || '',
+        panelCatFilter || '',
+        panelFav || '',
+        (CONF.customEngines || []).map((x) => x.name).join('\u0001'),
+        (CONF.apps || []).map((x) => x.name).join('\u0001'),
+        window.qsIconSigOf ? window.qsIconSigOf(CONF.overrideIcons) : '',
+        window.qsIconSigOf ? window.qsIconSigOf(CONF.dirIcons) : '',
+        // 收藏树整体（展开/折叠、增删条目都会变）
+        JSON.stringify(CONF.favorites || []),
+    ].join('\u0002');
+    /* `focusFilter` 非空 = 调用方**要求**换内容（下钻 / 换过滤词），
+     * 那种情况必须重画，不能命中缓存。 */
+    if (!focusFilter && sig === panelRenderSig && panelBody.childElementCount) {
+        if (keepScroll) panelBody.scrollTop = prevScroll;
+        return;
+    }
+    panelRenderSig = sig;
+
     panelBody.textContent = '';
 
     /* 收藏夹入口 + 大类胶囊过滤 + 分类锚点导航共用**同一个 sticky 头**。

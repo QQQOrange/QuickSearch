@@ -1143,6 +1143,66 @@ pub fn config_path() -> PathBuf {
     data_dir().join("config.json")
 }
 
+/* ══════════════════════════════════════════════════════════════════════
+ * r92：备份密码的**独立存档**（让"配置坏了还能解开备份"成为可能）
+ *
+ * ## 为什么必须独立存
+ *
+ * 加密备份的价值全在"主文件坏了还能救回来"。但密码原本**只存在
+ * config.json 里** —— 主文件一坏、密码字段跟着没了，那份加密备份就
+ * 永远解不开了。这是自相矛盾的：**保护数据的机制，反而让数据不可恢复**。
+ *
+ * 用户的真实遭遇就是这条：config.json 截断 → 密码读不出 →
+ * 100 多份加密备份全部作废 → 落回默认配置。
+ *
+ * ## 做法
+ *
+ * 把密码另存一份到 `backup.key`（和 config.json 同目录、同样受
+ * `%APPDATA%` 的文件系统权限保护）。它不是明文散落在各处 ——
+ * 只是把"同一个秘密"多存一份，位置和 config.json 一样私密。
+ *
+ * ⚠ 安全性权衡（说清楚，别让人误以为这是加固）：
+ *   这**不降低**也比不上"不存密码"的安全性 —— 能读 `%APPDATA%` 的程序
+ *   本来就能读 config.json 里的密码。它换来的是**可恢复性**，
+ *   代价是零（多一个小文件）。真正的威胁模型（同机恶意程序）两者一样。
+ * ══════════════════════════════════════════════════════════════════════ */
+
+/// 备份密码的独立存档路径。
+pub fn backup_key_path() -> PathBuf {
+    data_dir().join("backup.key")
+}
+
+/// 把备份密码写进独立存档（空密码 = 删掉存档）。
+pub fn stash_backup_password(pw: &str) {
+    let p = backup_key_path();
+    let pw = pw.trim();
+    if pw.is_empty() {
+        let _ = std::fs::remove_file(&p);
+        return;
+    }
+    // 内容只有密码本身，一行。带个前缀方便人肉辨认这是什么文件。
+    let body = format!("# QuickSearch 备份密码（用于解开加密备份，删了就无法恢复）\n{pw}\n");
+    if std::fs::write(&p, body).is_err() {
+        crate::win::log("config: 备份密码独立存档写入失败（不影响主流程）");
+    }
+}
+
+/// 从独立存档里读备份密码（读不到返回空串）。
+pub fn load_backup_password() -> String {
+    let Ok(s) = std::fs::read_to_string(backup_key_path()) else {
+        return String::new();
+    };
+    // 跳过以 # 开头的注释行，取第一行非空内容
+    for line in s.lines() {
+        let t = line.trim();
+        if t.is_empty() || t.starts_with('#') {
+            continue;
+        }
+        return t.to_string();
+    }
+    String::new()
+}
+
 /// 备份文件名里的「详细时间」：本地时间 `YYYY-MM-DD HH-MM-SS`。
 ///
 /// 用户要求备份文件名形如「文件名(详细时间).QuickSearch」—— 时间必须是本地
@@ -1659,6 +1719,68 @@ pub fn normalize_recent(c: &mut Config) -> usize {
     c.recent_engines = out;
     before - c.recent_engines.len()
 }
+/// 一份备份"值不值得用来恢复"的打分。**分数越高越完整**。
+///
+/// # 为什么需要打分（r92：这是"更新后所有设置归零"的最后一道防线）
+///
+/// 事故链条的最后一环：
+///   1. `config.json` 损坏；
+///   2. `load_backup_of` 按**文件名排序取最新**；
+///   3. 而最新那份 `config.auto(...)` 恰好是**配置被清空之后**写下的
+///      （设置全没了 → 程序用默认值保存了一次 → 生成一份"默认配置"备份）；
+///   4. 于是"恢复"恢复的是一份空配置 —— 看起来恢复成功，实际什么都没救回来。
+///
+/// 用户看到的就是：更新完，一切设置都是默认值。
+///
+/// 所以恢复时不能只认"最新"，还要看"这份里有没有真东西"：
+///   · 有自定义引擎 / OCR key / WebDAV 账号 / 收藏 —— 用户手工配过的证据，各加分；
+///   · 全都没有 = 一份"默认配置"，**几乎肯定不是用户想要的**，分数接近 0。
+///
+/// 分数相同的，才按文件名（时间）新的优先。
+fn backup_quality(c: &Config) -> i32 {
+    let mut score = 0;
+    if !c.custom_engines.is_empty() {
+        score += 40;
+    }
+    if !c.ocr_key.trim().is_empty() {
+        score += 20;
+    }
+    if !c.ocr_secret.trim().is_empty() {
+        score += 10;
+    }
+    if !c.webdav_url.trim().is_empty() {
+        score += 20;
+    }
+    if !c.webdav_user.trim().is_empty() {
+        score += 10;
+    }
+    if !c.webdav_pass.trim().is_empty() {
+        score += 10;
+    }
+    if !c.favorites.is_empty() {
+        score += 25;
+    }
+    if !c.backup_password.trim().is_empty() {
+        score += 5;
+    }
+    if !c.ai_matting_model.trim().is_empty() {
+        score += 10;
+    }
+    if !c.overrides.is_empty() {
+        score += 5;
+    }
+    if !c.apps.is_empty() {
+        score += 15;
+    }
+    // 横条里含自定义引擎名 = 用户真配过的铁证（默认横条也有七八条，长度本身不算分）
+    let names: std::collections::HashSet<&str> =
+        c.custom_engines.iter().map(|e| e.name.as_str()).collect();
+    if c.bar_list.iter().any(|n| names.contains(n.as_str())) {
+        score += 15;
+    }
+    score
+}
+
 
 fn load_backup_of(path: &std::path::Path) -> Option<Config> {
     // 候选位置都试一遍：走到这里说明主文件已经坏了，此时还不知道用户把备份
@@ -1724,18 +1846,192 @@ fn load_backup_of(path: &std::path::Path) -> Option<Config> {
     if bdir != parent {
         candidates.push(bdir.join("config.json.bak"));
     }
-    for bak in candidates {
-        if let Ok(s) = std::fs::read_to_string(&bak) {
-            if let Ok(c) = serde_json::from_str::<Config>(&s) {
-                crate::win::log(&format!(
-                    "config: 已从 {} 恢复上一份好配置",
-                    bak.display()
-                ));
-                return Some(c);
+    /* r92：**先把备份密码抠出来**，否则加密备份一个都读不了
+     * （这正是"更新后所有设置归零"那次事故的真根因，详见
+     *   `read_backup_config` 上面那段完整记录）。
+     *
+     * 三个来源，按可靠性排序：
+     *   ① 主文件（哪怕已经坏了，只要 `backup_password` 字段还完好）；
+     *   ② **任何一个能读成明文的备份**（老备份是明文，里面也存着密码）；
+     *   ③ 都没有 —— 那就只救得了明文备份。
+     *
+     * ② 很重要：主文件被截断/损坏时密码字段往往正好丢了，
+     *   而"上上次的明文备份"里还有密码 —— 有它就能解开最近那份加密备份。 */
+    /* ① 优先读独立存档 —— 它不随 config.json 一起损坏 */
+    let mut backup_pw = load_backup_password();
+    if !backup_pw.is_empty() {
+        crate::win::log("config: 从 backup.key 读到了备份密码");
+    }
+    /* ② 存档没有，再从（可能已损坏的）主文件里抠 */
+    if backup_pw.is_empty() {
+        backup_pw = configured_string(path, "backup_password").unwrap_or_default();
+    }
+    if backup_pw.is_empty() {
+        for bak in &candidates {
+            // 只从**能当明文解析**的备份里抠（密文备份抠不出来）
+            if let Ok(s) = std::fs::read_to_string(bak) {
+                if !crate::crypto::looks_encrypted(&s) {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
+                        if let Some(p) = v.get("backup_password").and_then(|x| x.as_str()) {
+                            if !p.trim().is_empty() {
+                                backup_pw = p.trim().to_string();
+                                crate::win::log(&format!(
+                                    "config: 从备份 {} 里找到了备份密码",
+                                    bak.display()
+                                ));
+                                break;
+                            }
+                        }
+                    }
+                }
             }
         }
     }
-    None
+    if !backup_pw.is_empty() {
+        crate::win::log("config: 拿到备份密码，加密备份可以尝试解密恢复了");
+    } else {
+        crate::win::log("config: 没拿到备份密码 —— 加密备份无法解开");
+    }
+
+    /* r92：**不是"第一个能读的就用"，而是"挑最完整的那份"**。
+     *
+     * 原来是 `for bak in candidates { if 能读 { return } }` —— 按文件名顺序
+     * 取第一个能解析的。而 `config.auto(...)` 恰好排在最前，它可能是
+     * "配置已被清空之后"写下的默认配置 → 恢复出一份空配置。
+     *
+     * 现在：把所有能读的都读出来，按 `backup_quality` 打分，取最高分；
+     * 同分才比时间（文件名里带时间戳，字典序即时间序）。 */
+    let mut best: Option<(i32, std::path::PathBuf, Config)> = None;
+    for bak in candidates {
+        let Some(c) = read_backup_config(&bak, &backup_pw) else {
+            continue;
+        };
+        let q = backup_quality(&c);
+        let name = bak.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string();
+        crate::win::log(&format!("config: 候选备份 {name} 完整度打分 = {q}"));
+        // 分数更高 → 换；同分时文件名更大（= 时间更新）→ 换
+        let better = match &best {
+            None => true,
+            Some((bq, bp, _)) => {
+                if q != *bq {
+                    q > *bq
+                } else {
+                    // 同分时比文件名（含时间戳，字典序即时间序）
+                    let prev = bp.file_name().and_then(|s| s.to_str()).unwrap_or("");
+                    name.as_str() > prev
+                }
+            }
+        };
+        if better {
+            best = Some((q, bak, c));
+        }
+    }
+    match best {
+        Some((q, path_bak, c)) => {
+            crate::win::log(&format!(
+                "config: 从 {} 恢复（完整度 {q}）—— 已挑选最完整的一份",
+                path_bak.display()
+            ));
+            Some(c)
+        }
+        None => {
+            crate::win::log("config: 所有候选备份都读不出来，只能落回默认配置");
+            None
+        }
+    }
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+ * r92：从**加密**备份里恢复（这是"更新后数据全丢"那次的真根因修复）
+ *
+ * ## 事故经过
+ *
+ * 用户报：「这次更新基本上就把一切软件设置都恢复了默认设置」——
+ * OCR key / WebDAV 账号密码 / 收藏夹 / 自定义引擎 / AI 模型选择全没了。
+ *
+ * 查下来是一条**恢复链断在半路**：
+ *   1. `config.json` 某次损坏（`preserve_broken` 留了档，证据是
+ *      `config.broken(2026-10-20 12-22-12).QuickSearch`）；
+ *   2. `load_backup_of` 去找滚动备份，逐个 `serde_json::from_str::<Config>`；
+ *   3. 但用户**设了备份密码**，滚动备份里躺着的是 `{"qsEnc":1,"kdf":...}`
+ *      这种**密文信封** —— 明文解析必然失败；
+ *   4. 所有候选全部失败 → `None` → **落回 `Config::default()`** →
+ *      用户所有设置归零。
+ *
+ * ## 为什么以前没暴露
+ *
+ * 没设备份密码的人，滚动备份是明文，这条链能走通。**设了密码的人，
+ * 反而失去了自动恢复能力** —— 加密本来是保护，结果成了数据丢失的帮凶。
+ *
+ * ## 修法
+ *
+ * 解析失败时，**再试一次解密**（用配置里的 `backup_password`）。
+ * 密码从哪来？主文件坏了就读不出来 —— 所以这里也支持从**候选备份自己**
+ * 里抠（备份里也存着 `backup_password`，前提是那份能解开……鸡生蛋问题）。
+ * 实际可行的做法：先用**已知的**密码试（调用方传入），拿不到就用空密码
+ * 试一次（未加密的备份走这条），最后才放弃。
+ *
+ * ⚠ 这是"尽力而为"：密码本身丢了就真救不回来（那正是加密的意义）。
+ *   但**只要密码还在**（比如主文件只是尾部截断、密码字段完好），就能恢复。
+ * ══════════════════════════════════════════════════════════════════════ */
+
+/// 从一个备份文件里读出 `Config`：**先按明文，失败再按密文解**。
+///
+/// `password` 是用户设的备份密码（可能为空 = 没设过，那就只走明文）。
+///
+/// 返回 `None` 的三种情形：文件读不出 / 明文与密文都解析不了 / 密文密码不对。
+pub fn read_backup_config(path: &std::path::Path, password: &str) -> Option<Config> {
+    let s = std::fs::read_to_string(path).ok()?;
+
+    /* ⚠⚠ r92 关键修正：**先判密文，再试明文**。
+     *
+     * 原来的顺序是"先试明文解析"，这是致命的：
+     * `Config` 结构体整个带 `#[serde(default)]`，所以
+     * `serde_json::from_str::<Config>` 对 `{"qsEnc":1,"data":"...","kdf":...}`
+     * 这种**密文信封会"解析成功"** —— 未知字段被忽略，其余字段全取默认值。
+     *
+     * 后果：一份完好的加密备份被当成"解析成功但内容是全默认"，
+     * 于是恢复出一份空配置 —— 用户看到的就是"更新后所有设置归零"。
+     *
+     * 所以必须**先看它是不是密文信封**，是就只走解密这条路。 */
+    if crate::crypto::looks_encrypted(&s) {
+        if password.trim().is_empty() {
+            crate::win::log(&format!(
+                "config: {} 是加密备份，但没有备份密码可用 —— 跳过",
+                path.display()
+            ));
+            return None;
+        }
+        return match crate::crypto::decrypt(&s, password) {
+            Ok(plain) => match serde_json::from_str::<Config>(&plain) {
+                Ok(c) => {
+                    crate::win::log(&format!(
+                        "config: {} 是加密备份，已用备份密码解开（完整度 {}）",
+                        path.display(),
+                        backup_quality(&c)
+                    ));
+                    Some(c)
+                }
+                Err(e) => {
+                    crate::win::log(&format!(
+                        "config: {} 解密成功但内容不是有效配置（{e}）",
+                        path.display()
+                    ));
+                    None
+                }
+            },
+            Err(e) => {
+                crate::win::log(&format!(
+                    "config: {} 解密失败（{e}）—— 密码不对或文件损坏",
+                    path.display()
+                ));
+                None
+            }
+        };
+    }
+
+    // ② 明文（没设密码的备份、或老版本留下的）
+    serde_json::from_str::<Config>(&s).ok()
 }
 
 /// 从**可能已经损坏**的 config.json 里抠出 `backup_dir`。
@@ -1747,18 +2043,30 @@ fn load_backup_of(path: &std::path::Path) -> Option<Config> {
 ///
 /// 取不到（文件读不出、不是 JSON、字段为空）→ None，调用方回落默认目录。
 fn configured_backup_dir(path: &std::path::Path) -> Option<String> {
+    configured_string(path, "backup_dir")
+}
+
+/// 从（可能损坏的）配置里抠出**任意一个字符串字段**。
+///
+/// 泛化自 `configured_backup_dir` —— r92 需要 `backup_password` 走同一套
+/// "整份解析失败也要把这一小段捞出来"的逻辑：加密备份能不能恢复，全看
+/// 这个密码能不能从坏文件里捞出来。
+///
+/// 两级兜底：① 整份当 `serde_json::Value` 解析（对多余/缺失字段很宽容）；
+/// ② 纯字符串搜索 `"key" : "..."`（应对截断 / 尾部半损）。
+fn configured_string(path: &std::path::Path, key_name: &str) -> Option<String> {
     let s = std::fs::read_to_string(path).ok()?;
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
-        if let Some(d) = v.get("backup_dir").and_then(|x| x.as_str()) {
+        if let Some(d) = v.get(key_name).and_then(|x| x.as_str()) {
             let d = d.trim();
             if !d.is_empty() {
                 return Some(d.to_string());
             }
         }
     }
-    // 截断 / 半损：退回字符串搜索，"backup_dir"\s*:\s*"..." 的第一处
-    let key = "\"backup_dir\"";
-    let i = s.find(key)?;
+    // 截断 / 半损：退回字符串搜索 `"key"\s*:\s*"..."` 的第一处
+    let key = format!("\"{key_name}\"");
+    let i = s.find(&key)?;
     let rest = s[i + key.len()..].trim_start().strip_prefix(':')?.trim_start();
     let rest = rest.strip_prefix('"')?;
     let end = rest.find('"')?;
@@ -1832,6 +2140,52 @@ pub fn save_to(path: &std::path::Path, cfg: &Config) {
     let Ok(s) = serde_json::to_string_pretty(cfg) else {
         return;
     };
+    /* ══════════════════════════════════════════════════════════════════
+     * r92：**滚动备份按备份密码加密**（用户要求）
+     *
+     * 用户原话：「我备份的文件都是加密了，怎么能有没有加密的呢？那这是一个
+     * 问题，也得修。」
+     *
+     * 他说的没错 —— 之前的设计是**分裂的**：
+     *   · 云端备份（`backup_payload`）→ 加密 ✅
+     *   · 手动导出（`export_config`）→ 加密 ✅
+     *   · **本地滚动备份（这里）→ 明文** ❌
+     *
+     * 而滚动备份里装着 OCR Key、WebDAV 密码、收藏内容 —— 和云端那份
+     * 一模一样敏感。明文躺在磁盘上，任何一个能读 `%APPDATA%` 的程序
+     * 都能直接拿走，加密云端反而成了自我安慰。
+     *
+     * 所以这里也加密：设了 `backup_password` 就加密，没设就保持明文
+     * （没密码的人没法解，硬加密等于自己把备份锁死）。
+     *
+     * ⚠ 主文件 `config.json` **本身保持明文** —— 它是程序启动时必须读的，
+     *   加密它就得在启动最早期要密码，用户忘密码等于程序打不开。
+     *   主文件的保护靠的是文件系统权限（`%APPDATA%` 是用户私有目录）。
+     *   **备份**是给"主文件坏了/想回退"用的，加密不影响可用性。
+     * ══════════════════════════════════════════════════════════════════ */
+    // 备份密码先取出来：写备份要用它加密，轮转时读旧备份也要用它解密
+    let backup_pw = cfg.backup_password.trim().to_string();
+    /* r92：把密码另存一份到 `backup.key` —— 这样 config.json 坏了
+     * 之后仍然解得开加密备份（详见 `stash_backup_password` 的说明）。 */
+    stash_backup_password(&backup_pw);
+    let backup_text = {
+        let pw = backup_pw.as_str();
+        if pw.is_empty() {
+            s.clone()
+        } else {
+            match crate::crypto::encrypt(&s, pw) {
+                Ok(enc) => enc,
+                Err(e) => {
+                    // 加密失败不能写明文（那就把用户的"加密"承诺破了）——
+                    // 宁可这次不留备份，主文件照常写。
+                    crate::win::log(&format!(
+                        "config: 滚动备份加密失败（{e}），本次不留备份（不写明文）"
+                    ));
+                    String::new()
+                }
+            }
+        }
+    };
     // 滚动备份落在**备份目录**（用户在设置里指定的目录；没指定就是数据目录），
     // 名字按用户要求来：`config(YYYY-MM-DD HH-MM-SS).QuickSearch` ——
     // 「文件名(详细时间)」+ 软件名后缀（后缀用软件名也算一层防误认，
@@ -1879,9 +2233,16 @@ pub fn save_to(path: &std::path::Path, cfg: &Config) {
         return;
     }
     /* 新备份也走"临时文件 + rename"（以前是裸 fs::write，写一半被杀就只剩
-     * 半截文件，而它恰恰是主文件坏掉时唯一的退路）。写成功之后再清旧的。 */
+     * 半截文件，而它恰恰是主文件坏掉时唯一的退路）。写成功之后再清旧的。
+     *
+     * r92：写的是 `backup_text`（设了密码时是密文信封），不再是明文 `s`。
+     * 加密失败时 `backup_text` 是空串 —— 那种情况**整个跳过备份写入**，
+     * 绝不退化成写明文。 */
+    if backup_text.is_empty() {
+        return;
+    }
     let bak_tmp = bak.with_extension("tmp");
-    let bak_ok = std::fs::write(&bak_tmp, s.as_bytes()).is_ok()
+    let bak_ok = std::fs::write(&bak_tmp, backup_text.as_bytes()).is_ok()
         && std::fs::rename(&bak_tmp, &bak).is_ok();
     if !bak_ok {
         let _ = std::fs::remove_file(&bak_tmp);
@@ -1891,14 +2252,53 @@ pub fn save_to(path: &std::path::Path, cfg: &Config) {
         ));
         return;
     }
+    /* ══════════════════════════════════════════════════════════════════
+     * r92：滚动备份**不再"只留一份"**（这是数据丢失的最后一环）
+     *
+     * 用户报「这次更新把一切设置都恢复成默认」—— 事故链的最后一步在这里：
+     *   1. config.json 损坏 → 恢复失败 → 用默认配置启动；
+     *   2. 程序随即 `save`（把默认配置写回）；
+     *   3. **这里把同目录所有其他滚动备份全删了** ——
+     *      包括那份"恢复失败但内容完好"的加密备份；
+     *   4. 于是退路被自己销毁，用户再也没法捞回来。
+     *
+     * 现在的规则：
+     *   · 最多保留 `MAX_ROLLING` 份（按时间留最新的）；
+     *   · **绝不删除"比本次写下的这份更有价值"的备份** ——
+     *     用 `backup_quality` 比：一份含自定义引擎/OCR key/收藏的备份，
+     *     不能被一份"默认配置"挤掉。这条是关键：
+     *     恢复失败后用默认配置启动时，那份好备份必须活着。
+     * ══════════════════════════════════════════════════════════════════ */
+    const MAX_ROLLING: usize = 8;
+    let new_quality = backup_quality(cfg);
+    let mut keep: Vec<(String, i32, PathBuf)> = Vec::new();   // (文件名, 分数, 路径)
     if let Ok(rd) = std::fs::read_dir(&bdir) {
         for e in rd.filter_map(|e| e.ok()) {
             let p = e.path();
-            // 只删**不是刚刚写下的那份**的旧滚动备份
-            if p.is_file() && p != bak && is_rolling_backup(&p) {
-                let _ = std::fs::remove_file(&p);
+            if !p.is_file() || p == bak || !is_rolling_backup(&p) {
+                continue;
             }
+            let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string();
+            // 读一下这份旧备份的完整度（读不出来当 0 —— 它本来就是坏的）
+            let q = read_backup_config(&p, &backup_pw)
+                .map(|c| backup_quality(&c))
+                .unwrap_or(0);
+            /* ⚠ 核心保护：**比本次更有价值的备份一律不删**。
+             *   本次写的是"默认配置"（q=0）时，所有有内容的旧备份都会被保住。 */
+            if q > new_quality {
+                crate::win::log(&format!(
+                    "config: 保留旧备份 {name}（完整度 {q} > 本次 {new_quality}）"
+                ));
+                continue;
+            }
+            keep.push((name, q, p));
         }
+    }
+    // 按文件名（含时间戳）从新到旧排序，只保留前 MAX_ROLLING-1 份（加上本次那份）
+    keep.sort_by(|a, b| b.0.cmp(&a.0));
+    for (name, _, p) in keep.into_iter().skip(MAX_ROLLING.saturating_sub(1)) {
+        crate::win::log(&format!("config: 轮转清掉旧备份 {name}"));
+        let _ = std::fs::remove_file(&p);
     }
 }
 
