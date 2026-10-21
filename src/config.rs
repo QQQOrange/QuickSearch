@@ -2532,9 +2532,100 @@ pub fn dir_icon_defaults() -> Vec<(String, std::path::PathBuf)> {
 #[cfg(test)]
 pub static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// r96：**跨模块**的测试大锁。
+///
+/// # 为什么 ENV_LOCK 不够
+///
+/// `ENV_LOCK` 只保护"**正在改** APPDATA"的那一小段。而 `load_from` /
+/// `save_to` / `data_dir()` 是在**读**它 —— 改和读不在同一时刻发生，
+/// 并发下 A 测试已改完、B 测试正在读，照样串味。
+///
+/// 实测（150 遍里第 1 遍就复现）：
+///   `auto_backup_gate_skips_when_only_volatile_keys_changed`
+///   panicked at main.rs:15633 —— 它断言"改了 bar_list 就该判成有改动"，
+///   而 `changed_since_last_backup` 读到的 config_view 是隔壁 config 测试
+///   摆进去的那份（bar_list 恰好也含 Google），实质指纹撞车。
+///
+/// 于是 config.rs 自己那一摞测试 + main.rs 里用 `AppDataTemp` 的测试，
+/// **全部共用这一把**。
+///
+/// # 用法
+///
+/// ```ignore
+/// let _serial = config::test_lock();
+/// ```
+///
+/// ⚠ 守卫要活到测试结束：绑到 `_serial` 这种下划线变量上，
+/// 别写 `let _ = ...`（那会当场 drop、锁立刻释放，还一句警告都没有）。
+#[cfg(test)]
+static CFG_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// 拿 [`CFG_TEST_LOCK`]；锁被 poison 了也照拿（一条测试炸了不该连累其余）。
+#[cfg(test)]
+pub fn test_lock() -> std::sync::MutexGuard<'static, ()> {
+    CFG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /* ══════════════════════════════════════════════════════════════════
+     * r96：**所有**碰 config 文件的测试共用一把进程级互斥锁
+     *
+     * # 为什么要全员串行
+     *
+     * 之前只有个别测试拿 `ENV_LOCK`（改 APPDATA 的那两条），其余并行跑。
+     * 而 `load_from` / `save_to` 都**间接依赖**进程级环境：
+     *   · `load_backup_of` 最后会退到 `backup_dir_of(&Config::default())`
+     *     → `data_dir()` → **读 `%APPDATA%`**；
+     *   · `save_to` 的滚动备份落点同样是它。
+     *
+     * 于是并发下会出现这样的交叉：A 测试把 APPDATA 换成自己的 TempDir，
+     * B 测试正在"写坏主文件→期望从**自己的**目录回退"，却读到 A 目录里
+     * 的备份。实测症状（100 遍里第 15 遍）：
+     *   `config_survives_restart_and_corruption` 断言 `delay_ms == 4321`，
+     *   实际拿到 **2** —— 那是隔壁测试 `save_never_leaves_a_half_written_config`
+     *   循环里的第 3 次保存值。
+     *
+     * # 为什么不用"每条测试自己改 APPDATA"
+     *
+     * 那是把进程级状态当局部变量用：cargo test 默认多线程并行，
+     * set_var 的**窗口期**没法消除（哪怕各自 restore，中间那一瞬就是竞态）。
+     * 真正隔离只能靠进程级的串行。
+     *
+     * # 代价
+     *
+     * 这些测试全部串行：config 模块 100+ 条子里大头是纯内存计算，
+     * 真碰盘的是少数几条，串行后总时长从 ~0.6s 涨到 ~1.5s —— 可接受。
+     *
+     * ⚠️ 实体（`CFG_TEST_LOCK`）放在**模块级**而不是这里，另配 `pub fn
+     *   test_lock()`：main.rs 那摞用 `AppDataTemp` 的测试同样在改 / 读
+     *   `%APPDATA%`，必须拿**同一把**。只在各自模块内互斥的话，跨模块
+     *   照样互相踩（实测见 `test_lock` 的注释）。
+     * ══════════════════════════════════════════════════════════════════ */
+
+    /// 拿进程级大锁。锁被 poison 了也照拿（一条测试炸了不该连累其余）。
+    ///
+    /// 实体在模块级（`CFG_TEST_LOCK`，另有 `pub fn test_lock()`）——
+    /// 因为 main.rs 的测试（用 `AppDataTemp` 改 `%APPDATA%`）也要拿**同一把**。
+    ///
+    /// `pub(super)`：隔壁 `mod sanitize_tests` 复用同一把（两把锁挡不住
+    /// 同一份进程级状态）。
+    pub(super) fn big_lock() -> std::sync::MutexGuard<'static, ()> {
+        test_lock()
+    }
+
+    /// `big_lock` 的**哨兵变量名**（只为说明调用点该用什么名字）。
+    ///
+    /// 统一 `let _serial = big_lock();` 而不是 `let _g = ...`：
+    /// 那几条用 `tmp_file()` 的测试已经有一个 `let (f, _g) = tmp_file(...)`
+    /// （`_g` 是临时候目录的保活句柄）。两处都叫 `_g` 会撞名 ——
+    /// 锁的句柄当场被覆盖、**锁就释放了**，等于没加隔离，
+    /// 而编译器一句警告都没有（`_` 前缀允许重定义）。
+    /// 调 `set_setting` 的 main.rs 测试那边统一用 `_serial`，这里保持同一个名字。
+    #[allow(dead_code)]
+    const SERIAL_GUARD: () = ();
 
     /// 一个临时目录，测试结束自动删。
     ///
@@ -2639,6 +2730,7 @@ mod tests {
     /// 这里逐个破坏文件，确认配置都还在。
     #[test]
     fn config_survives_restart_and_corruption() {
+        let _serial = big_lock();
         let t = TempDir::new("restart");
         let f = t.file();
         // 备份关进 TempDir：滚动备份 config(...).QuickSearch 就落在 f 旁边，
@@ -2691,10 +2783,12 @@ mod tests {
     ///
     /// ⚠ 必须把 APPDATA 整个指到一个空临时目录：真实数据目录里躺着的是
     /// **真机/隔壁测试**留下的合法滚动备份，load_backup_of 会拿它恢复 ——
-    /// 那不是本测试要验的「无备份」场景。set_var 是进程级的，ENV_LOCK
-    /// 保证同一时刻只有一个测试改它。
+    /// 那不是本测试要验的「无备份」场景。set_var 是进程级的，所以这里要拿
+    /// **两把**锁：`big_lock` 挡住其它读 data_dir() 的 config 测试，
+    /// `ENV_LOCK` 是给 main.rs 那侧（写 icons 目录）用的旧约定，一并占住。
     #[test]
     fn falls_back_to_default_only_when_there_is_no_backup() {
+        let _serial = big_lock();
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let t = TempDir::new("nobak");
         let f = t.file();
@@ -2717,6 +2811,7 @@ mod tests {
     /// 直接覆盖写的话，写到一半崩溃就留下半截 → 下次启动静默归零。
     #[test]
     fn save_never_leaves_a_half_written_config() {
+        let _serial = big_lock();
         let t = TempDir::new("atomic");
         let f = t.file();
         for i in 0..20u32 {
@@ -2739,6 +2834,7 @@ mod tests {
     /// 所以老配置里就算带着子目录，读回来也要被还原成根地址。
     #[test]
     fn webdav_url_stores_bare_root_only() {
+        let _serial = big_lock();
         let t = TempDir::new("dav");
         let f = t.file();
         // 用户只填根地址 → 原样保留
@@ -2757,6 +2853,7 @@ mod tests {
     /// OCR 窗口尺寸：用户拖过就记住，重启后还在（「记忆窗口大小」这条需求）。
     #[test]
     fn ocr_window_size_is_remembered() {
+        let _serial = big_lock();
         let t = TempDir::new("ocrwin");
         let f = t.file();
         let mut c = Config::default();
@@ -2772,6 +2869,7 @@ mod tests {
     /// 不能把 0 直接当窗口尺寸交给系统，那样窗口会小到看不见。
     #[test]
     fn ocr_window_size_falls_back_when_absent_or_absurd() {
+        let _serial = big_lock();
         let mut c = Config::default();
         assert_eq!(
             ocr_window_size(&c),
@@ -2799,6 +2897,7 @@ mod tests {
     /// 默认关掉等于什么都没做。而且它要能正常存取。
     #[test]
     fn unify_icons_defaults_on_and_persists() {
+        let _serial = big_lock();
         assert!(Config::default().unify_icons, "默认应当是开启");
 
         let t = TempDir::new("unify");
@@ -2813,6 +2912,15 @@ mod tests {
 #[cfg(test)]
 mod sanitize_tests {
     use super::*;
+
+    /* ⚠ r96：这一摞测试也碰磁盘（save_to / load_from → 间接读 `%APPDATA%`），
+     * 所以要和隔壁 `mod tests` 用**同一把**锁。
+     *
+     * 写成 `super::tests::big_lock()` 而不是自己再 new 一把 Mutex ——
+     * 两把锁挡不住同一份进程级状态（`%APPDATA%` 只有一个）。 */
+    fn big_lock() -> std::sync::MutexGuard<'static, ()> {
+        tests::big_lock()
+    }
 
     fn tmp_file(tag: &str) -> (std::path::PathBuf, TempDirLike) {
         let dir = std::env::temp_dir().join(format!(
@@ -2843,6 +2951,7 @@ mod sanitize_tests {
     /// 而识别请求又一直返回参数错误 —— 两头都对不上，极难自查。
     #[test]
     fn legacy_chinese_only_is_normalized_on_load() {
+        let _serial = big_lock();
         let (f, _g) = tmp_file("lang");
         std::fs::write(&f, r#"{"ocr_lang":"CHN"}"#).unwrap();
         assert_eq!(load_from(&f).ocr_lang, "CHN_ENG");
@@ -2869,6 +2978,7 @@ mod sanitize_tests {
     ///   （关掉并行后结果窗里仍冒出一段"本地识别"）。
     #[test]
     fn legacy_parallel_switch_migrates_to_multi_list() {
+        let _serial = big_lock();
         let (f, _g) = tmp_file("multi");
         std::fs::write(&f, r#"{"ocr_engine":"siliconflow","ocr_parallel":true}"#).unwrap();
         let c = load_from(&f);
@@ -2898,6 +3008,7 @@ mod sanitize_tests {
     /// 重复项。这些都是"手改过文件 / 备份来自装了更多引擎的版本"会出现的。
     #[test]
     fn multi_list_is_sanitized_on_load() {
+        let _serial = big_lock();
         let (f, _g) = tmp_file("multidirty");
         std::fs::write(
             &f,
@@ -2917,6 +3028,7 @@ mod sanitize_tests {
     /// 而错误信息看着跟「Key 不对」一样。老配置里可能压根没这个字段。
     #[test]
     fn missing_ocr_accuracy_defaults_to_free_tier() {
+        let _serial = big_lock();
         let (f, _g) = tmp_file("acc");
         std::fs::write(&f, "{}").unwrap();
         assert!(
@@ -2936,6 +3048,7 @@ mod sanitize_tests {
     /// 载体，round-trip 丢一个字节用户看到的都是褪色的收藏。
     #[test]
     fn fav_item_html_survives_round_trip_and_defaults_for_legacy() {
+        let _serial = big_lock();
         // 老数据：只有 text，没有 html
         let (f, _g) = tmp_file("favhtml");
         std::fs::write(
@@ -2970,6 +3083,7 @@ mod sanitize_tests {
     /// - `fav_panel_sizes` 里对应的键也要清掉（`_root` 不是目录，保留）。
     #[test]
     fn dangling_fav_sentinels_are_pruned() {
+        let _serial = big_lock();
         let mut c = Config::default();
         c.favorites = vec![FavGroup {
             id: "g1".into(),
@@ -3036,6 +3150,7 @@ mod sanitize_tests {
     /// 乱码格子出现在横条上。
     #[test]
     fn sanitize_prunes_dangling_sentinels() {
+        let _serial = big_lock();
         let (f, _g) = tmp_file("prune");
         let json = format!(
             r#"{{"favorites":[{{"id":"alive","name":"活着"}}],"bar_list":["百度","{}alive","{}dead"],"fav_panel_sizes":{{"{}dead":[1.0,2.0]}}}}"#,
@@ -3070,6 +3185,7 @@ mod sanitize_tests {
     ///   所以这条测试把**全部五种**哨兵都摆进来一起验。
     #[test]
     fn prune_undefined_bar_engines_prunes_orphans_only() {
+        let _serial = big_lock();
         let mut c = Config::default();
         // 一个真实的内置引擎（从目录里取，避免写死名字后目录改了测试就挂）
         let builtin = crate::engines::engines()
@@ -3313,6 +3429,7 @@ mod sanitize_tests {
     /// 就要把悬空 app 哨兵剪掉，别等它冒到横条上。
     #[test]
     fn sanitize_prunes_dangling_app_sentinels() {
+        let _serial = big_lock();
         let (f, _g) = tmp_file("appprune");
         let json = format!(
             r#"{{"apps":[{{"id":"alive","name":"活着","url":"weixin://"}}],"bar_list":["百度","{}alive","{}dead"]}}"#,
@@ -3332,6 +3449,7 @@ mod sanitize_tests {
     /// 读出来是空 Vec，横条上一个 `@app:` 都不会多出来。
     #[test]
     fn legacy_config_without_apps_still_loads() {
+        let _serial = big_lock();
         let (f, _g) = tmp_file("applegacy");
         std::fs::write(&f, r#"{"bar_list":["百度","Google"]}"#).unwrap();
         let c = load_from(&f);

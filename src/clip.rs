@@ -794,6 +794,62 @@ mod tests {
         CLIP_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// 把一段文字放进剪贴板，**失败时给足重试**。
+    ///
+    /// # 为什么测试要自己包一层（实测：60 遍里第 16 遍偶发失败）
+    ///
+    /// `set_text` 内部的 `open_clipboard` 是 30 × 10ms = 300ms 重试窗口，
+    /// 这个数字是**产品**的取舍（阻塞太久会拖累取词那条 40ms 一轮的轮询，
+    /// 见 `open_clipboard_within` 的注释）。但剪贴板是**全机器**的单例：
+    /// 本机任何进程（资源管理器 / 浏览器 / 微信 / Office，甚至 Windows 自己
+    /// 合成格式）握它几十到几百毫秒是常态 —— 于是测试的前置步骤
+    /// `assert!(set_text(MARK))` 会偶发失败，之前 25 遍全绿、第 26 遍红一次。
+    ///
+    /// # 为什么不能用"跳过"来消掉它
+    ///
+    /// 这条测试的价值全在**语义断言**（图没了 / 文字回来了）。悄悄跳过
+    /// 等于把测试变成空跑 —— 上面注释里明写过这道分界线。所以这里做的是：
+    /// 前置那几步的重试窗口加长到 ~2.5 秒，2.5 秒还拿不到才 fail，
+    /// 并把"本机有进程长期独占剪贴板"这句话直接写在断言里。
+    ///
+    /// 返回是否就绪（false = 本机此刻根本拿不到剪贴板，调用方**必须**失败）。
+    fn set_text_wait(mark: &str) -> bool {
+        for attempt in 1..=25 {
+            if set_text(mark) {
+                return true;
+            }
+            if attempt % 5 == 0 {
+                eprintln!(
+                    "[clip 测试] 第 {attempt} 次还拿不到剪贴板（本机有别的进程正握着它），继续等…"
+                );
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        false
+    }
+
+    /// 往剪贴板写一段**截图**，同样给足重试（理由同 `set_text_wait`）。
+    fn set_image_wait(png: &[u8]) -> bool {
+        for _ in 0..25 {
+            if set_image(png) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        false
+    }
+
+    /// 等剪贴板里出现图片（"写完了但还没落地"那段窗口，见 `enum_formats_settled`）。
+    fn wait_image(step: &str) {
+        for _ in 0..20 {
+            if has_image() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        panic!("{step}：约 500ms 后剪贴板里仍然没有图");
+    }
+
     /// CF_HTML 的偏移必须**按 UTF-8 字节**数：中文内容 char 数 ≠ 字节数，
     /// 按字符算偏移会让宿主（Word/Chrome）从错误的位置开始读碎片 ——
     /// 表现是粘贴出来前面缺一截、后面跟乱码。这里用一段带中文的碎片
@@ -870,10 +926,20 @@ mod tests {
         let _serial = serial();   // 剪贴板是进程级单例，测试必须串行
         const MARK: &str = "QS-R56-CLIP-PROBE-ORIGINAL";
         // 1) 摆一个已知内容
-        assert!(set_text(MARK), "测试前置：往剪贴板放一段文字");
+        assert!(
+            set_text_wait(MARK),
+            "测试前置：约 2.5 秒内始终拿不到剪贴板（本机有进程长期独占）——\
+             这不是被测代码的问题，但也**不能**当成测试通过，此处直接失败并说明原因"
+        );
         // 2) 备份（= 识图动剪贴板之前那一手）
         let keep = snapshot();
-        assert!(keep.is_some(), "能写进剪贴板就该能备份（否则这条测试会变成空跑）");
+        /* ⚠ 这一条原来是 `snapshot().expect(...)` —— 测试里唯一一个会
+         * 「Backup failure is silently swallowed」的入口。改成显式分支：
+         * 备份不来就说清楚拿不到剪贴板这套测试没法往下跑，而不是把
+         * 「被别的进程挡了」误报成「snapshot 实现错了」。 */
+        let Some(keep) = keep else {
+            panic!("测试前置：约 2.5 秒内始终拿不到剪贴板（本机有进程长期独占），备份无意义");
+        };
         // 3) 写截图进去（这里用一张 1x1 的 PNG 当"截图"）
         let fake_png: &[u8] = &[
             0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, // PNG 魔数
@@ -886,12 +952,20 @@ mod tests {
             0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, // IEND
             0xAE, 0x42, 0x60, 0x82,
         ];
-        assert!(set_image(fake_png), "写截图进剪贴板应当成功");
-        assert!(has_image(), "写完之后剪贴板里应当是图");
-        // 4) 还原（keep 上面已经断言过是 Some，这里放心用）
-        restore(keep.as_ref().expect("上面断言过备份成功"));
+        assert!(set_image_wait(fake_png), "写截图进剪贴板应当成功");
+        wait_image("写完之后");
+        restore(&keep);
         // 图没了、原来的文字回来了
-        assert!(!has_image(), "还原之后剪贴板里不该再留着截图");
+        // ⚠ 这两个断言也要容忍"落地/同步那一瞬"：同上，轮一小会儿再断。
+        let mut gone = false;
+        for _ in 0..20 {
+            if !has_image() {
+                gone = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        assert!(gone, "还原之后剪贴板里不该再留着截图");
         let back = read_text_any();
         assert_eq!(
             back.as_deref(),
@@ -937,12 +1011,26 @@ mod tests {
         ];
 
         /* ---- 回合 ①：写完不对齐 → 应当跳过还原 ---- */
-        assert!(set_text(MARK), "测试前置：往剪贴板放一段文字");
-        let mut keep = snapshot().expect("能写就该能备份");
-        assert!(set_image(fake_png), "写图进剪贴板应当成功");
-        assert!(has_image(), "此时剪贴板里应当是图");
+        assert!(
+            set_text_wait(MARK),
+            "测试前置：约 2.5 秒内始终拿不到剪贴板（本机有进程长期独占）"
+        );
+        let Some(mut keep) = snapshot() else {
+            panic!("测试前置：拿不到剪贴板，snapshot 无从谈起（本机有进程长期独占）");
+        };
+        assert!(set_image_wait(fake_png), "写图进剪贴板应当成功");
+        wait_image("回合 ① 写完之后");
         // 不对齐基准就直接走"安全还原"：它应当拒绝（因为序号确实变了）
         restore_if_unchanged(&keep);
+        /* ⚠ 这里断言的是"图**还在**"—— 也就是说它依赖"上一次 has_image 已经
+         *   看到图、且刚才那次 restore_if_unchanged 什么也没做"。等一小会儿
+         *   再断：万一上一次读赶上落地前的空表，这里会假失败。 */
+        for _ in 0..20 {
+            if has_image() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
         assert!(
             has_image(),
             "没对齐基准时 restore_if_unchanged 必须**跳过**（把'我们自己写的'误判成第三方，正是那个回归）"
@@ -951,6 +1039,12 @@ mod tests {
         /* ---- 回合 ②：对齐基准 → 应当真的还原 ---- */
         keep.note_our_write();
         restore_if_unchanged(&keep);
+        for _ in 0..20 {
+            if !has_image() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
         assert!(!has_image(), "对齐基准之后，还原应当真的执行（图消失）");
         assert_eq!(
             read_text_any().as_deref(),

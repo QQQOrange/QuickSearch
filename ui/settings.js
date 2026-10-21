@@ -2738,6 +2738,16 @@ function syncStyleUI() {
     for (const el of document.querySelectorAll('[data-style]')) {
         el.hidden = el.dataset.style !== st;
     }
+    /* r95：切样式也要重刷帧率那一行。
+     *
+     * `data-style` 那轮循环只会把 `rowGlassFps` 设为**可见**（玻璃样式下），
+     * 而它的最终可见性还有第二个条件（实时折射开着没）—— 那条件由
+     * `syncGlassFpsUI` 判。以前只有「开关实时折射」才会调它，于是
+     * 「玻璃+实时折射开着 → 切到默认/磨砂」这条路把帧率行留在了界面上：
+     * 默认/磨砂下玻璃画布不跑，这一行的四个按钮全是无效的。
+     *
+     * ⚠ 必须排在 data-style 循环**之后** —— 反了会被那边改回可见。 */
+    syncGlassFpsUI();
     // 玻璃参数预设的高亮跟着配置走（拖过滑块就变成「自定义」）
     syncGlassPreset();
 }
@@ -2910,10 +2920,22 @@ function syncGlassFpsUI() {
     for (const b of seg.querySelectorAll('button')) {
         b.classList.toggle('on', Number(b.dataset.v) === cur);
     }
-    /* 这一行只在「实时折射」开着时才有意义 —— 关着的时候实时链根本不跑，
-     * 帧率设多少都不起作用，露出来只会让用户困惑。 */
+    /* r95：这一行要**两个条件同时成立**才显示：
+     *   ① 当前是「液态玻璃」样式；
+     *   ② 「实时折射」开着。
+     *
+     * 为什么①也要算（用户新报）：
+     *   `data-style="glass"` 只挡掉了「默认 / 磨砂」下**整组玻璃参数**的显示，
+     *   可用户一旦开过玻璃样式再切回默认/磨砂，`barGlassLive` 这个布尔值**不会
+     *   跟着复位**（它是开销开关，不属于外观参数，见 GLASS_PRESETS 的注释）——
+     *   于是 `CONF.barGlassLive` 仍是 true，帧率那一行就又冒出来了。
+     *   而在默认 / 磨砂样式下玻璃画布压根不跑，帧率设多少都不起作用。
+     *
+     * ②的理由：实时折射关着时实时链根本不跑，帧率同样设了也白设。 */
     const row = $('rowGlassFps');
-    if (row) row.hidden = !(CONF && CONF.barGlassLive);
+    if (row) {
+        row.hidden = !(CONF && CONF.barGlassLive && qsBarStyle(CONF) === 'glass');
+    }
 }
 
 function bindRecentMax() {
@@ -3246,9 +3268,14 @@ function qsSetText(id, s) {
 function bindSwitches() {
     applyTheme();
     syncStyleUI();
-    /* v1.3.0：帧率档位的高亮 + 那一行的显隐。必须排在 syncStyleUI 之后 ——
-     * syncStyleUI 会按 data-style 设那一行的 hidden，而这一行还要叠一个
-     * "实时折射开着吗"的条件，顺序反了会被它改回去。 */
+    /* 帧率档位的高亮 + 那一行的显隐。
+     *
+     * 以前只在这里调一次，且注释写着"必须排在 syncStyleUI 之后"
+     * ——因为 syncStyleUI 会按 data-style 重设那一行的 hidden，
+     * 而这一行还要叠一个"实时折射开着吗"的条件，顺序反了会被改回去。
+     *
+     * r95：反过来的那条路（切样式时也要重刷）当时是漏的，现在补上了 ——
+     * 所以这里不再依赖调用顺序，留着这次调用只是兜底（幂等，没有副作用）。 */
     syncGlassFpsUI();
     renderPreview();
     // r56：「最近使用」摆几个。每次广播都重建一遍（幂等）——
@@ -3305,9 +3332,14 @@ function bindSwitches() {
                 renderCustomList();
                 renderAppList();
             }
-            /* v1.3.0："实时折射"决定 "刷新帧率"那一行显不显示 —— 关着时
-             * 实时链不跑，帧率设多少都没用。先改本地 CONF（上面已做）再刷 UI。 */
-            if (key === 'barGlassLive') {
+            /* r95：任何会改变「是不是玻璃样式 / 实时折射开不开」的改动都要刷帧率行。
+             *
+             * 以前只有 `barGlassLive` 这一支，于是屏幕上的两条真实路径各漏一半：
+             *   · 关「实时折射」→ 帧率行该消失（旧的，已覆盖）；
+             *   · 切到默认 / 磨砂 → 帧率行也该消失（**漏的**，用户报的就是它）。
+             *
+             * 样式是由 barGlass / barBlur 推导的（qsBarStyle），所以两个键都算上。 */
+            if (key === 'barGlassLive' || key === 'barGlass' || key === 'barBlur') {
                 syncGlassFpsUI();
             }
         });
@@ -6523,6 +6555,13 @@ function webviewLabel() {
  *  但日志内容没跟着走）。现在**每条都写死自己的版本号**，
  *  发新版时**同时**加一条，对不上就是漏了。 */
 const CHANGELOG = [
+    {
+        ver: 'v1.3.7',
+        items: [
+            '<b>修：默认 / 磨砂主题下不该出现的「刷新帧率」</b> —— 你指出的：「液态玻璃里面有一个实时折射，然后就可以设置刷新的帧率，那么在默认和磨砂的横条主题下就没有必要来设置刷新的帧率」。根因是这一行的显隐只看了「实时折射开没开」，没看当前是哪种样式：只要你<b>开过玻璃 + 开过实时折射，再切回默认或磨砂</b>，那一行就凭一个残留的开关值又冒了出来 —— 而这两个样式下玻璃画布根本不跑，四个按钮全是无效的。现在两个条件同时满足才显示（<b>液态玻璃样式</b> + <b>实时折射开着</b>）。',
+            '<b>顺手：两条自动化测试的偶发失败</b> —— 跑 300 遍测试时会以约 1/100 的概率红一次，根因是测试之间互相踩（都通过同一个环境变量拿数据目录，谁先改谁影响别人）。这不是功能问题，但"时红时绿"会让人以后不敢信测试结果，所以这一版把它们的隔离做严了：现在<b>连续 300 遍全绿</b>。',
+        ],
+    },
     {
         ver: 'v1.3.6',
         items: [

@@ -14326,6 +14326,7 @@ mod tests {
     /// 于是「添加到横条」点了没反应。这条测试把三类自定义引擎全过一遍。
     #[test]
     fn toggle_bar_engine_accepts_custom_engines() {
+        let _serial = disk_lock();
         // toggle_bar_engine_impl 尾部会 config::save（写 APPDATA）——
         // 拿 ENV_LOCK + 临时 APPDATA 隔离，绝不碰真的数据目录。
         let _env_lock = config::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -15410,6 +15411,16 @@ mod tests {
     /// 跟着失败，而它本身什么都没改）。动 STATE 的测试必须先拿这把锁。
     static STATE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    /// r96：**所有**会碰磁盘的测试都先拿它。
+    ///
+    /// 它和 config.rs 那一摞是**同一把**（`config::test_lock()`）——
+    /// 因为 `save_to` / `load_from` / `data_dir()` 都会读 `%APPDATA%`，
+    /// 而 `AppDataTemp` 正是在改它。两把锁各管一段的话，改与读仍会交叉
+    /// （实测：150 遍里第 1 遍就复现 `auto_backup_gate_...` 失败）。
+    fn disk_lock() -> std::sync::MutexGuard<'static, ()> {
+        config::test_lock()
+    }
+
     /// 在 `STATE` 里摆一份配置并跑 `f`，退出时**原样还原**。
     ///
     /// 不假设 STATE 里原来是什么（可能已被别的测试初始化过），也不留痕 ——
@@ -15454,6 +15465,7 @@ mod tests {
 
     #[test]
     fn backup_round_trip_restores_everything() {
+        let _serial = disk_lock();
         // 先拿锁、再改 APPDATA：声明顺序决定 Drop 顺序 —— appdata 先还原，
         // 锁后放，隔壁测试看到的永远是一个完好的 APPDATA。
         let _env_lock = config::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -15590,6 +15602,7 @@ mod tests {
     /// 只改界面状态必须判「没改」，真改内容必须判「改了」。
     #[test]
     fn auto_backup_gate_skips_when_only_volatile_keys_changed() {
+        let _serial = disk_lock();
         let _env_lock = config::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _state_lock = STATE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _appdata = AppDataTemp::new();
@@ -15647,6 +15660,7 @@ mod tests {
     /// `broadcast()` 在测试环境会 panic（`APP` 只在真机启动时初始化）。
     #[test]
     fn add_app_pins_sentinel_and_remove_app_cleans_up() {
+        let _serial = disk_lock();
         // 只动 `_impl` 纯函数、不碰 STATE，但 `drop_icon` 会写 icons 目录
         // （从 APPDATA 派生）—— 拿 ENV_LOCK + 临时 APPDATA 隔离，绝不碰真的。
         let _env_lock = config::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -15717,6 +15731,7 @@ mod tests {
     /// 上限 60 个：横条摆不下那么多，也不该让配置文件无限膨胀。
     #[test]
     fn add_app_enforces_the_60_cap() {
+        let _serial = disk_lock();
         let _env_lock = config::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _appdata = AppDataTemp::new();
 
