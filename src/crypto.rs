@@ -197,6 +197,76 @@ fn derive_key(password: &str, salt: &[u8], m_kib: u32, t: u32, p: u32) -> Result
     Ok(key)
 }
 
+/// 「密码 → (盐, 密钥)」的进程内缓存。
+///
+/// ⚠ 为什么需要：`config::save` 每次改一个开关都会走到 `encrypt`，而 `derive_key`
+///   是 Argon2id（19 MiB / t=2，这台机器实测 30~80ms）。于是设置页连点几个开关
+///   就能明显感到发涩，而且这几十毫秒是**持着配置锁**花的（其他人要读配置就得等）。
+///
+///   盐的职责只是"让同一个密码在不同文件里的派生结果不同"，用来挡彩虹表；
+///   同一台机器、同一个密码、反复写同一个文件时换盐**没有任何安全收益**
+///   （每次的 nonce 都是新的，AES-GCM 那边该做的照做）。所以第一次派生之后
+///   把盐和密钥留着复用：后续保存只剩 AES（微秒级）。
+///
+///   ⚠ 比对的是**密码原文**：用户一改密码立刻失效、重新派生 + 换盐，
+///     绝不会拿旧密钥去加密新密码的内容。
+static KEY_CACHE: std::sync::OnceLock<
+    std::sync::Mutex<Option<(String, [u8; SALT_LEN], [u8; 32])>>,
+> = std::sync::OnceLock::new();
+
+/// 取（或派生并缓存）当前密码对应的盐与密钥。
+fn cached_key(password: &str) -> Result<([u8; SALT_LEN], [u8; 32]), String> {
+    let cell = KEY_CACHE.get_or_init(|| std::sync::Mutex::new(None));
+    let mut g = cell.lock().map_err(|_| "密钥缓存状态异常".to_string())?;
+    if let Some((pw, salt, key)) = g.as_ref() {
+        if pw == password {
+            return Ok((*salt, *key));
+        }
+    }
+    use rand::RngCore;
+    let mut salt = [0u8; SALT_LEN];
+    rand::thread_rng().fill_bytes(&mut salt);
+    let key = derive_key(password, &salt, ARGON_M_KIB, ARGON_T, ARGON_P)?;
+    *g = Some((password.to_string(), salt, key));
+    Ok((salt, key))
+}
+
+/// 解密用的密钥缓存（按 密码 + 盐 + KDF 参数 索引）。
+///
+/// 启动时同一份 `config.json` 会被解密不止一次（主文件、失败后回退的备份、
+/// 自动备份校验…），每次都要重跑 Argon2id —— 单次实测 ~120~150ms，
+/// 三份就是接近半秒的启动白等。同一把钥匙解同一份文件，派生一次就够了。
+///
+/// ⚠ 缓存条目上限 8 个：正常只会用到一两个密码，超了直接清空重来，
+///   免得"用户反复试密码"把内存撑大（也顺便让错误密码算出的密钥不至于长留）。
+fn decrypt_key_cached(
+    password: &str,
+    salt: &[u8],
+    m: u32,
+    t: u32,
+    p: u32,
+) -> Result<[u8; 32], String> {
+    use std::collections::HashMap;
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<String, [u8; 32]>>> =
+        std::sync::OnceLock::new();
+    let cell = CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    // 键里带上盐和参数：换了盐/参数就是另一把钥匙，不能串
+    let id = format!("{}|{}|{m}|{t}|{p}", password, b64_encode(salt));
+    {
+        let g = cell.lock().map_err(|_| "密钥缓存状态异常".to_string())?;
+        if let Some(k) = g.get(&id) {
+            return Ok(*k);
+        }
+    }
+    let key = derive_key(password, salt, m, t, p)?;
+    let mut g = cell.lock().map_err(|_| "密钥缓存状态异常".to_string())?;
+    if g.len() >= 8 {
+        g.clear();
+    }
+    g.insert(id, key);
+    Ok(key)
+}
+
 /// 加密。返回一段**自带格式说明**的 JSON 字符串（可以直接当备份文件内容存）。
 /// password 为空 = 不加密，原样返回。
 pub fn encrypt(plain: &str, password: &str) -> Result<String, String> {
@@ -213,12 +283,11 @@ pub fn encrypt(plain: &str, password: &str) -> Result<String, String> {
         return Err("备份密码不能只有空格 —— 换个能真正加密的密码，或者清空密码改用不加密备份".into());
     }
     use rand::RngCore;
-    let mut salt = [0u8; SALT_LEN];
+    // 盐复用（见 KEY_CACHE 的注释）：首次派生之后不再重复跑 Argon2
+    let (salt, key) = cached_key(password)?;
     let mut nonce = [0u8; NONCE_LEN];
-    rand::thread_rng().fill_bytes(&mut salt);
     rand::thread_rng().fill_bytes(&mut nonce);
 
-    let key = derive_key(password, &salt, ARGON_M_KIB, ARGON_T, ARGON_P)?;
     let cipher = Aes256Gcm::new_from_slice(&key).map_err(|e| format!("初始化失败：{e}"))?;
     // 把版本号一并送进认证数据（AAD）：改版本 = 解不开，防降级攻击
     let ct = cipher
@@ -286,7 +355,7 @@ pub fn decrypt(text: &str, password: &str) -> Result<String, String> {
     if !(8_192..=1_048_576).contains(&m) || !(1..=16).contains(&t) || !(1..=16).contains(&p) {
         return Err("备份里的 KDF 参数不合理（文件可能被改过）".into());
     }
-    let key = derive_key(password, &salt, m, t, p)?;
+    let key = decrypt_key_cached(password, &salt, m, t, p)?;
     let cipher = Aes256Gcm::new_from_slice(&key).map_err(|e| format!("初始化失败：{e}"))?;
     let plain = cipher
         .decrypt(
@@ -373,10 +442,36 @@ mod tests {
         assert!(decrypt(&v.to_string(), "pw").is_err());
     }
 
+    /// 盐在**同一进程、同一密码**下复用（省掉每次保存的 Argon2），
+    /// 但 nonce 必须每条都新 —— 这才是 AES-GCM 的安全底线。
+    ///
+    /// ⚠ 这条测试原来叫 `salt_is_random_per_call`，断言"两次加密的盐/nonce 都不同"。
+    ///   v1.4.2 起改成复用盐 + 换 nonce：盐的作用只是挡彩虹表，同一个密码反复写
+    ///   同一个文件时换盐没有安全收益，而 Argon2id（19MiB/t=2，30~80ms）每次保存
+    ///   都跑一遍会让设置页发涩 —— 见 KEY_CACHE 的注释。
     #[test]
-    fn salt_is_random_per_call() {
+    fn salt_is_reused_but_nonce_is_fresh() {
         let a = encrypt("x", "pw").unwrap();
         let b = encrypt("x", "pw").unwrap();
-        assert_ne!(a, b, "同一内容两次加密的盐/nonce 必须不同");
+        assert_ne!(a, b, "密文必须不同（nonce 每条都是新的）");
+        let va: serde_json::Value = serde_json::from_str(&a).unwrap();
+        let vb: serde_json::Value = serde_json::from_str(&b).unwrap();
+        assert_eq!(va["salt"], vb["salt"], "同一密码的盐应复用（省一次 Argon2）");
+        assert_ne!(va["nonce"], vb["nonce"], "nonce 绝不能重复");
+        assert_eq!(decrypt(&a, "pw").unwrap(), "x");
+        assert_eq!(decrypt(&b, "pw").unwrap(), "x");
+    }
+
+    /// 换密码必须立刻换盐换密钥：旧密文用新密码解不开，新密文用新密码才解得开。
+    #[test]
+    fn changing_password_invalidates_the_cached_key() {
+        let a = encrypt("secret", "old-pw").unwrap();
+        let c = encrypt("secret", "new-pw").unwrap();
+        let va: serde_json::Value = serde_json::from_str(&a).unwrap();
+        let vc: serde_json::Value = serde_json::from_str(&c).unwrap();
+        assert_ne!(va["salt"], vc["salt"], "换密码必须换盐");
+        assert!(decrypt(&a, "new-pw").is_err(), "旧密文不能用新密码解开");
+        assert_eq!(decrypt(&c, "new-pw").unwrap(), "secret");
+        assert_eq!(decrypt(&a, "old-pw").unwrap(), "secret");
     }
 }
