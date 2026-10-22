@@ -3595,7 +3595,16 @@ fn apply_view(v: &Value, cfg: &mut config::Config) {
         cfg.fav_hotkey = s.trim().to_string();
     }
     if let Some(s) = v.get("backupPassword").and_then(|x| x.as_str()) {
-        cfg.backup_password = s.to_string();
+        /* ⚠ v1.4.1：**空值不覆盖**（和其它密钥一个口径）。
+         *
+         * 原来是无条件赋值。后果很重：用户恢复一份"当年还没设密码"的旧备份，
+         * 密码就被清空 → `save_to` 里 `stash_backup_password("")` 会把
+         * `backup.key` 删掉 → **这台机器上所有用旧密码加密的备份当场全部解不开**。
+         * 密码是"安全设置"，不该被一份更老的备份降级掉；真要清空，
+         * 用户在设置里清一次就行。 */
+        if !s.trim().is_empty() {
+            cfg.backup_password = s.to_string();
+        }
     }
     if let Some(s) = v.get("backupDir").and_then(|x| x.as_str()) {
         cfg.backup_dir = s.trim().to_string();
@@ -3693,7 +3702,13 @@ fn apply_view(v: &Value, cfg: &mut config::Config) {
 
 fn broadcast() {
     let v = config_view();
-    let a = app();
+    /* ⚠ 没有 AppHandle 就直接返回 —— 单测里会走这条路。
+     * 以前是 `app()`（内部 `expect("app not ready")`），于是任何"恢复配置"
+     * 的测试一调到这里就 panic，只能绕开 `restore_from_text` 去测别的，
+     * 结果最该被钉住的那条（备份能不能恢复）反而没有测试。 */
+    let Some(a) = APP.get() else {
+        return;
+    };
     let _ = a.emit_to("bar", "qs://config", v.clone());
     let _ = a.emit_to("settings", "qs://config", v.clone());
     // ⚠ OCR 结果窗也得发一份。
@@ -4396,23 +4411,174 @@ fn stash_local_config() {
     }
 }
 
+/// 「恢复前快照」的保留份数。必须和 `cleanup.rs` 里的 `KEEP_SNAPSHOTS` 一致
+/// （那边清理时按同一个数裁，两处不一致 = 用户点一次清理就把刚留的快照删了）。
+const KEEP_SNAPSHOTS: usize = 5;
+
 /// 把一份备份文本灌回配置（云端恢复和「载入备份」共用同一套校验）。
+/// 这份备份 JSON 属于哪种格式。
+///
+/// # 为什么会有两种（历史原因，但两种都必须能恢复）
+///
+/// | 格式 | 形态 | 谁在用 | 好处 |
+/// |---|---|---|---|
+/// | `View` | camelCase + `version`（`config_view()` 的形态） | 立即备份 / WebDAV 云端 / 导出文件 | 图标以 dataURL **内嵌**，换机器恢复也带图标 |
+/// | `Config` | snake_case（就是 `config.json` 本身） | 滚动备份 `config.auto(...)` | 小、快、和主文件同构 |
+///
+/// ⚠ v1.4.1 修的真 bug：`restore_from_text` 以前只认 `View`，于是用户点
+///   「导入配置」选一份**自动备份**会得到「这份文件不像 Quick Search 的
+///   配置备份」，而选**手动备份**却成功 —— 这就是「只能恢复手动备份的文件」。
+#[derive(Debug, PartialEq, Eq)]
+enum BackupFormat {
+    View,
+    Config,
+}
+
+fn detect_backup_format(v: &Value) -> Option<BackupFormat> {
+    if v.get("barList").is_some() || v.get("version").is_some() {
+        return Some(BackupFormat::View);
+    }
+    // `bar_list` 是 Config 结构的必填字段，且不会被 serde 的 default 造出来 ——
+    // 拿它当"这是一份配置格式备份"的判据足够稳。
+    if v.get("bar_list").is_some() {
+        return Some(BackupFormat::Config);
+    }
+    None
+}
+
 fn restore_from_text(text: &str) -> Result<(), String> {
-    // 加密备份先解密（没加密的原样放行 —— 旧备份 / 没设密码的导出都兼容）
-    let text = crypto::decrypt(text, &cfg_with(|c| c.backup_password.clone()))?;
+    /* 加密备份先解开。
+     *
+     * v1.4.1：`decrypt` → `unseal`。v1.4.0 起"没设备份密码"的本地备份/导出
+     * 走的是 **DPAPI 信封**（`qsEnc:2`），`decrypt` 只认密码信封，会直接报
+     * 「不认识的加密格式」—— 那等于把没设密码的用户挡在自己的备份外面。
+     * `unseal` 按信封自己的版本号选钥匙，两种都认；明文原样放行。 */
+    let text = crypto::unseal(text, &cfg_with(|c| c.backup_password.clone()))?;
     let v: Value =
         serde_json::from_str(&text).map_err(|e| format!("备份内容不是有效的 JSON：{e}"))?;
-    // 最低限度的合理性检查：宁可拒绝，也不能拿一个不相干的 json 把用户配置冲掉
-    if v.get("barList").is_none() && v.get("version").is_none() {
+    /* 最低限度的合理性检查：宁可拒绝，也不能拿一个不相干的 json 把用户配置冲掉。
+     * v1.4.1：两种备份格式都要过这一关（以前只放行 View，自动备份全被挡在门外）。 */
+    let Some(fmt) = detect_backup_format(&v) else {
+        /* 认不出来时给一条**能指路**的提示：`.qsconf`（设置页「导出明文」那种）
+         * 和整份备份长得不一样，用户拿它来点「导入配置」是很自然的事。 */
+        if v.get("kind").and_then(|x| x.as_str()) == Some(export::EXPORT_KIND) {
+            return Err(
+                "这是「明文导出」的设置文件，请用下面的「导入明文配置」按钮".into(),
+            );
+        }
         return Err("这份文件不像 Quick Search 的配置备份，已放弃恢复".into());
-    }
+    };
     {
         let mut cfg = st().cfg.lock().map_err(|_| "配置正忙，稍后再试".to_string())?;
-        apply_view(&v, &mut cfg);
+        match fmt {
+            BackupFormat::View => apply_view(&v, &mut cfg),
+            /* 配置格式的备份本身就是一份完整的 `Config`，直接整份替换。
+             *
+             * 为什么不像 View 那样过 `apply_view`：那样要先把 Config 翻成
+             * view 再翻回来，中间任何一处没映射到就会**静默丢字段**。
+             * 而这份文件就是 config.json 的同构快照，赋值最忠实。
+             * 赋值后再走一遍 `sanitize`（剪掉指向已删收藏/软件的哨兵、
+             * 语言归一…），和启动读盘同一条归一链路。 */
+            BackupFormat::Config => {
+                let mut incoming: config::Config = serde_json::from_value(v)
+                    .map_err(|e| format!("备份内容解析失败：{e}"))?;
+                /* ⚠ v1.4.1：**绝不把备份密码降级成空**（和 apply_view 同一口径）。
+                 *
+                 * 恢复一份"当年还没设密码"的旧备份时，如果照单全收这个空密码，
+                 * `save_to` 里的 `stash_backup_password("")` 会删掉 `backup.key`
+                 * —— 这台机器上所有用旧密码加密的备份当场全部解不开。
+                 * 用户本来只是想退回旧配置，结果把退路一起烧了。 */
+                if incoming.backup_password.trim().is_empty()
+                    && !cfg.backup_password.trim().is_empty()
+                {
+                    win::log("restore: 备份里没有密码，保留本机现有的备份密码（避免旧备份读不了）");
+                    incoming.backup_password = cfg.backup_password.clone();
+                }
+                *cfg = config::sanitize(incoming);
+            }
+        }
         config::save(&cfg);
     }
     broadcast();
     Ok(())
+}
+
+/// 恢复之前把**当前**配置留一份：`config.before-restore(时间).QuickSearch`。
+///
+/// 用户手动恢复是破坏性操作（整份覆盖）。万一挑错了备份，他得有条退路 ——
+/// 这和「恢复云端之前先留本机副本」（`stash_local_config`）是同一个道理，
+/// 只是那条只管 WebDAV。
+fn stash_before_restore(why: &str) {
+    let src = config::config_path();
+    if !src.exists() {
+        return;
+    }
+    let dir = cfg_with(config::backup_dir_of);
+    let _ = std::fs::create_dir_all(&dir);
+    let stamp = config::backup_stamp();
+    let dst = dir.join(format!("config.before-restore({stamp}).QuickSearch"));
+    if std::fs::copy(&src, &dst).is_ok() {
+        win::log(&format!(
+            "restore: 恢复前已留本机副本（{why}）{}",
+            dst.display()
+        ));
+    }
+    /* 和 `stash_local_config` 一样"只留最近 N 份"：恢复是个可以反复做的动作，
+     * 不裁的话点几次就堆一屏快照。这里按**整个 before- 家族**裁
+     * （webdav 快照 + 本地恢复快照共用额度），和 cleanup.rs 的口径一致。 */
+    let mut all: Vec<std::path::PathBuf> = match std::fs::read_dir(&dir) {
+        Ok(rd) => rd
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|s| s.to_str())
+                    .map(config::is_snapshot)
+                    .unwrap_or(false)
+            })
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    all.sort();
+    while all.len() > KEEP_SNAPSHOTS {
+        let p = all.remove(0);
+        let _ = std::fs::remove_file(p);
+    }
+}
+
+/// 恢复备份目录里的某一份（设置页的备份清单点一行就恢复）。
+///
+/// 以前备份清单是**纯展示**：用户看得见 `config.auto(...)`，却没有任何入口
+/// 能把它恢复回来，只能去「导入配置」里翻文件对话框 —— 那正是"备份列表
+/// 摆在那儿却没用"的由来。
+#[tauri::command]
+fn restore_backup_file(name: String) -> Result<String, String> {
+    /* ⚠ 只接受**文件名**，且必须落在备份目录里。
+     * 前端传上来的字符串会拼进路径，`../` 之类必须挡掉 —— 否则一个被改过的
+     * 设置页就能让它去读任意文件（读出来的东西还会被当成配置写进数据目录）。 */
+    if name.trim().is_empty()
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains("..")
+        || name.contains(':')
+    {
+        return Err("文件名不合法".into());
+    }
+    let dir = cfg_with(config::backup_dir_of);
+    let p = dir.join(&name);
+    if !p.is_file() {
+        return Err("这份备份已经不在了（可能被清理过）".into());
+    }
+    let size = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+    if size > MAX_BACKUP_BYTES {
+        return Err("备份文件超过 32MB，确认选对文件了吗".into());
+    }
+    let text = std::fs::read_to_string(&p).map_err(|e| format!("文件读不出来：{e}"))?;
+    // 先留一手，再覆盖
+    stash_before_restore(&format!("恢复 {name}"));
+    restore_from_text(&text)?;
+    win::log(&format!("restore_backup_file: {name} ok"));
+    Ok(name)
 }
 
 /// 「上次**成功**备份到云端」是几点（unix 秒）。0 = 没记录。
@@ -5404,6 +5570,8 @@ fn import_config(app: AppHandle) {
                 return;
             }
         };
+        // 先留一手：这份备份要整份覆盖当前配置
+        stash_before_restore(&format!("导入 {}", p.display()));
         match restore_from_text(&text) {
             Ok(_) => {
                 win::log("import_config done");
@@ -12756,13 +12924,32 @@ fn backup_info() -> serde_json::Value {
     }
     // 新的在前
     files.sort_by_key(|a| std::cmp::Reverse(a.2));
+    /* `kind` 让设置页把三类备份分清楚（用户看清单时要能判断"这份是什么"）：
+     *   auto     = 滚动备份（每次改设置自动留）
+     *   manual   = 立即备份（用户自己点的）
+     *   snapshot = 恢复/同步之前留的本机副本
+     * v1.4.1 起这三类都**可以直接点着恢复**（`restore_backup_file`）。 */
+    let kind_of = |n: &str| -> &'static str {
+        if config::is_rolling_backup(std::path::Path::new(n)) {
+            "auto"
+        } else if config::is_manual_backup(n) {
+            "manual"
+        } else if config::is_snapshot(n) {
+            "snapshot"
+        } else {
+            "other"
+        }
+    };
     json!({
         "dir": dir.to_string_lossy(),
         "isCustom": is_custom,
         "configPath": config::config_path().to_string_lossy(),
         "files": files
             .into_iter()
-            .map(|(n, s, t)| json!({ "name": n, "size": s, "mtime": t }))
+            .map(|(n, s, t)| {
+                let kind = kind_of(&n);
+                json!({ "name": n, "size": s, "mtime": t, "kind": kind })
+            })
             .collect::<Vec<_>>(),
     })
 }
@@ -13188,6 +13375,22 @@ fn main() {
         config::save(&cfg);
         std::process::exit(0);
     }
+    // --restore-probe <备份文件名>：走设置页「点一行恢复」那条**完全相同**的路，
+    //   恢复备份目录里的一份，把结果打到 stdout 然后退出（不进界面）。
+    //
+    // 为什么需要它：这条链没法靠单元测试收尾 —— 真机上要验的是"备份目录里
+    // 那些**真实的** config.auto(...) / config(...) 到底解不解得开"，而单元测试
+    // 只能造样本。配合 `QS_DATA_DIR` 指向一份数据副本，就能在不碰用户真实配置
+    // 的前提下验完整条路。
+    if let Some(i) = args.iter().position(|a| a == "--restore-probe") {
+        let name = args.get(i + 1).cloned().unwrap_or_default();
+        init_state(); // restore_from_text 要读写全局配置状态
+        match restore_backup_file(name.clone()) {
+            Ok(n) => println!("OK={n}"),
+            Err(e) => println!("ERR={e}"),
+        }
+        std::process::exit(0);
+    }
     // --update-probe：只查一次更新并把结果打到 stdout，然后退出（不进界面）。
     //
     // 为什么需要它：更新这条链最要紧的两段（"远端比当前新"和"下载+替换"）
@@ -13576,6 +13779,7 @@ fn main() {
             ocr_test_engine,
             ocr_list_models,
             backup_info,
+            restore_backup_file,
             pick_backup_dir,
             open_backup_dir,
             clean_old_backups,
@@ -15933,6 +16137,76 @@ mod tests {
                 *g = self.saved.clone();
             }
         }
+    }
+
+    /// v1.4.1 回归：**自动备份（配置格式）也必须能恢复**。
+    ///
+    /// 用户原话：「不能够恢复自动备份的文件，只能恢复手动备份的文件」。
+    ///
+    /// 真因：`restore_from_text` 只认视图格式（`barList` / `version`），
+    /// 而滚动备份 `config.auto(...)` 是 `save_to` 写的**配置格式**
+    /// （snake_case、`bar_list`）—— 于是点「导入配置」选自动备份永远得到
+    /// 「这份文件不像 Quick Search 的配置备份」，选手动备份却成功。
+    #[test]
+    fn restore_accepts_both_backup_formats() {
+        let _serial = disk_lock();
+        let _env_lock = config::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _state_lock = STATE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _appdata = AppDataTemp::new();
+
+        // —— ① 格式判据：两种都得认出来，不相干的 json 要拒绝
+        let cfg_json = serde_json::to_value(config::Config::default()).unwrap();
+        assert_eq!(
+            detect_backup_format(&cfg_json),
+            Some(BackupFormat::Config),
+            "配置格式（滚动备份）必须被认出来"
+        );
+        assert_eq!(
+            detect_backup_format(&config_view()),
+            Some(BackupFormat::View),
+            "视图格式（手动备份/云端/导出）必须被认出来"
+        );
+        assert_eq!(detect_backup_format(&json!({ "hello": 1 })), None);
+
+        // —— ② 配置格式的备份真的能恢复进当前配置（这就是用户报的那条路）
+        let mut incoming = config::Config::default();
+        incoming.delay_ms = 777;
+        incoming.bar_list = vec!["必应".into(), "Google".into()];
+        incoming.ocr_key = "KEY-FROM-AUTO-BACKUP".into();
+        let text = serde_json::to_string(&incoming).unwrap();
+
+        let mut current = config::Config::default();
+        current.delay_ms = 0;
+        let _guard = install_state_cfg(current);
+        restore_from_text(&text).expect("配置格式的备份必须能恢复");
+        let now = st().cfg.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        assert_eq!(now.delay_ms, 777, "恢复后应当是新值");
+        assert_eq!(now.bar_list, vec!["必应".to_string(), "Google".to_string()]);
+        assert_eq!(now.ocr_key, "KEY-FROM-AUTO-BACKUP");
+
+        // —— ③ 加密的配置格式备份也要能恢复（v1.4.0 起磁盘上全是密文）
+        let sealed = crypto::seal(&text, "pw-test").unwrap();
+        let mut current2 = config::Config::default();
+        current2.backup_password = "pw-test".into();
+        let _guard2 = install_state_cfg(current2);
+        restore_from_text(&sealed).expect("加密的配置格式备份必须能恢复");
+        let now2 = st().cfg.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        assert_eq!(now2.delay_ms, 777);
+
+        // —— ④ 备份里**没有**密码时，绝不能把本机密码清掉
+        //
+        // 否则 `save_to` 会删掉 `backup.key`，这台机器上所有用旧密码加密的备份
+        // 当场全部解不开 —— 用户只想退回旧配置，却把退路烧了。
+        let mut no_pw = config::Config::default();
+        no_pw.delay_ms = 888;
+        let text2 = serde_json::to_string(&no_pw).unwrap();
+        let mut current3 = config::Config::default();
+        current3.backup_password = "my-pw".into();
+        let _guard3 = install_state_cfg(current3);
+        restore_from_text(&text2).expect("没有密码的备份也要能恢复");
+        let now3 = st().cfg.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        assert_eq!(now3.delay_ms, 888);
+        assert_eq!(now3.backup_password, "my-pw", "不能把本机密码降级成空");
     }
 
     #[test]

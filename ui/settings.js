@@ -3552,7 +3552,7 @@ async function refreshBackupInfo() {
     if (!files.length) {
         box.appendChild(Object.assign(document.createElement('div'), {
             className: 'bk-empty',
-            textContent: '目录里还没有自动备份（改动一次设置就会出现 config.json.bak）',
+            textContent: '目录里还没有备份（改动一次设置就会自动留一份）',
         }));
         return;
     }
@@ -3564,19 +3564,47 @@ async function refreshBackupInfo() {
         return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate())
             + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
     };
+    /* 三类备份长得不一样，清单里得说清楚是哪一类：
+     *   auto = 每次改设置自动留的滚动备份（config.auto(...)）
+     *   manual = 用户自己点「立即备份」的
+     *   snapshot = 恢复/同步之前留的本机副本（config.before-*）
+     * v1.4.1 起**三类都能点着恢复** —— 以前这份清单是纯展示，用户只能去
+     * 「导入配置」的文件对话框里翻，而那条路又只认手动备份的格式。 */
+    const kindText = (k) => (k === 'auto' ? '自动'
+        : k === 'manual' ? '手动'
+        : k === 'snapshot' ? '恢复前' : '其他');
     const head = document.createElement('div');
     head.className = 'bk-files-head';
-    head.textContent = '目录里现有的自动备份（最多显示 10 份）';
+    head.textContent = '备份文件（点一行就恢复，最多显示 20 份）';
     box.appendChild(head);
-    for (const f of files.slice(0, 10)) {
+    for (const f of files.slice(0, 20)) {
+        const nm = String(f.name || '');
         const row = document.createElement('div');
         row.className = 'bk-file';
-        row.appendChild(Object.assign(document.createElement('span'), {
-            className: 'bk-name', textContent: String(f.name || ''),
-        }));
+        row.title = '点击用这份备份覆盖当前配置（会先自动留一份恢复前快照）';
+        const nameEl = document.createElement('span');
+        nameEl.className = 'bk-name';
+        const k = document.createElement('i');
+        k.className = 'bk-kind kind-' + String(f.kind || 'other');
+        k.textContent = kindText(String(f.kind || ''));
+        nameEl.appendChild(k);
+        nameEl.appendChild(document.createTextNode(nm));
+        row.appendChild(nameEl);
         row.appendChild(Object.assign(document.createElement('span'), {
             className: 'bk-meta', textContent: fmtTime(f.mtime) + ' · ' + fmtSize(Number(f.size) || 0),
         }));
+        row.addEventListener('click', async () => {
+            if (!nm) return;
+            if (!confirm('用这份备份覆盖当前配置？\n\n' + nm
+                + '\n\n当前配置会先自动留一份（恢复前快照），挑错了还能退回来。')) return;
+            try {
+                await invoke('restore_backup_file', { name: nm });
+                toast('已恢复：' + nm);
+            } catch (e) {
+                toast('恢复失败：' + ((e && e.message) || e));
+            }
+            refreshBackupInfo();
+        });
         box.appendChild(row);
     }
 }

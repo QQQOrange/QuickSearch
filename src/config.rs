@@ -2053,7 +2053,7 @@ pub fn find_fav_item<'a>(groups: &'a [FavGroup], id: &str) -> Option<&'a FavItem
     None
 }
 
-fn sanitize(mut c: Config) -> Config {
+pub(crate) fn sanitize(mut c: Config) -> Config {
     let want = crate::ocr::normalize_lang(&c.ocr_lang);
     if c.ocr_lang != want {
         crate::win::log(&format!(
@@ -2661,12 +2661,13 @@ pub fn is_manual_backup(name: &str) -> bool {
     name.starts_with("config(") && name.ends_with(").QuickSearch")
 }
 
-/// 从云端恢复之前留的本机快照（`stash_local_config`）。
+/// 「恢复之前留的本机快照」—— 恢复云端之前（`stash_local_config`）和
+/// **恢复本地备份之前**（`stash_before_restore`，v1.4.1）都留一份。
 ///
-/// 只认前缀：新名字是 `config.before-webdav(时间).QuickSearch`，
+/// 只认前缀：新名字是 `config.before-*(时间).QuickSearch`，
 /// 老版本还留过 `config.before-webdav-*.json`，两种都得算进来。
 pub fn is_snapshot(name: &str) -> bool {
-    name.starts_with("config.before-webdav")
+    name.starts_with("config.before-")
 }
 
 /// 把坏内容留档，别直接覆盖掉 —— 用户还能手工捞。

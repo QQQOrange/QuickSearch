@@ -1412,6 +1412,28 @@ body.idx-on .to-top { bottom: 56px; }
     justify-content: space-between;
     gap: 10px;
     padding: 5px 2px;
+    /* v1.4.1：清单里的每一行现在**可以点**（恢复这份备份），
+       不给手型和悬停反馈的话，没人会想到去点它。 */
+    cursor: pointer;
+    border-radius: 6px;
+}
+.bk-file:hover {
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.bk-file .bk-kind {
+    display: inline-block;
+    margin-right: 6px;
+    padding: 0 5px;
+    border-radius: 4px;
+    font-size: 10.5px;
+    font-style: normal;
+    line-height: 15px;
+    border: 1px solid var(--line);
+    color: var(--fg-dim);
+}
+.bk-file .bk-kind.kind-manual {
+    border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+    color: var(--accent);
 }
 .bk-file + .bk-file { border-top: 1px dashed var(--line); }
 .bk-file .bk-name {

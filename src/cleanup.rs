@@ -46,9 +46,13 @@ pub fn substance_digest_of_text(text: &str) -> Option<u64> {
         .map(|v| substance_digest(&v))
 }
 
-/// 新式的恢复前快照：`config.before-webdav(2026-10-12 23-06-22).QuickSearch`。
+/// 新式的「恢复前快照」：`config.before-webdav(时间).QuickSearch`
+/// 和 v1.4.1 起的 `config.before-restore(时间).QuickSearch`。
+///
+/// ⚠ 必须认全 `config.before-` 前缀：只认 webdav 的话，用户每次点备份清单
+/// 恢复一次就多一个 `before-restore` 文件，永远不参与"只留最近 N 份"的裁剪。
 fn is_new_snapshot(name: &str) -> bool {
-    name.starts_with("config.before-webdav(") && name.ends_with(").QuickSearch")
+    name.starts_with("config.before-") && name.ends_with(").QuickSearch")
 }
 
 /// 老版本留下的、现在没人管的名字。
@@ -219,7 +223,10 @@ pub fn scan(dirs: &[PathBuf], password: &str, used_icons: &HashSet<String>) -> R
             continue;
         };
         let plain = if crate::crypto::looks_encrypted(&text) {
-            match crate::crypto::decrypt(&text, password) {
+            /* v1.4.1：`decrypt` → `unseal`。v1.4.0 起"没设备份密码"的备份是
+             * DPAPI 信封，`decrypt` 认不出来会当成"解不开"，这些备份就永远
+             * 不参与判重（不是被误删，而是冗余永远清不掉）。 */
+            match crate::crypto::unseal(&text, password) {
                 Ok(x) => x,
                 // 换了密码的老备份：解不开就**不参与判重**，更不会被删。
                 Err(_) => {
@@ -280,7 +287,8 @@ pub fn scan(dirs: &[PathBuf], password: &str, used_icons: &HashSet<String>) -> R
             kind: "stale-snapshot",
             label: format!("{} 份过期的「恢复前快照」", stale.len()),
             why: format!(
-                "每次「从云端恢复」之前都会在本机留一份快照兜底，只保留最近 {KEEP_SNAPSHOTS} 份就够了。"
+                "每次「从云端恢复」或「从备份清单恢复」之前，都会在本机留一份快照兜底，\
+                 只保留最近 {KEEP_SNAPSHOTS} 份就够了。"
             ),
             files: stale,
         });
