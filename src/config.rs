@@ -1357,8 +1357,20 @@ pub fn load_from(path: &std::path::Path) -> Config {
     if let (Some(before), true) = (&before, path.exists()) {
         let after = serde_json::to_string(&raw).unwrap_or_default();
         if before != &after {
-            // `save` 自己处理失败（它内部有日志），这里不用再包一层 Result
-            save(&raw);
+            /* ⚠ r99：这里必须写回**刚读的那个 path**，不能写 `save()`。
+             *
+             * `save()` 写的是全局 `config_path()`（真实 `%APPDATA%`）。而
+             * `load_from` 是可注入版本 —— 测试传的是临时文件。原来这一行是
+             * `save(&raw)`，于是**任何测试只要触发一次"启动归一有修改"，
+             * 就会把测试用的那份配置写进用户真实的数据目录**。
+             *
+             * 真实事故（2026-10-22）：`cargo test` 跑完，用户的
+             * `config.json` 变成了一份 `delay_ms = 4321` 的测试配置 ——
+             * 自定义引擎、收藏夹、图标、OCR/WebDAV 密钥全没了，而且因为
+             * `backup_password` 跟着变成空串，启动时 `stash_backup_password("")`
+             * 还把 `backup.key`（解开加密备份的唯一钥匙）删掉了。
+             * 写回自己的 path，这条污染链就断了。 */
+            save_to(path, &raw);
             crate::win::log("config: 启动归一有修改，已写回磁盘");
         }
     }
@@ -2257,7 +2269,21 @@ pub fn save_to(path: &std::path::Path, cfg: &Config) {
     // ⚠ 但"先删旧的、再写新的"顺序是错的：主文件写失败时这里会 return，
     //   那时旧的滚动备份已经被删干净、新的还没写 —— 备份族一份不剩。
     //   正确顺序是**先写新备份、成功了再删旧的**（下面就是这么排的）。
-    let bdir = backup_dir_of(cfg);
+    /* r99：没设备份目录时，滚动备份落在**主文件旁边**。
+     *
+     * 生产环境 `path` 恒为 `data_dir()/config.json`，parent 就是数据目录 ——
+     * 行为和以前完全一样。但 `save_to` 是可注入版本，测试传的是临时文件：
+     * 以前这里恒等于 `data_dir()`（= 真实 `%APPDATA%`），于是**跑一次
+     * `cargo test` 就会往用户真实数据目录里塞一堆"测试配置"的滚动备份**，
+     * 还会按轮转规则删旧的（2026-10-22 的真实事故就是这么发生的，
+     * 见 `load_from` 里 r99 那段记录）。跟着 path 走，这条污染也断了。 */
+    let bdir = if cfg.backup_dir.trim().is_empty() {
+        path.parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(data_dir)
+    } else {
+        backup_dir_of(cfg)
+    };
     let bak = bdir.join(rolling_backup_name(&backup_stamp()));
     let tmp = path.with_extension("json.tmp");
     // ⚠ 换名失败（杀软实时扫描 / 网盘占用 / 权限）时**绝不能直接往目标文件写**。
@@ -2659,6 +2685,46 @@ mod tests {
 
     // ENV_LOCK 声明在模块级（文件上方），main.rs 的测试拿的是同一把 ——
     // 那边也要写 icons 目录，必须和这里改 APPDATA 的测试串行。
+
+    /* ══════════════════════════════════════════════════════════════════
+     * r99：`load_from` 归一之后**只能写回自己那个 path**
+     *
+     * 2026-10-22 的真实事故：`cargo test` 跑完，用户真实的 `config.json`
+     * 变成了一份 `delay_ms = 4321` 的测试配置（自定义引擎/收藏/图标/
+     * OCR+WebDAV 密钥全没了，连 `backup.key` 都被删了）。
+     *
+     * 链条就是这一行：`load_from(临时文件)` → sanitize 改了东西 →
+     * `save()`（写**全局** config_path()）→ 真实配置被测试数据覆盖。
+     * 这条测试把它钉死。
+     * ══════════════════════════════════════════════════════════════════ */
+    #[test]
+    fn load_from_never_writes_the_global_config_path() {
+        let _serial = big_lock();
+        let _env_lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        // 假装"真实数据目录"就是这个空目录
+        let fake = TempDir::new("global");
+        let old = std::env::var("APPDATA").ok();
+        std::env::set_var("APPDATA", &fake.0);
+
+        // 摆一份"启动归一会改动"的配置：`CHN` 是百度不认的旧枚举，会归一成 CHN_ENG
+        let t = TempDir::new("inject");
+        let mut c = Config::default();
+        c.ocr_lang = "CHN".to_string();
+        save_to(&t.file(), &c);
+        let back = load_from(&t.file());
+        assert_eq!(back.ocr_lang, "CHN_ENG", "归一应当生效");
+        assert!(
+            !config_path().exists(),
+            "load_from 把测试配置写进了真实数据目录：{}",
+            config_path().display()
+        );
+
+        match old {
+            Some(v) => std::env::set_var("APPDATA", v),
+            None => std::env::remove_var("APPDATA"),
+        }
+    }
 
     /* ══════════════════════════════════════════════════════════════════
      * r94：锁住"恢复最新 + 只在疑似被清空时才回退"这条口径

@@ -1330,6 +1330,77 @@ fn capture_selection(target_pid: u32) -> Option<String> {
     Some(t)
 }
 
+/// 「精确复核」专用的轻量版模拟复制：**单轮、有预算**。
+///
+/// 只为一件事服务：划词落到 OCR 通道时，把认歪的那份文字换成**原文**
+/// （触发条件见 `exact_reread_why`）。
+///
+/// # 为什么没有直接复用 `capture_selection`
+///
+///   · 它最多跑 3 轮、每轮读窗口 1.5s / 0.8s / 0.8s（最坏 3.7s），而且全程
+///     握着 `CLIP_LOCK` —— 复核是**后台补丁**，卡这么久会把用户下一次
+///     Ctrl+C 的「迟到补」一起堵在锁外面；
+///   · 它没有"预算"这个概念，而这里必须在 `budget_ms` 内收工。
+///
+/// # 剪贴板纪律（和 `capture_selection` 逐条对齐）
+///
+///   · 先快照再复制，**读不到也要还原**（用户明确要求「选中不是复制」）；
+///   · 还原前用 `note_our_write()` 把基准挪到"我们自己写完那一刻"，
+///     否则 `restore_if_unchanged` 会把我们自己的写入误判成"第三方改过"，
+///     永远跳过还原 —— 选区就永久留在剪贴板里；
+///   · 这一轮**根本没写成功**（序号没动）就整段跳过还原：剪贴板一动没动，
+///     去还原反而可能把别人刚写进去的东西抹掉。
+fn capture_selection_fast(target_pid: u32, budget_ms: u64) -> Option<String> {
+    let _clip = lock_clip();
+    let mut snap = clip::snapshot();
+    let old = snap
+        .as_ref()
+        .and_then(|s| s.text())
+        .map(|t| t.trim().to_string());
+    if snap.is_none() {
+        win::log("capture(exact): 剪贴板被别的程序占着，快照失败 —— 本次无法还原");
+    }
+    /* 这条是**复核**，不是首取：选区早在 mouseup 那一刻就落地了（首取路径已经
+     * 等过 60ms 稳定期），所以这里只留一点点余量。 */
+    std::thread::sleep(Duration::from_millis(20));
+    let before = clip::seq();
+    win::send_ctrl_c();
+    let t0 = std::time::Instant::now();
+    let mut got: Option<String> = None;
+    while t0.elapsed() < Duration::from_millis(budget_ms) {
+        if clip::seq() != before {
+            if let Some(t) = clip::read_text_any() {
+                let t = t.trim().to_string();
+                // 「和复制前不一样」才是硬证据（见 capture_selection 同一段注释）
+                if !t.is_empty()
+                    && t.chars().count() <= 20000
+                    && old.as_deref() != Some(t.as_str())
+                {
+                    got = Some(t);
+                    break;
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let wrote = clip::seq() != before;
+    if wrote {
+        if let Some(s) = snap.as_mut() {
+            s.note_our_write();
+        }
+        match &snap {
+            Some(s) => clip::restore_if_unchanged(s),
+            None => win::log("capture(exact): 没有快照 —— 剪贴板里会留着这次选区"),
+        }
+    }
+    if got.is_none() {
+        win::log(&format!(
+            "capture(exact): {budget_ms}ms 内没读到新内容（目标 pid={target_pid} 写没写={wrote}）"
+        ));
+    }
+    got
+}
+
 /// 划词取词（**全程不碰剪贴板**）：UIA 直读选区 → OCR 兜底。
 ///
 /// 用户的口径说得很明确：**「选中文字就弹条，不是选中就复制」**。
@@ -1397,6 +1468,163 @@ fn capture_without_clipboard(drag: (i32, i32, i32, i32)) -> Option<(String, &'st
             None
         }
     }
+}
+
+/* ================================================================== */
+/* r98：划词取到的是 OCR 文字时，再精确复核一次                        */
+/* ================================================================== */
+
+/// 这段（OCR 出来的）文字**看起来可能是一条网址/路径**吗？
+///
+/// 只用来决定「值不值得再花一次剪贴板去精确复核」，所以判据刻意放宽 ——
+/// 假阳性（多复核一次）的代价是几十毫秒 + 一次用完就还原的剪贴板，
+/// 假阴性（该复核却没复核）的代价是用户报的那个 bug 原样留着。
+///
+/// 实测的 OCR 噪声（用户日志，选中的是 `https://github.com/xanderfrangos/
+/// twinkle-tray`）：
+/// ```text
+///   nttos.'//altnuo.corrvxanaenranaos/twlnl<le-tray
+///   ntt0S'.//QItnuD.com/xanaer-rrana0S/tWInKte-trav
+/// ```
+/// 两个都带 `//`，所以「有 `//` / `www.`」这一条就足够把它捞回来。
+fn maybe_link_like(t: &str) -> bool {
+    let s = t.trim();
+    if s.is_empty() || s.chars().count() > 512 {
+        return false;
+    }
+    let lower = s.to_ascii_lowercase();
+    if lower.contains("//") || lower.contains("www.") {
+        return true;
+    }
+    /* 退一步的判据：**全 ASCII + 没有空白 + 有 `.` `/` `\`**。
+     *
+     * 网址和文件路径都长这样，而正常的一句英文/中文不会：英文句子有空格，
+     * 中文有汉字。这条能把 `index.html`、`C:\Users\a\b.txt`、
+     * `www.baidu.com` 这类（OCR 可能认错一两个字母的）也捞进来。 */
+    s.is_ascii()
+        && !s.chars().any(|c| c.is_whitespace())
+        && (s.contains('.') || s.contains('/') || s.contains('\\'))
+}
+
+/// 这次划词**需不需要**再精确复核一遍？返回原因（进日志），不需要就是 None。
+///
+/// # 为什么需要这条通道（用户 2026-10-22 的第二次反馈）
+///
+/// 第一次的修法（r97）是放宽「这段文字是不是网址」的判据，指望 OCR 的
+/// `https:// www.baidu.com` 这种**断字**噪声能被接回去。但用户的日志说明
+/// 真正的噪声比那严重得多：OCR 会把字母**认错**（`twinkle` → `twlnl<le`），
+/// 这种错误任何判据都救不回来 —— 只能换一条能拿到**原文**的通道。
+///
+/// 而原文只有一条路能拿到：模拟一次 Ctrl+C 读剪贴板（浏览器里 UIA 是死的，
+/// 见 `win::uia_foreground_is_browser` 的实证注释）。
+///
+/// # 为什么不是"划词一律走剪贴板"
+///
+/// 用户的硬口径是「选中就弹条，**不是**选中就复制」。模拟复制虽然会还原，
+/// 但终究动过剪贴板（Win+V 里会多一条、剪贴板管理器会看到）。所以只在
+/// **有理由相信这段文字里藏着网址/路径**时才动它：
+///
+///   ① 抹掉空白后整段就是一条网址，但认出来那条**没覆盖它**（OCR 塞空格/认错字
+///      → 认出来的是截断地址）；
+///   ② 这段文字里有链接的影子（`maybe_link_like`），但一条链接都没认出来；
+///   ③ 在 Chromium 浏览器里划了一大段，却几乎没认出字（`}`、`00S`、空串 ——
+///      用户日志里真实出现过），这说明 OCR 在这块区域上失灵了。
+///
+/// ③只对浏览器放开：别的软件（Excel 选单元格、图片编辑器框选）也满足
+/// "划了一大段没认出字"，但它们不该被我们塞一次 Ctrl+C 进去。
+///
+/// ⚠ 反过来也有一条"**不用复核**"的出口：认出来的链接已经覆盖整段 ≥90%
+///   （OCR 这次认得准）就一个字节都不动 —— 不能为了正确的事付无谓的代价。
+fn exact_reread_why(t: &str, drag: (i32, i32, i32, i32), in_browser: bool) -> Option<&'static str> {
+    let text = t.trim();
+    if !text.is_empty() {
+        /* 「去掉所有空白之后的那一整段」—— 用来判断这次划的是不是**一条**网址。
+         *
+         * 为什么先抹空白：OCR 会往网址里塞空格（用户日志原样：
+         * `https://www.douyin.com/jingxuan?modal id=76946313 546769009`），
+         * 而 `extract_links` 遇到空格就断，于是只截出 `...?modal` 这一小段。
+         * 抹掉空白之后才是用户真正选中的那个地址。 */
+        let squeezed: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+        let n = squeezed.chars().count();
+        let links = engines::extract_links(text);
+        // 认出来的最长那条，占整段多少（字数）
+        let covered = links.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+
+        /* ① 认出来的链接**几乎覆盖整段**（≥90%）→ OCR 没认歪，一个字节都不用动。
+         *
+         * 这条是"别为了正确的事付无谓的代价"：一次完美识别也去模拟 Ctrl+C，
+         * 等于把用户明确禁止的「选中就复制」白做一遍。 */
+        if covered * 10 >= n * 9 {
+            return None;
+        }
+        /* ①b 已经认出**两条以上**链接 → 也放过。
+         *
+         * 两条都认得出来，说明不是"一条网址被 OCR 打断"（被打断时后半截没有
+         * 协议头，`extract_links` 根本不会把它算成第二条）。用户点按钮本来
+         * 就是"把这些链接分别开成标签页"，两条都对了就没必要复核。 */
+        if links.len() >= 2 {
+            return None;
+        }
+        /* ② 抹掉空白之后**整段就是一条网址**，但认出来那条没覆盖它 ——
+         *    说明 OCR 把空格塞进去了（或认错了字），认出来的是**截断**的地址。
+         *    用户日志里的真实形状：按钮亮了，点下去打开的是 `...?modal`
+         *    这种半截地址（比"按钮不亮"更坑，因为它看起来是好的）。 */
+        if (8..=512).contains(&n) {
+            if let Some(u) = engines::text_to_url(&squeezed) {
+                if u.chars().count() * 10 >= n * 8 {
+                    return Some("整段像一条网址，但认出来那条是截断的（OCR 塞了空格/认错字）");
+                }
+            }
+        }
+        /* ③ 有网址/路径的影子，却一条链接都没认出来（认错字那种，见 maybe_link_like） */
+        if links.is_empty() && maybe_link_like(text) {
+            return Some("这段文字像网址/路径，但一条链接都没认出来");
+        }
+    }
+    /* ④ 在 Chromium 浏览器里划了一大段，却几乎没认出字（`}`、`00S`、空串 ——
+     *    用户日志里真实出现过）。只对浏览器放开：别的软件（Excel 选单元格、
+     *    图片编辑器框选）也满足这个形状，但它们不该被我们塞一次 Ctrl+C 进去。 */
+    let span = (drag.2 - drag.0).abs().max((drag.3 - drag.1).abs());
+    if in_browser && span >= 80 && text.chars().count() <= 3 {
+        return Some("浏览器里划了一大段却几乎没认出字");
+    }
+    None
+}
+
+/// 后台跑一次「精确复核」，拿到原文就把横条上那份 OCR 文字换掉。
+///
+/// 走的是和 Ctrl+C「迟到补」完全同一条通道（`push_late_text` → 前端 `qs://text`）：
+/// 前端会把文字、`isUrl`、`urls` 一起重算，所以**直达链接按钮会跟着出现**，
+/// 横条宽度也会重新报一次给后端。
+///
+/// ⚠ 两道 `GEN` 校验：复核要花几十~几百毫秒，这期间用户完全可能又划了下一段
+///   （或把横条收掉了）—— 那时这份文字属于上一根横条，补上去就是"串味"。
+fn spawn_exact_reread(gen: usize, target_pid: u32, ocr_text: String) {
+    let _ = std::thread::Builder::new()
+        .name("qs-exact".into())
+        .spawn(move || {
+            if GEN.load(Ordering::SeqCst) != gen {
+                return;
+            }
+            let Some(exact) = capture_selection_fast(target_pid, 700) else {
+                return;
+            };
+            let exact = exact.trim().to_string();
+            if exact.is_empty() || exact == ocr_text.trim() {
+                return;
+            }
+            if GEN.load(Ordering::SeqCst) != gen {
+                win::log("capture(exact): 复核回来时横条已经换了，丢弃这份文字");
+                return;
+            }
+            win::log(&format!(
+                "capture(exact): 精确读到 {} 字（OCR 那份 {} 字），链接 {} 条 —— 补进横条",
+                exact.chars().count(),
+                ocr_text.chars().count(),
+                engines::extract_links(&exact).len()
+            ));
+            push_late_text(exact, true);
+        });
 }
 
 /// 兜底 OCR 的「小块放大」：抓到划词区域先按需要放大，再进 `ocr_ready_image`。
@@ -2152,8 +2380,35 @@ fn start_capture(target_pid: u32, drag: (i32, i32, i32, i32)) {
              *
              * ⚠ 唯一的例外是黑名单（`app_allowed`），那个判断在
              *   `trigger_allowed` 里、比这里更早，没有被我这条改动绕过。 */
-            let text = out.map(|(t, _)| t).unwrap_or_default();
-            show_bar(text, false, true);
+            let (text, via) = match out {
+                Some((t, v)) => (t, v),
+                None => (String::new(), ""),
+            };
+            /* r98：OCR 认出来的文字**经常把网址认错**（用户实测：选中的是
+             * `https://github.com/xanderfrangos/twinkle-tray`，OCR 给的是
+             * `nttos.'//altnuo.corrvxanaenranaos/twlnl<le-tray`），于是
+             * 「这段文字里有没有链接」判不过、直达链接按钮不出现 ——
+             * 而复制路径拿到的是剪贴板原文，按钮正常。这就是用户报的
+             * 「选中网址不弹按钮、复制了却弹」。
+             *
+             * 判据放宽（r97）救不了"认错字"这种噪声，所以这里补一条
+             * **精确复核**：先照旧把横条弹出来（文字是 OCR 的，用户零等待），
+             * 后台再模拟一次 Ctrl+C 把原文读回来，读到了就替换掉 ——
+             * 走的是 Ctrl+C「迟到补」那条现成通道，按钮会跟着亮起来。
+             *
+             * 只在「这段文字里可能藏着网址/路径」时才动剪贴板（见
+             * `exact_reread_why` 的注释），普通中文划词一个字节都不碰。 */
+            let in_browser = win::uia_foreground_is_browser();
+            let gen = show_bar(text.clone(), false, true);
+            /* ⚠ `via` 为空串 = 三条通道**全都没拿到文字**（OCR 也失败）——
+             * 那也是 OCR 这条路上的失败，同样要复核：用户日志里"选中的是网址，
+             * 横条却是空的"就是这么来的（`show_bar: ""`）。 */
+            if matches!(via, "OCR" | "") {
+                if let Some(why) = exact_reread_why(&text, drag, in_browser) {
+                    win::log(&format!("capture(exact): {why} —— 后台精确复核一次"));
+                    spawn_exact_reread(gen, target_pid, text);
+                }
+            }
         })
     else {
         BUSY.store(false, Ordering::SeqCst);
@@ -13725,6 +13980,66 @@ mod tests {
         for s in ["HTTPS://EXAMPLE.COM", "https://zh.wikipedia.org/wiki/中文"] {
             assert!(engines::text_to_url(s).is_some(), "{s} 应当认成网址");
         }
+    }
+
+    /// r98：用户日志里真实出现过的 OCR 噪声，必须被认成「像网址」——
+    /// 否则那条精确复核通道根本不会启动，用户的 bug 原样留着。
+    #[test]
+    fn maybe_link_like_catches_ocr_mangled_urls() {
+        // 用户实测：选中的是 https://github.com/xanderfrangos/twinkle-tray
+        for s in [
+            "nttos.'//altnuo.corrvxanaenranaos/twlnl<le-tray",
+            "ntt0S'.//QItnuD.com/xanaer-rrana0S/tWInKte-trav",
+            "https:// www.baidu.com",
+            "www.baidu.com",
+            "index.html",
+            r"C:\Users\a\b.txt",
+        ] {
+            assert!(maybe_link_like(s), "{s} 应当触发精确复核");
+        }
+        // 普通划词不该动剪贴板
+        for s in [
+            "",
+            "   ",
+            "选中就弹条",
+            "the quick brown fox",
+            "}",
+            "00S",
+            "音量加和音量减",
+        ] {
+            assert!(!maybe_link_like(s), "{s} 不该触发精确复核");
+        }
+    }
+
+    /// 复核的触发条件：认残了 / 认不出来 / 浏览器里整片没认出字，才动剪贴板。
+    #[test]
+    fn exact_reread_why_only_for_suspicious_selections() {
+        let wide = (100, 100, 500, 130);
+        let tiny = (100, 100, 110, 105);
+        // 像网址但没认出链接 → 复核
+        assert!(exact_reread_why("nttos.'//altnuo.corr/x", wide, true).is_some());
+        /* 用户日志里的真实形状：OCR 往网址里塞了空格，`extract_links` 只截出
+         * `...?modal` 这一段 —— 按钮要么不亮，要么点下去打开半截地址。 */
+        assert!(exact_reread_why(
+            "https://www.douyin.com/jingxuan?modal id=76946313 546769009",
+            wide,
+            true
+        )
+        .is_some());
+        // 浏览器里划了一大段，只认出 1 个字 → 复核
+        assert!(exact_reread_why("}", wide, true).is_some());
+        // 同样的"没认出字"，但不在浏览器里（Excel 选单元格之类）→ 不动剪贴板
+        assert!(exact_reread_why("}", wide, false).is_none());
+        // 框太小（其实是点击）→ 不复核
+        assert!(exact_reread_why("}", tiny, true).is_none());
+        // OCR 认得干干净净的网址（链接覆盖整段）→ 不复核
+        assert!(exact_reread_why("https://www.baidu.com", wide, true).is_none());
+        // 普通中文划词 → 不复核
+        assert!(exact_reread_why("选中就弹条", wide, true).is_none());
+        // 中文句子夹链接（链接只占一小截）→ 不复核（避免每段中文都动剪贴板）
+        assert!(exact_reread_why("请访问 https://a.com 看详情", wide, true).is_none());
+        // 多条链接并列 → 不复核
+        assert!(exact_reread_why("https://a.com https://b.com", wide, true).is_none());
     }
 
     /// 横条明暗听谁的：显式选的「亮色 / 暗色」必须压过系统偏好
