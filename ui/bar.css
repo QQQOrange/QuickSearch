@@ -1047,8 +1047,24 @@ button.fav-grp-head:focus-visible {
      *   一旦跟着降到 0.3 就完全读不了（文字和桌面背景叠在一起）。
      *   面板永远是实心的：它只在用户主动展开时出现，不存在"打扰桌面"的问题。 */
     opacity: 1;
-    animation: qs-panel-in .16s cubic-bezier(.22, 1, .36, 1);
-    will-change: transform, opacity;
+    /* 面板出现的动画（用户要求：「加一个那种比较优雅的但速度又很快的动画」）。
+     *
+     * 口径：**150~190ms + 强缓出** —— 比一次眨眼还短，但足够让"它从横条下面
+     * 长出来"这件事被眼睛接住。分两层做，避免又慢又糊：
+     *   · 面板本体只做**淡入**；
+     *   · 头 / 身 / 尾各自从上方 7px 落位并淡入，尾部件再晚 10ms 起跑，
+     *     于是有一点"一层层铺开"的层次感，而不是整块板子平移。
+     *
+     * ⚠ 面板本体**绝对不能**用 transform 做动画（哪怕只是 translateY(-5px)）：
+     *   pushLayout 是拿 `panelEl.getBoundingClientRect()` 量窗口尺寸的，父元素一旦
+     *   带位移/缩放，量到的就是动画**中间态** —— 窗口会比面板小几像素，
+     *   面板右缘/下缘被硬切掉一块（r47「面板被裁」那个坑的另一条入口）。
+     *   子元素的 transform 不进父盒的 rect，所以位移放在 head/body/foot 上是安全的。
+     * ⚠ display:none → flex 会让子元素上的动画重新起跑，所以每次打开都会播；
+     *   面板内部重画（换分类 / 改设置 / 打字筛引擎）不换节点，不会重播 ——
+     *   不会出现"每敲一个字就抖一下"。 */
+    animation: qs-panel-fade .15s cubic-bezier(.22, 1, .36, 1);
+    will-change: opacity;
     display: flex;
     flex-direction: column;
     overflow: hidden;
@@ -1057,9 +1073,37 @@ button.fav-grp-head:focus-visible {
 .panel-head { flex: none; }
 .panel-foot { flex: none; }
 
-@keyframes qs-panel-in {
-    from { transform: translateY(-5px); }
-    to   { transform: translateY(0); }
+/* 内容分层的落位动画（见 .panel 里那段说明）。
+ * fill-mode 必须是 **backwards**：body/foot 有 delay，没有它的话延迟那一小段
+ * 会先按终态（完全不透明）画出来，再"啪"地跳回透明重新淡入 —— 反而是个闪。
+ * 用 backwards 而不是 both：动画一结束就回到基样式（transform: none），
+ * 不给 .panel-body 留一个 `translateY(0)` —— 那也是个 transform，
+ * 会在滚动容器上多造一个包含块，纯属自找麻烦。 */
+.panel-head,
+.panel-body,
+.panel-foot {
+    animation: qs-panel-rise .19s cubic-bezier(.22, 1, .36, 1) backwards;
+}
+
+.panel-body { animation-delay: .01s; }
+.panel-foot { animation-delay: .02s; }
+
+@keyframes qs-panel-fade {
+    from { opacity: 0; }
+    to   { opacity: 1; }
+}
+
+@keyframes qs-panel-rise {
+    from { opacity: 0; transform: translateY(-7px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+
+/* 系统里开了「减少动态效果」就老实待着 —— 别跟用户的系统设置对着干 */
+@media (prefers-reduced-motion: reduce) {
+    .panel,
+    .panel-head,
+    .panel-body,
+    .panel-foot { animation: none; }
 }
 
 .panel-head {
@@ -1303,6 +1347,34 @@ button.fav-grp-head:focus-visible {
     color: var(--qs-accent);
 }
 
+/* ------------------- 小类胶囊行（面板三级目录） -------------------
+ * 用户原话：「选择完中类之后，小类最好是每一个就都呈现出来，一种胶囊的形式，
+ * 这样我要哪个我点击就可以了，不用再一个个的找」。
+ *
+ * 所以这一行是**全部铺开**的（.cat-nav 本来就 flex-wrap），而不是下拉菜单。
+ * 代价是行数：网页那一族一个中类底下有 24 个小类，铺开约 3 行 —— 必须比上面
+ * 那两级更紧凑，否则吸附头会把只有 344px 高的 .panel-body 挤没。
+ *   · 高度 22px → 19px，字号 11.5 → 10.5，圆角 11 → 10（看着还是颗药丸）；
+ *   · 数量用小字跟在名字后面（和下拉菜单里那个数字同一个口径）。 */
+.cat-nav.cat-row {
+    gap: 3px;
+}
+
+.cat-nav.cat-row .cat-nav-item {
+    height: 19px;
+    padding: 0 7px;
+    border-radius: 10px;
+    font-size: 10.5px;
+}
+
+.cat-nav.cat-row .cat-nav-item .n {
+    margin-left: 3px;
+    font-size: 9.5px;
+    opacity: .55;
+}
+
+.cat-nav.cat-row .cat-nav-item.on .n { opacity: .8; }
+
 .grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(112px, 1fr));
@@ -1419,7 +1491,16 @@ button.fav-grp-head:focus-visible {
     border: none;
     background-color: var(--qs-bg-fill, var(--qs-bg));
     box-shadow: var(--qs-shadow);
-    animation: qs-panel-in .12s ease;
+    animation: qs-menu-in .12s ease;
+}
+
+/* 右键菜单的入场（很轻：只抬 5px + 淡入）。
+ * ⚠ 这条 keyframes 原来叫 qs-panel-in，和面板动画同名；面板那套改成
+ *   qs-panel-fade / qs-panel-rise 之后名字必须分开 —— 否则两处共用一个
+ *   名字，改一处就会顺手把另一处也改掉（这次就差点把菜单动画删没了）。 */
+@keyframes qs-menu-in {
+    from { opacity: 0; transform: translateY(-5px); }
+    to   { opacity: 1; transform: translateY(0); }
 }
 
 .menu-item {
@@ -1480,8 +1561,13 @@ button.fav-grp-head:focus-visible {
  *  ① 设置里的「动画」开关（.qs-noanim）；
  *  ② 系统「设置 → 辅助功能 → 视觉效果 → 动画效果」关掉时，
  *     Chromium 会把 prefers-reduced-motion: reduce 报进来。 */
+/* ⚠ 面板的落位动画挂在三个子盒上（见 .panel 那段说明），只关 .panel 自己的
+ *   animation 是关不掉的 —— 子盒必须一起列进来，否则"动画"开关看起来失灵。 */
 .stage.qs-noanim .bar,
 .stage.qs-noanim .panel,
+.stage.qs-noanim .panel-head,
+.stage.qs-noanim .panel-body,
+.stage.qs-noanim .panel-foot,
 .stage.qs-noanim .menu {
     animation: none !important;
 }

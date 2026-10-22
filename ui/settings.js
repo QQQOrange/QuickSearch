@@ -1066,7 +1066,14 @@ function renderAllNav(nav, ctx) {
 
         /* 三级：小类目录汇总（r74）。内容 = 当前范围内的全部小节，顺序与正文的
          * 分节一一对应（同一个 sections 数组，renderAllList 算好后两边都用）。
-         * 胶囊点击 = 跳转到那一节；正过滤着别的小类时先恢复全量再跳。 */
+         *
+         * ⚠ 本次改成**点击 = 只看这一类**（以前是"只跳转、不重新过滤"）。
+         *   用户原话：「更多引擎面板选择完中类之后，小类最好是每一个就都呈现出来，
+         *   一种胶囊的形式，这样我要哪个我点击就可以了，不用再一个个的找。
+         *   还有设置引擎库里面也是这样」—— 横条面板那边已经改成平铺胶囊了，
+         *   这里保持同一个手感：点一颗 = 正文只剩这一类，再点同一颗 = 恢复全部。
+         *   （原来那套"跳转到那一节"的语义并没有丢：取消过滤时还会把你送回那一节，
+         *    免得列表跳回顶部、位置全丢。） */
         if (ctx.sections && ctx.sections.length) {
             const { row: r3, track: t3 } = allNavRow('小类', 'wrap cats');
             if (allCatFilter) {
@@ -1075,15 +1082,19 @@ function renderAllNav(nav, ctx) {
             }
             for (const s of ctx.sections) {
                 const chip = allChip(s.title, s.count,
-                    '跳到「' + s.title + '」那一节（共 ' + s.count + ' 个）',
+                    '只看「' + s.title + '」这一类（共 ' + s.count + ' 个）；再点一次恢复全部',
                     allCatFilter === s.title,
                     () => {
-                        // 正过滤着别的小类 → 先恢复全量（节标题带锚点，跳得过去）
-                        if (allCatFilter && allCatFilter !== s.title) {
-                            allCatFilter = null;
-                            renderAllList();
+                        const wasOn = allCatFilter === s.title;
+                        allCatFilter = wasOn ? null : s.title;
+                        renderAllList();
+                        /* 过滤状态下这一节**没有**节标题、也就没有锚点（正文直接从它
+                         * 开始，本来就在视野顶部，不用跳）。只有"取消过滤"这一下
+                         * 需要把人送回原处 —— 否则整份列表重画、滚动位置回到顶部。 */
+                        if (wasOn) {
+                            const el = document.getElementById(s.anchor);
+                            if (el) allJumpTo(el);
                         }
-                        allJumpTo(document.getElementById(s.anchor));
                     });
                 chip.dataset.jump = s.anchor;   // 滚动监听认领用
                 t3.appendChild(chip);

@@ -249,11 +249,15 @@ async function until(ws, expr, ms) {
             && lv3.catHeads === lv3.chips3.length, 'rows=' + lv3.rows + ' cats=' + lv3.chips3.length
             + ' heads=' + lv3.catHeads);
 
-        /* r74：目录里点小类 = **跳转**（用户原话：「我点击小类就能够跳转到相关
-         * 位置」），不再是过滤。列表行数必须原样不变，目标节要落进视口。 */
+        /* 小类胶囊：r74 的口径是「点小类 = 只跳转、不重新过滤」；本次按用户要求
+         * 改成**点小类 = 只看这一类**（用户原话：「小类最好是每一个就都呈现出来，
+         * 一种胶囊的形式，这样我要哪个我点击就可以了，不用再一个个的找。
+         * 还有设置引擎库里面也是这样」—— 横条面板那边也改成了平铺胶囊）。
+         * 断言：点最后一个小类 → 正文只剩这一类（不再写节标题）、目录给出
+         * 「全部小类」恢复入口；再点「全部小类」→ 行数回到点击前。 */
         const jumpCat = JSON.parse(await ev(sw, `(function(){
             var chips = [].slice.call(document.querySelectorAll('#allGrpNav .eng-nav-row:last-child .eng-nav-item'));
-            var b = chips[chips.length - 1];      // 最后一个小类，节在页面深处
+            var b = chips[chips.length - 1];      // 最后一个小类，引擎最多
             var name = b.textContent.replace(/[0-9]+$/, '');
             var before = document.querySelectorAll('#allList .list .item').length;
             b.click();
@@ -262,21 +266,36 @@ async function until(ws, expr, ms) {
         })()`));
         await sleep(500);
         const afterJump = JSON.parse(await ev(sw, `(function(){
-            var h = document.getElementById(${JSON.stringify(jumpCat.anchor)});
-            var r = h ? h.getBoundingClientRect() : null;
+            var all = [].slice.call(document.querySelectorAll('#allGrpNav .eng-nav-row:last-child .eng-nav-item'))
+                .find(function(x){ return x.textContent.indexOf('全部小类') === 0; });
             return JSON.stringify({
                 rows: document.querySelectorAll('#allList .list .item').length,
                 catHeads: document.querySelectorAll('#allList .eng-cat-h').length,
-                inView: !!r && r.top >= 0 && r.top < window.innerHeight,
-                top: r ? Math.round(r.top) : null
+                allChip: all ? all.textContent : ''
             });
         })()`));
-        rec('点小类「' + jumpCat.name + '」跳转：' + JSON.stringify(afterJump));
-        check('L15 点目录小类 = 跳转到那一节（行数不变、不重新过滤）',
-            afterJump.rows === jumpCat.before && afterJump.catHeads === lv3.chips3.length
-            && afterJump.inView === true, JSON.stringify(afterJump));
+        rec('点小类「' + jumpCat.name + '」过滤：' + JSON.stringify(afterJump));
+        check('L15 点目录小类 = 只看这一类（行数变少、不写节标题、给「全部小类」入口）',
+            afterJump.rows > 0 && afterJump.rows < jumpCat.before
+            && afterJump.catHeads === 0 && afterJump.allChip.indexOf('全部小类') >= 0,
+            JSON.stringify(afterJump));
 
-        // 过滤收进了节标题的「只看」按钮：点了才只剩这一类，且不再写标题
+        // 点「全部小类」→ 恢复全量（行数回到点击前那个数）
+        await ev(sw, `(function(){
+            var all = [].slice.call(document.querySelectorAll('#allGrpNav .eng-nav-row:last-child .eng-nav-item'))
+                .find(function(x){ return x.textContent.indexOf('全部小类') === 0; });
+            if (all) all.click();
+        })()`);
+        await sleep(600);
+        const restored = JSON.parse(await ev(sw,
+            "JSON.stringify({ rows: document.querySelectorAll('#allList .list .item').length,"
+            + " heads: document.querySelectorAll('#allList .eng-cat-h').length })"));
+        rec('点「全部小类」恢复：' + JSON.stringify(restored));
+        check('L15c 点「全部小类」恢复全量（行数与点击前一致）',
+            restored.rows === jumpCat.before && restored.heads === lv3.chips3.length,
+            JSON.stringify(restored));
+
+        // 节标题上的「只看」按钮仍然保留（同一条过滤路，从正文里也能点）
         const pickOnly = JSON.parse(await ev(sw, `(function(){
             var heads = [].slice.call(document.querySelectorAll('#allList .eng-cat-h'));
             var h = heads[0];

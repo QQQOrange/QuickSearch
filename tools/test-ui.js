@@ -2740,10 +2740,21 @@ async function testCatJump() {
     await flush();
     eq('选了一个中类 → 正文只剩这一节（选哪个显示哪个）',
         [...body.querySelectorAll('.cat-title[data-cat]')].filter((x) => !x.hidden).length, 1);
-    eq('  三级胶囊随之出现（选了二级才有三级）',
-        w.document.querySelectorAll('#panelPick3 .qs-pick').length, 1);
+    /* 三级：原来是「一个胶囊 + 下拉菜单」，用户要求改成**平铺胶囊** ——
+     * 「选择完中类之后，小类最好是每一个就都呈现出来，一种胶囊的形式，这样我要
+     * 哪个我点击就可以了，不用再一个个的找」。所以这里断的是 .cat-chip 平铺、
+     * 且**不再有** .qs-pick 下拉。 */
+    const chips3 = [...w.document.querySelectorAll('#panelPick3 .cat-chip')];
+    ok('  三级改成平铺胶囊（一颗小类一颗胶囊，不再是下拉菜单）',
+        chips3.length >= 2 && !w.document.querySelector('#panelPick3 .qs-pick'),
+        chips3.map((b) => b.textContent).join(' / '));
     ok('  三级还没选时，小类标题都露着（目录不遮内容）',
         [...body.querySelectorAll('.cat-sub')].every((s) => !s.hidden));
+
+    chips3[1] && chips3[1].click();
+    await flush();
+    eq('  点一颗小类 → 正文只剩这一类',
+        [...body.querySelectorAll('.cat-sub')].filter((s) => !s.hidden).length, 1);
 
 
     // 数据侧：分组改造必须落到真实目录文件里

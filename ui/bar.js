@@ -61,6 +61,11 @@ const inputEngFilter = $('engFilter');
 let CATALOG = null;        // data/engines.json
 let CONF = null;           // Rust 侧配置
 let ENGINE_BY_NAME = new Map();
+/** 名字 → 别名数组（**全表合并**）。和 ENGINE_BY_NAME 是两张表，别合并成一个：
+ *  ENGINE_BY_NAME 是"先注册先得"的**单条**记录（toolbar 先注册，所以同名的
+ *  toolbar 条目会遮掉分类表里那份完整的），而别名必须把所有来源累加。
+ *  详见 buildAliasIndex 的注释。 */
+let ENGINE_ALIASES = new Map();
 let currentText = '';      // 当前选区文本
 let currentIsUrl = false;
 /** 本次选中文字里的**全部**链接（后端 `qs://show` / `qs://text` 的 urls）。
@@ -1078,7 +1083,11 @@ function renderBar(force) {
  * 用户原话：「网页/软件/快捷键三选项改小型胶囊横条同一行；默认展示所有
  * 引擎，点某类只显示该类」—— 所以默认不再是「三大类卡片」那种下钻首页，
  * 而是直接看到全部引擎，胶囊只是**筛子**。
- * panelSearchMode = 搜索框有词 → 同样平铺，但只留命中的（跨全表）。 */
+ * panelSearchMode = 搜索框有词 → 同样平铺，但只留命中的（跨全表）。
+ *
+ * ⚠ 这三层筛子（大类 / 中类 / 小类）**必须同生同灭**：只复位其中一层，
+ *   剩下那层就成了"看不见的筛子"——用户报的「搜哔哩哔哩只搜得到首页、
+ *   搜不到它的搜索引擎」正是这么来的（详见 applyEngineFilter 里那段说明）。 */
 let panelGroupFilter = null;
 let panelSearchMode = false;
 
@@ -1745,12 +1754,54 @@ function cssEscapeValue(s) {
     return (window.CSS && CSS.escape) ? CSS.escape(s) : String(s).replace(/"/g, '\\"');
 }
 
-/** 引擎格子上的气泡提示：名字 + 别名（有别名才带括号）。 */
-function aliasTip(name) {
+/** 重建「名字 → 别名数组」索引：**把全表所有来源的别名累加**。
+ *
+ *  ⚠ 为什么不直接读 ENGINE_BY_NAME：那张表是"先注册先得"建起来的，而
+ *    `CATALOG.toolbar`（横条上默认那几颗）**先**注册，且 toolbar 里的条目
+ *    **一律没有 alias 字段**。于是像「哔哩哔哩」这种"既在 toolbar、又在分类表里"
+ *    的引擎，它的别名（B站 / bilibili / 小破站 / BILI）会被 toolbar 那份**遮掉** ——
+ *    按别名搜它一律搜不到，用户看到的就是"这个引擎明明在列表里，就是搜不出来"。
+ *    （实测：搜「B站」只出「哔哩哔哩（首页）」，搜索引擎那一颗被藏了；
+ *      它俩在 engines.json 里别名一模一样，差别就在 toolbar 遮没遮。）
+ *
+ *  调用点：boot 之后、以及每次 `qs://config` 之后（自定义引擎可增删改）。
+ *  自定义引擎没有 alias 字段，加进来也不会出错。 */
+function buildAliasIndex() {
+    const map = new Map();
+    const add = (e) => {
+        if (!e || !e.name) return;
+        const raw = e.alias;
+        const list = Array.isArray(raw) ? raw : (raw ? [raw] : []);
+        if (!list.length) return;
+        const cur = map.get(e.name) || [];
+        for (const a of list) {
+            const s = String(a).trim();
+            if (s && cur.indexOf(s) < 0) cur.push(s);
+        }
+        map.set(e.name, cur);
+    };
+    if (CATALOG) {
+        for (const e of CATALOG.toolbar || []) add(e);
+        for (const c of CATALOG.categories || []) for (const e of c.engines || []) add(e);
+    }
+    for (const e of (CONF && CONF.customEngines) || []) add(e);
+    ENGINE_ALIASES = map;
+}
+
+/** 某个引擎的全部别名（索引表优先；索引表里没有就退回单条记录）。
+ *  ⚠ 返回的是**副本**，调用方随便改，不会污染索引。 */
+function aliasesOf(name) {
+    const hit = ENGINE_ALIASES.get(name);
+    if (hit && hit.length) return hit.slice();
     const eng = ENGINE_BY_NAME.get(name);
     const raw = eng && eng.alias;
-    const list = (Array.isArray(raw) ? raw : (raw ? [raw] : []))
+    return (Array.isArray(raw) ? raw : (raw ? [raw] : []))
         .map((s) => String(s).trim()).filter(Boolean);
+}
+
+/** 引擎格子上的气泡提示：名字 + 别名（有别名才带括号）。 */
+function aliasTip(name) {
+    const list = aliasesOf(name);
     return list.length ? name + '（' + list.join(' / ') + '）' : name;
 }
 
@@ -1758,14 +1809,14 @@ function aliasTip(name) {
  *
  *  ⚠ 别名（engines.json 里可选的 `alias`）不是装饰：像「阿里巴巴图标库」这种中文
  *    叫法，表里的 name 是 `iconfont`（阿里自家的矢量图标站），只比 name 的话
- *    用户按自己的叫法根本搜不出来 —— 于是他就会以为"没有这个引擎"。 */
+ *    用户按自己的叫法根本搜不出来 —— 于是他就会以为"没有这个引擎"。
+ *  ⚠ 别名走 aliasesOf()（全表合并），不能只读 ENGINE_BY_NAME 那一条 —— 见
+ *    buildAliasIndex 的注释（toolbar 条目会遮掉分类表里的别名）。 */
 function engineMatches(name, q) {
     if (!q) return true;
-    if (String(name || '').toLowerCase().indexOf(q) >= 0) return true;
-    const eng = ENGINE_BY_NAME.get(name);
-    const raw = eng && eng.alias;
-    const list = Array.isArray(raw) ? raw : (raw ? [raw] : []);
-    for (const a of list) {
+    const nm = name == null ? '' : String(name);
+    if (nm.toLowerCase().indexOf(q) >= 0) return true;
+    for (const a of aliasesOf(nm)) {
         if (String(a).toLowerCase().indexOf(q) >= 0) return true;
     }
     return false;
@@ -1781,8 +1832,26 @@ function engineMatches(name, q) {
  *  清空输入框 = 完整还原，不留任何"曾经过滤过"的痕迹。
  *
  *  ⚠ 层级切换：有词 = 进「全部结果」视图（跨三大类平铺，在哪一层打框都能搜），
- *  没词 = 退回原来的下钻层级。切换必须重画（两个视图的 DOM 形状不同），
- *  层级内增量过滤才走下面的 DOM 隐藏那一套。 */
+ *  没词 = 退回原来的下钻层级。
+ *
+ *  ⚠ 切换**不再靠重画**（以前是 `renderPanel(false); return;`）。两个原因：
+ *    ① 重画 = 清空 + 分片重建几百个格子，敲第一个字就闪一下（r92 好不容易修掉）；
+ *    ② renderPanel 有"指纹没变就提前返回"的缓存，而敲第一个字时指纹恰好没变
+ *       （筛子都是 null）—— 于是它 return 了，连尾部那句"按当前词再筛一次"
+ *       都走不到，用户看到的是"第一下没反应"。
+ *  现在两个视图的真实差异只有顶上那栏「最近使用」，用 hidden 开关就行。 */
+/** 「最近使用」那一栏的显隐（搜索态里不画）。
+ *
+ *  只动两个节点的 hidden、**不删 DOM**：搜索是边打边筛的，每敲一个字重画一次
+ *  几百个格子的话，用户看到的就是 r92 修掉的那个"闪一下"。 */
+function setRecentSectionHidden(hide) {
+    if (!panelBody) return;
+    const t = panelBody.querySelector('.cat-title.recent-title');
+    const g = panelBody.querySelector('.grid.recent-grid');
+    if (t) t.hidden = !!hide;
+    if (g) g.hidden = !!hide;
+}
+
 function applyEngineFilter(raw) {
     const text = raw == null ? '' : String(raw);
     const q = text.trim().toLowerCase();
@@ -1790,11 +1859,34 @@ function applyEngineFilter(raw) {
 
     const wasSearch = panelSearchMode;
     panelSearchMode = !!q;
-    if (wasSearch !== panelSearchMode) {
-        // 层级切换：重画（新层级 renderPanel 尾部会再按当前词收一次）
+    const enteringSearch = !wasSearch && panelSearchMode;
+
+    /* 进搜索态 = 跨全表搜，必须把那三层筛子清掉，否则用户会撞上一个
+     * **既看不见、也点不掉**的筛子。真实复现路径：
+     *
+     *   ① 点「网页引擎」→ 二级胶囊出现 → 选「直达网页」→ panelSubFilter = 'open'；
+     *   ② 关面板 → 当时只复位了 panelGroupFilter，panelSubFilter / panelCatFilter
+     *      原样留着（togglePanel 里已一并修好）；
+     *   ③ 再打开 → 二级胶囊要 panelGroupFilter 才画，于是它**不出现**了，
+     *      那个 'open' 筛子从此没有任何 UI 能清掉；
+     *   ④ 正文只剩 sub === 'open' 的行 → 搜「哔哩哔哩」只出「哔哩哔哩（首页）」
+     *      （open 类），「哔哩哔哩」搜索引擎（search 类）被悄悄筛掉了。
+     *
+     *  togglePanel(false) 治"关面板"那条路，这里再兜一层（治任何别的路径留下
+     *  的脏状态）：**刚进搜索态那一刻**一律清干净。
+     *  ⚠ 只在"进入"时清，不是搜索态里每次按键都清 —— 用户搜索途中主动点了某颗
+     *    大类胶囊，那是他看得见的筛选，不能下一键就给他撤掉。
+     *  真动过筛子就必须重画 —— 胶囊高亮、正文、节标题全都跟着变；
+     *  重画尾部会把当前词再应用一次。 */
+    if (enteringSearch && (panelGroupFilter || panelSubFilter || panelCatFilter)) {
+        panelGroupFilter = null;
+        panelSubFilter = null;
+        panelCatFilter = null;
         renderPanel(false);
         return;
     }
+
+    setRecentSectionHidden(panelSearchMode);
 
     let shown = 0;
     /* r81：有过滤词就把还没填的格子填出来 —— 但要**分批**。
@@ -1859,6 +1951,11 @@ function applyEngineFilter(raw) {
     }
     const noRes = panelBody.querySelector('.eng-noresult');
     if (noRes) noRes.hidden = !q || shown > 0;
+
+    /* ⚠ 必须放在上面那两轮显隐**之后**：它们会按"还有没有可见格子"重算
+     *  .recent-title / .recent-grid 的 hidden，而搜索态里这一栏是**无条件**不画的
+     *  （命中的引擎在正文里本来就有一份，留在这儿只是把结果往下挤）。 */
+    setRecentSectionHidden(panelSearchMode);
 
     // 过滤后内容变短了，滚动位置跟着归零，免得停在一段空白上
     panelBody.scrollTop = 0;
@@ -2578,8 +2675,17 @@ function togglePanel(force) {
     } else {
         panelFav = null;   // 收起就退出收藏模式，下次 ⋯ 还是引擎面板
         favFromEngines = false;
-        // 大类过滤复位：下次打开面板是「全部引擎」，不接着上次筛的那一类
+        /* 过滤复位：下次打开面板是「全部引擎」，不接着上次筛的那一类。
+         *
+         * ⚠ 三层筛子必须**一起**复位。以前只清了 panelGroupFilter，中类 / 小类
+         *   那两个留在内存里 —— 而二级、三级胶囊是"选了大类才出现"的，
+         *   panelGroupFilter 一清，胶囊也就不画了：那个筛子从此既看不见、
+         *   也点不掉，正文永远只剩它筛出来的那半截。
+         *   用户报的「搜哔哩哔哩只搜得到首页、搜不到搜索引擎」就是它
+         *   （中类停在「直达网页」，search 类的引擎全被筛掉）。 */
         panelGroupFilter = null;
+        panelSubFilter = null;
+        panelCatFilter = null;
         panelSearchMode = false;
         // 搜索框跟着一起清：它是一个**一次性**的关键词口，留到下次打开就是
         // 用户说的"输入框带记忆功能"（下次点引擎会拿上次的词去搜）。
@@ -2587,6 +2693,9 @@ function togglePanel(force) {
         // 引擎过滤词同理：下次打开应该是"全部引擎都在"，而不是上次筛剩的那几个
         if (inputEngFilter) inputEngFilter.value = '';
         engineFilterText = '';
+        // 「最近使用」那一栏在搜索态里被 hidden 掉了，收起时一并还原
+        // （下次打开本来也会重画，但别把 DOM 留成一个"看着正常、其实是脏"的状态）
+        setRecentSectionHidden(false);
         invoke('focus_bar', { enable: false }).catch(() => {});
     }
     // 面板开合直接决定横条该不该淡（开着 = 用户在里面点东西，横条陪着亮着）
@@ -2689,7 +2798,10 @@ if (inputEngFilter) {
         if (e.key === 'Enter') {
             // 回车 = 「就用筛出来最前面那个」。用户多半是打了个名字片段想直接开跑，
             // 让他再回鼠标点一下是多余的；一个都没筛出来时什么都不做，不误触。
-            const first = panelBody.querySelector('.grid > .cell:not([hidden])');
+            // ⚠ 必须挑**看得见**的格子：过滤是"整格 hidden + 整块 grid hidden"
+            //   两层，只判 cell 的话会选到藏在已隐藏 grid 里的那颗（比如搜索态
+            //   被收起来的「最近使用」），用户按回车打开的就不是屏幕上第一个。
+            const first = panelBody.querySelector('.grid:not([hidden]) > .cell:not([hidden])');
             if (first) activatePanelCell(first);
         } else if (e.key === 'Escape') {
             // 有词先清词，没词才收面板（和关键词框同一套手感）
@@ -3004,6 +3116,8 @@ listen('qs://config', (ev) => {
     CONF = window.CONF = ev.payload || {};
     // 自定义引擎增删改之后也会走到这里，重新合并一次再渲染
     qsMergeCustomEngines(CATALOG, ENGINE_BY_NAME, CONF);
+    // 别名索引跟着重建（自定义引擎可增删改，别名表不能停在开机那一份）
+    buildAliasIndex();
     applyLook();
     // 液态玻璃参数跟着配置走（开/关、折射、色差、实时模式…）
     if (window.QSGlass) QSGlass.applyConf(CONF);
@@ -3432,6 +3546,8 @@ async function boot() {
     // 用户自己加的引擎要在渲染之前并进来，否则横条上那一格会被当成
     // 「不认识的引擎」直接过滤掉 —— 表现为设置在、横条上没有。
     qsMergeCustomEngines(CATALOG, ENGINE_BY_NAME, CONF);
+    // 别名索引（全表合并）—— 面板搜索框按别名找引擎靠它，见 buildAliasIndex
+    buildAliasIndex();
     applyLook();
     /* 液态玻璃：boot 里就把配置灌给 QSGlass。
      * 它的 conf 只由 qs://config 广播填充，而**启动后没有任何一次广播** ——
@@ -3510,7 +3626,9 @@ boot().catch((err) => {
 /* r53：面板目录的渐进式展开                                             */
 /*   一级（大类）：平铺一行胶囊（老的 appendGroupNav，点它=过滤 + 露出二级） */
 /*   二级（中类）：**一个胶囊**，只有选了大类才出现；点开选一个 → 只显示它   */
-/*   三级（小类）：同样一个胶囊，只有选了中类才出现                          */
+/*   三级（小类）：**平铺一行胶囊**（点谁就只看谁）—— 原来是"一个胶囊 + 下拉菜单"，
+ *                用户原话：「选择完中类之后，小类最好是每一个就都呈现出来，
+ *                一种胶囊的形式，这样我要哪个我点击就可以了，不用再一个个的找」。*/
 /*  用户原话：「只显示一级目录……点击一级目录之后再会弹出 2 级目录。不然所有   */
 /*  的目录都混在一起太杂了」「所有的 2 级目录它都用一个胶囊显示」。           */
 /* ------------------------------------------------------------------ */
@@ -3548,7 +3666,18 @@ function appendPickNav(head, groups, sections) {
             },
         });
     }
-    // —— 三级：选了中类才出现 ——
+    // —— 三级（小类）：**全部铺开**成一行胶囊 ——
+    /*  用户原话（本次）：「更多引擎面板选择完中类之后，小类最好是每一个就都呈现
+     *  出来，一种胶囊的形式，这样我要哪个我点击就可以了，不用再一个个的找」。
+     *
+     *  原来是 r53 那套「一个胶囊 + 下拉菜单」：网页那一族底下 24 个小类，
+     *  想换一个就得点开菜单、在长列表里找、点完菜单又收起来 —— 换个类目重复一遍。
+     *  现在和大类一样平铺：一颗小类一颗胶囊，点谁就只剩谁；「全部」恢复全量。
+     *
+     *  ⚠ 数量级：一个中类底下最多 24 个小类（网页搜索引擎那一档），全铺开约 3 行。
+     *    所以这一行用紧凑款胶囊（.cat-row：19px 高 / 10.5px 字 / 更紧的间距），
+     *    否则吸附头会把只有 344px 高的正文挤没。
+     *  ⚠ 「全部」那颗只在**没有**选中任何小类时高亮；选中某类时高亮跟着它走。 */
     if (panelSubFilter) {
         const seen = new Map();
         for (const r of rows) {
@@ -3557,21 +3686,40 @@ function appendPickNav(head, groups, sections) {
             seen.set(k, (seen.get(k) || 0) + 1);
         }
         if (seen.size > 1) {
-            const host = document.createElement('div');
-            host.className = 'cat-nav pick-nav';
+            const host = document.createElement('nav');
+            host.className = 'cat-nav pick-nav cat-row';
             host.id = 'panelPick3';
-            const items = [{ key: null, text: '全部小类', count: null }];
-            for (const [k, n] of seen) items.push({ key: k, text: k, count: n });
-            head.appendChild(host);
-            window.qsPickNav(host, {
-                items: items,
-                value: panelCatFilter,
-                onPick: (k) => {
-                    panelCatFilter = k;
+            host.setAttribute('aria-label', '小类');
+            let total = 0;
+            for (const n of seen.values()) total += n;
+            const addChip = (key, text, count, tip) => {
+                const b = document.createElement('button');
+                b.type = 'button';
+                const on = (panelCatFilter || null) === key;
+                b.className = 'cat-nav-item cat-chip' + (on ? ' on' : '');
+                b.title = tip;
+                /* 用 aria-pressed（按钮的"按下/选中"语义），不用 aria-selected ——
+                 * 后者只对 role=option/tab 才合法，挂在裸 button 上等于没写。 */
+                b.setAttribute('aria-pressed', on ? 'true' : 'false');
+                b.appendChild(Object.assign(document.createElement('span'),
+                    { textContent: text }));
+                if (count != null) {
+                    b.appendChild(Object.assign(document.createElement('span'),
+                        { className: 'n', textContent: count }));
+                }
+                b.addEventListener('click', () => {
+                    if ((panelCatFilter || null) === key) return;   // 已经是它了，别白重画
+                    panelCatFilter = key;
                     renderPanel();
                     requestAnimationFrame(() => setTimeout(pushLayout, 0));
-                },
-            });
+                });
+                host.appendChild(b);
+            };
+            addChip(null, '全部', total, '不限定小类（列出这个中类下的全部引擎）');
+            for (const [k, n] of seen) {
+                addChip(k, k, n, '只看「' + k + '」（' + n + ' 个）');
+            }
+            head.appendChild(host);
         }
     }
 }
