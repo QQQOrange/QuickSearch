@@ -806,6 +806,30 @@ button.fav-grp-head:focus-visible {
     transform: translateY(0) scale(.94);
 }
 
+/* 「定义不完整」的格子（快捷键没按键序列 / 搜索类没地址）。
+ *
+ * 用户原话：「你不能把它给删掉啊！没显示是很严重的问题」—— 所以这种引擎
+ * 照样占一格，只是半透明 + 右上角一个红色「!」，让人一眼看出"它需要补全"，
+ * 而不是像以前那样整格凭空消失。点它只会提示去设置里补（见 bar.js 的点击派发）。 */
+.ico.engine.qs-dead {
+    position: relative;
+    opacity: .55;
+}
+
+.ico.engine.qs-dead::after {
+    content: '!';
+    position: absolute;
+    top: -1px;
+    right: 0;
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 1;
+    color: #E5484D;
+    pointer-events: none;
+}
+
+.ico.engine.qs-dead:hover { opacity: .9; }
+
 /* 字母兜底徽标：拿不到图标时用首字打底 */
 .ico .letter {
     display: flex;

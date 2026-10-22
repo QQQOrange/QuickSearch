@@ -681,7 +681,15 @@ function barList() {
         if (typeof n === 'string' && n.startsWith(QS_APP_PREFIX)) {
             return !!qsAppBySentinel(n);
         }
-        return ENGINE_BY_NAME.has(n);
+        if (ENGINE_BY_NAME.has(n)) return true;
+        /* 定义存在、但"不完整"的自定义引擎（快捷键类没按键序列 / 其余类没地址）
+         * **照样留在横条上**。
+         *
+         * 用户原话（2026-10-22）：「你不能把它给删掉啊！没显示是很严重的问题」——
+         * 以前这里一票否决（目录里查不到就当它不存在），横条上那一格凭空消失，
+         * 而设置页还写着「已在横条」，两边对不上，用户完全不知道发生了什么。
+         * 现在照样画出来，右上角一个「!」，点一下提示去设置里补全。 */
+        return !!(CONF && (CONF.customEngines || []).some((e) => e && e.name === n));
     });
     // OCR 总开关关着时，别把 @ocr 渲染出来（留一条空位毫无意义）。
     // 哨兵仍保留在配置里，用户下次开开关它就回到原位。
@@ -1041,6 +1049,21 @@ function renderBar(force) {
         /* 打开类不搜索、快捷键类不碰浏览器：悬停提示要说清楚"点了直接打开"、
          * "点了发送组合键"，别让人以为没选中文字所以坏了（它们压根不要求选中文字）。 */
         const barEng = ENGINE_BY_NAME.get(name);
+        /* 定义不完整（快捷键没按键 / 搜索类没地址）：照样画出来，标个「!」，
+         * 点击只提示去补全，不发 open_search（后端也没有可用的定义）。
+         * 见 barList() 里那段说明 —— 用户明确要求"不能把它删掉"。 */
+        if (!barEng) {
+            btn.classList.add('qs-dead');
+            btn.title = name
+                + '　（定义不完整：没填按键序列 / 地址 —— 去「设置 → 自定义引擎」补上）';
+            btn.dataset.engine = name;
+            btn.dataset.dead = '1';
+            btn.style.setProperty('--qs-inset', icon.inset);
+            btn.appendChild(icon.node);
+            enginesEl.appendChild(btn);
+            engines++;
+            continue;
+        }
         const isOpen = qsEngineKind(barEng) === 'open';
         const isHot = qsEngineKind(barEng) === 'hotkey';
         btn.title = name + (isOpen
@@ -2265,6 +2288,13 @@ barEl.addEventListener('click', (e) => {
         // 唤起软件），不该再顺手发一条 open_search —— 那条会带着
         // engine=undefined 被 Rust 拒掉，白跑一趟 IPC。
         if (!btn.dataset.engine) return;
+        /* 定义不完整的引擎（没按键 / 没地址）不发 open_search —— 后端拿不到能用的
+         * 定义，发了只会被拒或打开一个空地址。改成把原因说给用户听，
+         * 并指路去补全。 */
+        if (btn.dataset.dead === '1' || !ENGINE_BY_NAME.has(btn.dataset.engine)) {
+            showBarTip('「' + btn.dataset.engine + '」还没填按键序列或地址：去「设置 → 自定义引擎」补上');
+            return;
+        }
         // 和引擎面板点格子同一套口径：带上横条此刻这条文字，别让后端去猜
         // （详见 runEngineSearch 的注释）。
         invoke('open_search', {

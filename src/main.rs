@@ -3398,6 +3398,39 @@ fn config_view() -> Value {
     })
 }
 
+/// 恢复备份时合并自定义引擎：**不许一份缺字段的备份把本机能用的定义打回空值**。
+///
+/// 判据只有一条：备份里这一条"不能用"（快捷键类没按键 / 其余类没地址），
+/// 而本机同名的这一条"能用" → 保留本机那份，并记一条日志。
+/// 其余情况一律听备份的（用户确实可能只想恢复备份里的定义）。
+///
+/// 事故背景见 `apply_view` 里调用点的注释：
+/// 2026-10-22 那次云端恢复把两条快捷键引擎的 `kind`/`hotkey`/`app_path` 全抹成默认值，
+/// 横条上从此画不出来 —— 用户以为自己的引擎被删了。
+fn merge_restored_custom_engines(
+    local: &[config::CustomEngine],
+    incoming: Vec<config::CustomEngine>,
+) -> Vec<config::CustomEngine> {
+    let mut out = Vec::with_capacity(incoming.len());
+    for e in incoming {
+        if !config::custom_engine_usable(&e) {
+            if let Some(l) = local
+                .iter()
+                .find(|l| l.name == e.name && config::custom_engine_usable(l))
+            {
+                crate::win::log(&format!(
+                    "restore: 备份里「{}」的定义缺字段（没地址/没按键），保留本机那份可用的",
+                    e.name
+                ));
+                out.push(l.clone());
+                continue;
+            }
+        }
+        out.push(e);
+    }
+    out
+}
+
 /// 把 config_view() 那种形状的 JSON 灌回配置对象（载入备份 / 云端恢复时用）
 fn apply_view(v: &Value, cfg: &mut config::Config) {
     let b = |k: &str| v.get(k).and_then(|x| x.as_bool());
@@ -3575,7 +3608,18 @@ fn apply_view(v: &Value, cfg: &mut config::Config) {
     // 走 serde 而不是手抄字段，以后加字段不会漏。
     if let Some(a) = v.get("customEngines") {
         if let Ok(list) = serde_json::from_value::<Vec<config::CustomEngine>>(a.clone()) {
-            cfg.custom_engines = list;
+            /* ⚠ 一份**缺字段**的备份不能把本机能用的定义打回空值。
+             *
+             * 用户实测事故（2026-10-22）：13:56 那次「云端备份较新，已恢复到本机」
+             * 之后，两条快捷键引擎变成了 `{kind:"search", url:"", hotkey:""}` ——
+             * 云端那份 View 备份里根本没有 kind/hotkey/app_path 这些字段
+             * （老版本导出的），serde 按默认值一填，`kind` 就成了 search、
+             * `hotkey` 成了空串。结果：横条上画不出来、引擎库里也没有，
+             * 用户看到的就是「我的快捷键引擎被删了」。
+             *
+             * 本机那份明明是好的，凭什么被一份更缺信息的备份覆盖？
+             * 和上面 backupPassword「空值不覆盖」是同一条口径。 */
+            cfg.custom_engines = merge_restored_custom_engines(&cfg.custom_engines, list);
         }
     }
     // 外部软件：同上。图标不在这个结构里（走 overrideIcons，键是 @app:<id>），
@@ -15010,6 +15054,64 @@ mod tests {
     #[test]
     fn separator_sentinel_never_collides() {
         assert!(!engines::engines().contains_key(config::SEP), "内置引擎不许叫「|」");
+    }
+
+    /// 恢复备份时的自定义引擎合并：**缺字段的备份不能打回本机能用的定义**。
+    ///
+    /// 事故现场（2026-10-22）：云端那份 View 备份里两条快捷键引擎没有
+    /// kind/hotkey/app_path，恢复后变成 `{kind:"search", url:"", hotkey:""}`，
+    /// 横条上再也画不出来 —— 用户以为引擎被删了。
+    #[test]
+    fn merge_restored_custom_engines_keeps_the_usable_one() {
+        let _serial = disk_lock();
+        let local = vec![
+            config::CustomEngine {
+                name: "微信截图".into(),
+                kind: config::EngineKind::Hotkey,
+                hotkey: "alt+a".into(),
+                bind_app: true,
+                app_path: r"D:\software\Weixin\Weixin.exe".into(),
+                ..Default::default()
+            },
+            config::CustomEngine {
+                name: "旧引擎".into(),
+                url: "https://old/?q=%s".into(),
+                kind: config::EngineKind::Search,
+                ..Default::default()
+            },
+        ];
+        // 备份里：一条被抹成空壳、一条是备份自己新增的
+        let incoming = vec![
+            config::CustomEngine {
+                name: "微信截图".into(),
+                kind: config::EngineKind::Search,
+                ..Default::default()
+            },
+            config::CustomEngine {
+                name: "备份里的新引擎".into(),
+                url: "https://new/?q=%s".into(),
+                kind: config::EngineKind::Search,
+                ..Default::default()
+            },
+        ];
+
+        let out = merge_restored_custom_engines(&local, incoming);
+        assert_eq!(out.len(), 2);
+
+        let kept = out.iter().find(|e| e.name == "微信截图").expect("还在");
+        assert_eq!(kept.kind, config::EngineKind::Hotkey, "本机能用的定义要保住");
+        assert_eq!(kept.hotkey, "alt+a");
+        assert!(kept.bind_app);
+        assert_eq!(kept.app_path, r"D:\software\Weixin\Weixin.exe");
+
+        assert!(
+            out.iter().any(|e| e.name == "备份里的新引擎"),
+            "备份新增的引擎要并进来"
+        );
+        assert!(
+            !out.iter().any(|e| e.name == "旧引擎"),
+            "备份里没有的引擎按备份走（整份替换的语义不变）"
+        );
     }
 
     /// #147 的直接回归：自定义引擎（含快捷键类）必须能加进 / 移出横条。
