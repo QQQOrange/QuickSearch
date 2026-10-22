@@ -69,7 +69,7 @@ v1.4.0 起"没设密码"的备份是 DPAPI 信封（`qsEnc:2`），会被当成"
     恢复后的配置 13953 字节（完整配置），`backup.key` 仍在；
   - 真实数据目录的 `config.json` 哈希**没有变化**（测试全程没碰用户配置）。
 - 版本号 1.4.0 → 1.4.1（Cargo.toml / tauri.conf.json / package.json / package-lock.json）
-- 交付：`D:\software\myself\QuickSearch.exe`
+- 交付：`D:\software\myself\QuickSearch.exe`（13,260,800 字节）
 
 更新包校验（SHA256）：`561C8A3426D799483234CC3A1C7B88CADE3833D3AC516CCBBFF7B06F2822E2C2`
 
