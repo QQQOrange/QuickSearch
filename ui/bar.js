@@ -44,6 +44,8 @@ const btnOcr = $('btnOcr');
 const btnImg = $('btnImg');
 // r54 需求 2：划词是本地路径时才出现的文件管理器图标
 const btnPath = $('btnPath');
+// r97：划词是本地**文件**路径时才出现的「用默认程序打开」
+const btnOpenFile = $('btnOpenFile');
 
 /** 本次横条是不是「只有识别图片文字」这一种形态（Ctrl+C 复制到图片时用）。
  *  这时候不显示引擎：用户手上根本没有文字可以搜，摆一排搜索引擎只会误导。 */
@@ -2196,7 +2198,7 @@ document.addEventListener('contextmenu', (e) => {
     e.preventDefault();
 }, true);
 
-/** 「打开这个网址」按钮：按当前这次取到的文字决定显不显示。
+/** 「打开这个网址」按钮显不显示。口径与 `syncPathBtn` 一致。
  *
  *  ⚠ 抽成函数是因为原来 `qs://show` 和 `qs://text`（迟到补那一路）**各抄了一遍** ——
  *    改一处漏一处就会出现"按钮亮着、点下去用的却是上一段的文字/状态"。
@@ -2205,7 +2207,21 @@ document.addEventListener('contextmenu', (e) => {
  *  ⚠ 显隐判据 2026-10-16 换成「这段文字里**有没有链接**」（`currentUrls`），
  *    不再是"整段是不是一条网址"：用户要求"选中文本含多个链接时，点一下就把
  *    它们分别开成多个标签页" —— 一段话里夹着两个网址当然也该给按钮。
- *    `currentIsUrl` 留作兜底（万一某条载荷没带 `urls`）。 */
+ *    `currentIsUrl` 留作兜底（万一某条载荷没带 `urls`）。
+ *
+ *  r97：**修「划词选中网址却不弹按钮」**（用户 2026-10-22 报）。
+ *    原话：「我选中了一个网址但横条里并不能够弹出直达网址的按钮，但是如果我把
+ *    这段网址复制下来了，因此而弹出的横条里面却能有直达网址的按钮」。
+ *
+ *    根因：两条路拿到的**文字**不一样。复制走剪贴板，是用户选中的原文；
+ *    划词在浏览器里 UIA 被整体跳过（Chromium 内容树唤不醒），落到 OCR 兜底 ——
+ *    OCR 出来的东西带它自己的噪声（把 URL 从中间断开成 `https:// a.com`、
+ *    行尾多一个空格），于是"整串是不是 URL"判成 false，按钮不出现。
+ *    Rust 侧 `text_to_url` / `extract_links` 已经对这类噪声放宽（见那边 r97 注释），
+ *    所以这里**判据本身不用改**，改的是「点了之后拿什么去开」：
+ *    以前 `urls` 为空就 invoke 一个不带参数的 `open_link`，后端读共享状态里的
+ *    `sel_url` —— 而 sel_url 正是那个判失败的 None。现在前端直接把文字传过去，
+ *    让后端用同一套判据再解析一次（解析失败它会自己兜底打开原文）。 */
 function syncLinkBtn() {
     const n = (currentUrls || []).length;
     const has = n > 0 || currentIsUrl;
@@ -2216,10 +2232,15 @@ function syncLinkBtn() {
 }
 btnLink.addEventListener('click', () => {
     /* 多条链接走 `open_links`（后端分别开标签页，带去重 + 12 条上限）——
-     * 和 OCR 结果页那颗「打开链接」同一条命令，行为一致。 */
+     * 和 OCR 结果页那颗「打开链接」同一条命令，行为一致。
+     *
+     * r97：**把文字一起传给后端**。以前是 `invoke('open_link')`（无参数），
+     * 后端读 `sel_url`；而划词路径上 sel_url 常常是 None（OCR 噪声让判据失败），
+     * 于是按钮明明亮着、点下去什么都没发生。现在带上 currentText，
+     * 后端拿它重新过一遍 `text_to_url` / `extract_links`，失败也有兜底。 */
     const n = (currentUrls || []).length;
     if (n > 0) invoke('open_links', { links: currentUrls }).catch(() => {});
-    else invoke('open_link').catch(() => {});
+    else invoke('open_link', { text: (currentText || '').trim() }).catch(() => {});
 });
 
 /* ------------------------------------------------------------------ */
@@ -2361,7 +2382,7 @@ function builtinImgSvg() {
     return builtinImgSvgCache;
 }
 
-/** 「文件管理器」按钮显不显示：**当前选中的这段文字像不像一条本地路径**。
+/** 「文件管理器」按钮 + r97「打开文件」按钮显不显示。
  *
  * 判据与后端 `paths::looks_like_path` 同源（盘符 / UNC / `.\` 相对 /
  * `%VAR%`），前后端各留一份是刻意的：前端要的是"别为了判一条路径去调一次
@@ -2369,7 +2390,22 @@ function builtinImgSvg() {
  * 塞进来奇怪的东西）。两边用同一套口径，行为因此一致。
  *
  * ⚠ 宁可放过也不误判：误判的代价是横条上凭空多一个图标、点下去弹一个
- *   报错框，比「没认出来」烦人得多。 */
+ *   报错框，比「没认出来」烦人得多。
+ *
+ * r97：新增「📄 打开文件」按钮（用户原话：「还要再增加一个直达文件的功能，
+ * 就是说我选中了一个文件路径，那这个时候横条上就会弹出一个按钮，点击这个
+ * 按钮就会自动调用系统默认的相应文件的软件来打开这个文件」）。
+ *
+ * 分工：
+ *   · 📁 `btnPath`     —— 在**文件管理器**里定位/打开（资源管理器）
+ *   · 📄 `btnOpenFile` —— 用**系统默认程序**打开（.txt → 记事本）
+ * 目录只有 📁（目录没有"默认程序"概念，双击它就是资源管理器打开）；
+ * 文件两颗都给，用户要哪个点哪个。
+ *
+ * ⚠ 「是文件还是目录」必须问后端（`path_kind`）：`resolve` 要展开 `%VAR%`、
+ *   拼工作目录、还原 `file://` 编码，前端重复一遍必然分叉。
+ *   所以这里是"先按路径判据把 📁 显示出来，再异步问类型决定 📄 显不显示" ——
+ *   📁 立即可见（不依赖 IPC），📄 等答案回来（一次 IPC 几毫秒，无感）。 */
 function syncPathBtn() {
     const t = (currentText || '').trim();
     let hit = false;
@@ -2382,6 +2418,29 @@ function syncPathBtn() {
     }
     btnPath.hidden = !hit;
     if (hit) btnPath.title = '在文件管理器中打开：' + t;
+    /* r97：问后端「这条路径是文件还是目录」。
+     * ⚠ 每次都重新问（不带缓存）：这段文字每次划词都可能不同，缓存反而要
+     *   处理失效。path_kind 是只读命令，开销就是一次 IPC。 */
+    if (btnOpenFile) {
+        if (!hit) {
+            btnOpenFile.hidden = true;
+        } else {
+            invoke('path_kind', { path: t })
+                .then((kind) => {
+                    /* 这段文字可能已经变了（用户又划了一次）—— 以当前为准。
+                     * 不加这个判断就会出现"上一段是文件、这一段是目录，
+                     * 结果 📄 按钮留在了目录那一轮上"。 */
+                    if ((currentText || '').trim() !== t) return;
+                    const isFile = (kind === 'file');
+                    btnOpenFile.hidden = !isFile;
+                    if (isFile) {
+                        const name = t.split(/[\\/]/).pop() || t;
+                        btnOpenFile.title = '用默认程序打开：' + name;
+                    }
+                })
+                .catch(() => { btnOpenFile.hidden = true; });
+        }
+    }
 }
 
 /** 横条上的一句临时反馈（复用 #tip，和收藏夹「已发送」共用同一套显隐）。
@@ -2419,6 +2478,17 @@ btnPath.addEventListener('click', (e) => {
         .then((msg) => { if (msg) tip(msg); else tip('已打开'); })
         .catch(() => tip('打开失败'));
 });
+
+/* r97：「用默认程序打开这个文件」。与 📁 分工见 syncPathBtn 的注释。 */
+if (btnOpenFile) {
+    btnOpenFile.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const t = (currentText || '').trim();
+        invoke('open_file', { path: t })
+            .then((msg) => { if (msg) tip(msg); else tip('已打开'); })
+            .catch(() => tip('打开失败'));
+    });
+}
 
 btnMore.addEventListener('click', (e) => {
     e.stopPropagation();

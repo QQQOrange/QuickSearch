@@ -363,6 +363,53 @@ pub fn open(path: &str) -> String {
     }
 }
 
+/// r97：**用系统默认程序打开这个文件**（用户新需求）。
+///
+/// 用户原话：「还要再增加一个直达文件的功能，就是说我选中了一个文件路径，
+/// 那这个时候横条上就会弹出一个按钮，点击这个按钮就会自动调用系统默认的
+/// 相应文件的软件来打开这个文件。」
+///
+/// # 与 [`open`] 的分工
+///
+/// | | 目录 | 文件 |
+/// |---|---|---|
+/// | [`open`]（📁 在文件管理器中打开） | 打开目录 | **定位**（资源管理器里高亮） |
+/// | [`open_file`]（📄 打开文件） | —— 不给这个按钮 | **用默认程序打开**（.txt→记事本） |
+///
+/// 所以「打开文件」按钮**只在选中物是文件时出现**，目录下不需要它
+/// （在文件管理器里打开目录已经是默认程序的行为了）。
+///
+/// # 为什么用 `open::that`
+///
+/// 它就是 ShellExecuteW("open") 的封装 —— 走的是 Windows 的**文件关联**，
+/// 和用户在资源管理器里双击这个文件完全一致（.txt → 记事本、.mp4 → 播放器、
+/// 没有关联 → 弹出"你要用什么打开"的系统对话框，这也是双击的行为）。
+///
+/// ⚠ 判据仍然是「磁盘上真实存在」：不存在就明说，不去弹一个系统报错框。
+pub fn open_file(path: &str) -> String {
+    let p = std::path::Path::new(path);
+    if !p.exists() {
+        return format!("找不到这个文件：{path}");
+    }
+    if p.is_dir() {
+        // 目录没有"默认程序"这个概念（双击 = 在资源管理器里打开），
+        // 调用方不会给目录传进来，这里只是防御。
+        return open(path);
+    }
+    match open::that(path) {
+        Ok(()) => format!("已用默认程序打开：{}", file_name_of(path)),
+        Err(e) => format!("打开失败：{e}"),
+    }
+}
+
+/// 只取文件名（路径里的最后一段），给 toast 用 —— 整条路径太长会撑爆横条。
+fn file_name_of(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -479,6 +526,86 @@ mod tests {
     fn open_不存在的路径给出明确反馈() {
         let msg = open("Z:\\definitely-not-here-qs\\x.txt");
         assert!(msg.contains("找不到"), "应当告诉用户找不到：{msg}");
+    }
+
+    /* ---------------- r97：用默认程序打开文件 ---------------- */
+
+    /// 造一个临时文件，返回（路径, 保活守卫）。
+    fn tmp_file_with(tag: &str, body: &str) -> (String, TempDirLike) {
+        let dir = std::env::temp_dir().join(format!(
+            "qs-openfile-{}-{}",
+            tag,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("探针文件.txt");
+        std::fs::write(&f, body).unwrap();
+        (f.to_string_lossy().to_string(), TempDirLike(dir))
+    }
+
+    struct TempDirLike(std::path::PathBuf);
+    impl Drop for TempDirLike {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// r97 新功能的直接验证：选中一个**文件**路径 → 用系统默认程序打开。
+    ///
+    /// 用户原话：「还要再增加一个直达文件的功能，就是说我选中了一个文件路径，
+    /// 那这个时候横条上就会弹出一个按钮，点击这个按钮就会自动调用系统默认的
+    /// 相应文件的软件来打开这个文件。」
+    ///
+    /// ⚠ 这条会**真的**用默认程序打开一个 .txt（弹一下记事本）。测试机上这是
+    ///   可接受的（一个空文本框），但别把它改成"只判存在性"—— 那验不到
+    ///   `open::that` 这条路本身，而它正是这个功能的全部。
+    #[test]
+    fn open_file_用默认程序打开真实文件() {
+        let (f, _keep) = tmp_file_with("real", "QuickSearch r97 探针");
+        let msg = open_file(&f);
+        // 返回值是人话，含文件名（不含整条路径 —— 会撑爆横条）
+        assert!(msg.contains("探针文件.txt"), "提示里该有文件名：{msg}");
+        assert!(msg.starts_with("已用默认程序打开"), "该报告成功：{msg}");
+        assert!(!msg.contains('\\'), "提示里不该出现整条路径：{msg}");
+    }
+
+    /// 目录**没有**"默认程序"这个概念，给它该退回资源管理器行为而不是报错。
+    #[test]
+    fn open_file_对目录退回复位行为() {
+        let dir = std::env::temp_dir().join(format!(
+            "qs-openfile-dir-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let msg = open_file(&dir.to_string_lossy());
+        assert!(
+            msg.contains("文件管理器"),
+            "目录该走资源管理器那条路：{msg}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 文件不存在时给**中文人话**，不弹系统英文报错框。
+    #[test]
+    fn open_file_不存在时给明确反馈() {
+        let msg = open_file(r"Z:\qs-not-here-qs\x.txt");
+        assert!(msg.contains("找不到这个文件"), "该告诉用户找不到：{msg}");
+    }
+
+    /// 判据同源：`looks_like_path` 认得出来，`open_file` 才可能被调到
+    /// （前端按钮的显隐走它）。文件、目录、`%VAR%`、`file://` 四种都要认。
+    #[test]
+    fn open_file_的判据与_looks_like_path_同源() {
+        assert!(looks_like_path(r"C:\Users\me\a.txt").is_some());
+        assert!(looks_like_path(r"C:\Users\me\Documents").is_some());
+        assert!(looks_like_path("%TEMP%\\a.txt").is_some());
+        assert!(looks_like_path("file:///C:/Users/me/a.txt").is_some());
     }
 
     /* ---------------- r57：用户报「图标出来了、点了没反应」的两种真实形态 ---------------- */

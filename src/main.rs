@@ -7168,6 +7168,58 @@ fn open_path(path: String) -> String {
     msg
 }
 
+/// r97：**用系统默认程序打开选中的文件**（用户新需求）。
+///
+/// 用户原话：「还要再增加一个直达文件的功能，就是说我选中了一个文件路径，
+/// 那这个时候横条上就会弹出一个按钮，点击这个按钮就会自动调用系统默认的
+/// 相应文件的软件来打开这个文件。」
+///
+/// 与 `open_path` 的分工（两边判据同源，都是 `paths::looks_like_path`）：
+///   · `open_path`  → 📁 在**文件管理器**里定位/打开（资源管理器）
+///   · `open_file`  → 📄 用**默认程序**打开这个文件（.txt → 记事本）
+/// 前端按「这条路径解析出来是文件还是目录」决定显示哪颗按钮
+/// （目录只给 📁，文件两颗都给）。
+#[tauri::command]
+fn open_file(path: String) -> String {
+    let msg = if paths::looks_like_path(&path).is_none() {
+        format!("这不像一条本地路径：{path}")
+    } else {
+        match paths::resolve(&path) {
+            Some(p) => paths::open_file(&p),
+            None => format!("这不像一条能打开的路径：{path}"),
+        }
+    };
+    win::log(&format!("open_file: {path} -> {msg}"));
+    msg
+}
+
+/// r97：**这条路径解析出来是文件还是目录**（前端据此决定显示哪颗按钮）。
+///
+/// 返回 `"file"` / `"dir"` / `"missing"` / `"notpath"` 四个字符串之一。
+/// 之所以单独一条命令而不是让前端猜：`resolve` 要展开 `%VAR%`、拼工作目录、
+/// 还原 `file://` 编码 —— 这些逻辑全在后端，前端重复一遍必然分叉。
+///
+/// ⚠ 这是一条**只读**命令（不打开任何东西），所以可以在每次划词后放心调。
+#[tauri::command]
+fn path_kind(path: String) -> String {
+    if paths::looks_like_path(&path).is_none() {
+        return "notpath".into();
+    }
+    match paths::resolve(&path) {
+        Some(p) => {
+            let pb = std::path::Path::new(&p);
+            if !pb.exists() {
+                "missing".into()
+            } else if pb.is_dir() {
+                "dir".into()
+            } else {
+                "file".into()
+            }
+        }
+        None => "notpath".into(),
+    }
+}
+
 #[tauri::command]
 fn ocr_start() {
     // ⚠ 必须脱开命令调用栈，理由和 open_app_picker 一模一样：
@@ -12067,19 +12119,44 @@ fn open_search(engine: String, text: Option<String>) {
     win::log(&format!("⏱ open_search: 进命令 → 返回 = {}ms", t_cmd.elapsed().as_millis()));
 }
 
+/// 打开「这个网址」。
+///
+/// r97：参数从「无」改成「可选的一段文字」。
+///
+/// 用户报的 bug：「我选中了一个网址但横条里并不能够弹出直达网址的按钮，但是如果
+/// 我把这段网址复制下来了，因此而弹出的横条里面却能有直达网址的按钮」。
+///
+/// 根因：划词路径（浏览器里走 OCR 兜底）拿到的文字带 OCR 噪声，`text_to_url`
+/// 判失败 → `sel_url` 是 None → 按钮点下去什么都不会发生。而复制路径拿到的是
+/// 剪贴板原文，判据轻松命中。
+///
+/// 所以这里改成：**前端把这段文字一起传过来**，后端拿它重新过一遍判据
+/// （`extract_links` 优先 —— 它能从一段话里把链接抠出来；`text_to_url` 兜底）。
+/// 仍然保留读共享状态那条老路（`text` 为空时），老版本前端不受影响。
 #[tauri::command]
-fn open_link() {
+fn open_link(text: Option<String>) {
     /* 用户要求：「选中的文本当中包含多个链接，点击打开链接按钮之后，就会在多个
      * 标签页打开这些链接」。所以这里开的是**整份链接列表**，不再是单条。
      * 列表为空（按钮只在有链接时才显示，理论上到不了这儿）才退回单条那条老路。 */
-    let urls = sel_urls_snapshot();
-    if urls.is_empty() {
+    let from_ui = text.unwrap_or_default();
+    let links = if from_ui.trim().is_empty() {
+        sel_urls_snapshot()
+    } else {
+        engines::extract_links(&from_ui)
+    };
+    if links.is_empty() {
+        // 兜底：共享状态里的单条（老路），再没有就用这段文字本身
         let url = st().sel_url.lock().ok().and_then(|u| u.clone());
         if let Some(u) = url {
+            win::log(&format!("open_link: 开 sel_url {u}"));
             let _ = open::that(u);
+        } else if !from_ui.trim().is_empty() {
+            let t = from_ui.trim();
+            win::log(&format!("open_link: 判不出链接，直接开这段文字 {t}"));
+            let _ = open::that(t);
         }
     } else {
-        spawn_open_links(urls);
+        spawn_open_links(links);
     }
     dismiss_bar();
 }
@@ -13142,6 +13219,9 @@ fn main() {
     img_region,
     img_engines_list,
     open_path,
+    // r97：选中文件 → 用系统默认程序打开（与 open_path 分工见那边注释）
+    open_file,
+    path_kind,
     // r54 需求 3：明文配置的按项导出 / 导入
     export_groups_list,
     export_items,

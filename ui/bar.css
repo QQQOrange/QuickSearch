@@ -880,9 +880,12 @@ button.fav-grp-head:focus-visible {
     fill: currentColor;
     transform: scale(var(--qs-optical, 1));
 }
+/* 📁 和 📄 都是 emoji 图标，字号比 SVG 那几颗小一点才视觉对齐 */
 .ico.qs-path   { font-size: 14px; }
+.ico.qs-openfile { font-size: 14px; }
 .ico.qs-img:hover,
-.ico.qs-path:hover { color: var(--qs-accent); }
+.ico.qs-path:hover,
+.ico.qs-openfile:hover { color: var(--qs-accent); }
 /* r66：**去掉那颗常驻描边**。
  * 原来给它加了一圈"淡描边"想让它在没悬停时也被认出来，但用户看到的是
  * 「图标周围还有一个外框」—— 在一排无边框图标里，多一圈框反而显得没对齐。

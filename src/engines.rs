@@ -392,6 +392,26 @@ fn host_looks_ok(host: &str) -> bool {
 ///        纯 ASCII，否则"张三.李四""版本1.2"就会被当成域名；
 ///      · 末尾 `<...>`、`「...」` 这类包裹字符没剥干净（现在一并剥掉）；
 ///      · 选中时把网址后面的说明文字一起带进来（`https://a.com 说明`）→ 现在取第一段。
+///
+/// ## r97：**划词选中网址却不出按钮**（用户 2026-10-22 报）
+///
+/// 用户原话：「我选中了一个网址但横条里并不能够弹出直达网址的按钮，但是如果我把
+/// 这段网址复制下来了，因此而弹出的横条里面却能有直达网址的按钮」。
+///
+/// 两条路的文字来源不同：
+///   · **复制**走剪贴板 → 拿到的是用户选中的原文，干净；
+///   · **划词**走 `capture_without_clipboard` → 浏览器里 UIA 被整体跳过
+///     （Chromium 内容树唤不醒，见 `uia_foreground_is_browser`），落到 **OCR 兜底**。
+///     OCR 出来的东西会带它自己的噪声：行尾多一个空格、把 URL 从中间断开
+///     （`https:// www.baidu.com`）、末尾粘一个中文句号……
+///     于是"整串是不是 URL"这个判据就假阴性了。
+///
+/// 所以这里对**带协议**那条路再放宽一步：先把整串里的空白和零宽字符抹掉，
+/// 再问它是不是一条 URL。`https:// www.baidu.com` → `https://www.baidu.com`。
+/// 这不影响假阳性防线（文件名那条路仍然只走裸域名判据，一个字都没改）。
+///
+/// ⚠ 只抹**空白/零宽**，不抹别的：`https://a.com/x y` 里的空格是路径的一部分
+///    （虽然少见），抹了会改出一个打不开的地址。所以抹的是"紧贴协议名的那一段"。
 pub fn text_to_url(s: &str) -> Option<String> {
     let t = s
         .trim()
@@ -407,16 +427,44 @@ pub fn text_to_url(s: &str) -> Option<String> {
     // ① 带协议：整串本来就是用户"选中了一段网址"，没有假阳性风险（没人会不小心
     //    选中 `http://…`），所以只挡明显不是网址的：空主机名。
     for scheme in ["http://", "https://"] {
-        if lower.strip_prefix(scheme).is_some() {
-            // 选中时常常把后面的说明文字一起带进来 —— 取第一段就够了。
-            // 用**原串**取（保住大小写），并且要求协议后面真的还有东西：
-            // `http://` 和 `http:// 说明` 都不算网址。
-            let first = t.split_whitespace().next().unwrap_or("");
-            if first.len() <= scheme.len() {
-                return None;
-            }
-            return Some(first.to_string());
+        /* r97：用 `find` 而不是 `strip_prefix` —— 选中时前面可能带上别字
+         * （「请访问 https://a.com」），协议在**任意位置**出现都算候选。
+         * 空主机名的检查统一在后面做。 */
+        let Some(at) = lower.find(scheme) else { continue };
+        let rest = &t[at..];
+        // 先试"取到第一个空白为止"（老行为，覆盖 99% 的情况：选中就是一条 URL，
+        // 或者 URL 后面跟了说明文字）
+        let first: String = rest
+            .chars()
+            .take_while(|c| !c.is_whitespace() && !is_zero_width(*c))
+            .collect();
+        /* r97：主机名必须"有个点"或是 IP —— 这一关同时挡掉三种东西：
+         *   · `https://` 自己（空主机名）；
+         *   · `https://​`（协议后面只有一个零宽字符，split_whitespace 不认它是
+         *     空白，于是"第一段"带着它通过了长度检查）；
+         *   · `https://www.`（OCR 把主机名后面的内容断开，第一段只剩一个
+         *     孤零零的点结尾）。
+         * 真 URL 的主机名必然含点（或是一个 IP），拿这个当统一关卡，
+         * 比"长度大于协议名"可靠得多。 */
+        if first.len() > scheme.len() && host_of(&first).is_some() && !is_url_tail_garbage(&first) {
+            return Some(first);
         }
+        /* r97：OCR 会把 URL 从中间断开（`https:// www.baidu.com`），于是
+         * split_whitespace 只取到 `https://` 自己（长度正好等于协议名）。
+         * 这时改用"把空白和零宽字符抹掉再取"：从协议起点往后吃到第一个
+         * **非 URL 字符**为止。 */
+        let squeezed: String = rest
+            .chars()
+            .take_while(|c| is_url_char_loose(*c) || c.is_whitespace() || is_zero_width(*c))
+            .filter(|c| !c.is_whitespace() && !is_zero_width(*c))
+            .collect();
+        if squeezed.len() > scheme.len()
+            && host_of(&squeezed).is_some()
+            && !is_url_tail_garbage(&squeezed)
+        {
+            return Some(squeezed);
+        }
+        return None;
     }
     // ② 裸域名 / www.：整串必须是可见 ASCII —— 否则"张三.李四""版本1.2"这类
     //    中文句子会被当成域名（中文路径只有带协议那条路才放行）。
@@ -434,6 +482,91 @@ pub fn text_to_url(s: &str) -> Option<String> {
         return Some(format!("https://{}", t));
     }
     None
+}
+
+/// 零宽字符（OCR / 网页复制经常夹带）。它们不该出现在 URL 里，出现即噪声。
+fn is_zero_width(c: char) -> bool {
+    matches!(c, '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{FEFF}' | '\u{2060}')
+}
+
+/// 从一条（可能带协议的）URL 里取出**主机名**，形状不像主机名就返回 None。
+///
+/// # 为什么要它（r97）
+///
+/// 老判据是"第一段的长度 > 协议名长度"，这挡不住三种真实噪声：
+///   · `https://` 自己 —— 长度正好等于协议名，老代码靠 `<=` 挡掉，但
+///   · `https://​`（协议后只有一个零宽字符）—— `split_whitespace` 不认零宽是
+///     空白，于是"第一段"长度 9 > 8，**通过了长度检查**；
+///   · `https://www.`（OCR 把主机名后面断开）—— 只剩一个孤零零的点结尾。
+///
+/// 真 URL 的主机名必然**含点**（`www.baidu.com`）或**是一个 IP**
+/// （`192.168.1.5`），拿这个当统一关卡比"比协议名长"可靠得多。
+fn host_of(u: &str) -> Option<&str> {
+    let after = u.split_once("://").map(|x| x.1).unwrap_or(u);
+    let host = after.split(['/', '?', '#']).next().unwrap_or("");
+    // 去掉 user@ 和 :port（和 host_looks_ok 同一套口径）
+    let host = host.rsplit('@').next().unwrap_or(host);
+    let host = host.split(':').next().unwrap_or(host);
+    if host.is_empty() {
+        return None;
+    }
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        return Some(host);
+    }
+    // 必须含点，且每一段都非空（`www..com` / `www.` 这种不算）
+    let labels: Vec<&str> = host.split('.').collect();
+    if labels.len() < 2 || labels.iter().any(|l| l.is_empty()) {
+        return None;
+    }
+    Some(host)
+}
+
+/// URL 里允许出现的字符（比 `extract_links` 里那份宽松：中文路径里的字符也算）。
+///
+/// 为什么要宽松：`text_to_url` 的 r97 兜底路径是"从协议起点吃到第一个非 URL
+/// 字符为止"。如果这里不含中文，`https://zh.wikipedia.org/wiki/中文` 就会被切成
+/// `https://zh.wikipedia.org/wiki/` —— 打开一个没有目标的地址。
+fn is_url_char_loose(c: char) -> bool {
+    if c.is_ascii_alphanumeric() {
+        return true;
+    }
+    matches!(
+        c,
+        '-' | '.' | '_' | '~' | ':' | '/' | '?' | '#' | '[' | ']' | '@' | '!'
+            | '$' | '&' | '\'' | '(' | ')' | '*' | '+' | ',' | ';' | '=' | '%'
+    ) || {
+        let v = c as u32;
+        // CJK 统一表意 + 扩展 A + 兼容表意 + 中文标点 + 全角
+        (0x4E00..=0x9FFF).contains(&v)
+            || (0x3400..=0x4DBF).contains(&v)
+            || (0xF900..=0xFAFF).contains(&v)
+            || (0x3000..=0x303F).contains(&v)
+            || (0xFF00..=0xFFEF).contains(&v)
+    }
+}
+
+/// 一段候选 URL 的**主机名自身**是不是含中文。
+///
+/// OCR 有时会把一整句话连到协议后面（`https://www.baidu.com这是百度`），
+/// 抹掉空白之后它变成一段没有边界的串 —— 这种宁可不认（用户点下去打不开），
+/// 也不要打开一个奇怪地址。
+///
+/// ⚠ 判据是"**主机名**含中文"，不是"路径含中文"：真 URL 的中文只该出现在
+/// **路径**里（`https://zh.wikipedia.org/wiki/中文` 是合法且常见的），
+/// 出现在主机名里说明是 OCR 把汉字粘上来了。
+fn is_url_tail_garbage(seg: &str) -> bool {
+    // 协议之后的那一段
+    let after = seg.split_once("://").map(|x| x.1).unwrap_or(seg);
+    // 主机名结束的位置（第一个 / ? #；没有就是整段）
+    let host_end = after.find(['/', '?', '#']).unwrap_or(after.len());
+    // 只看主机名**自身**（路径里的中文不管）
+    after[..host_end].chars().any(|c| {
+        let v = c as u32;
+        // CJK 统一表意 + 中文标点 + 全角
+        (0x4E00..=0x9FFF).contains(&v)
+            || (0x3000..=0x303F).contains(&v)
+            || (0xFF00..=0xFFEF).contains(&v)
+    })
 }
 
 /// 从一段（OCR 出来的）文字里把**所有**链接抠出来。
@@ -494,6 +627,36 @@ pub fn extract_links(text: &str) -> Vec<String> {
         if let Some(u) = text_to_url(&cand) {
             if seen.insert(u.clone()) {
                 out.push(u);
+            }
+            i = if j > i { j } else { i + 1 };
+            continue;
+        }
+        /* r97：OCR 会把 URL 从中间**断开**成两段（`https:// www.baidu.com`）。
+         * 上面的 `is_url_char` 遇到空格就停，于是 raw = `https://` 自己 ——
+         * text_to_url 拒掉，整条链接就漏了。
+         *
+         * 这里补一次"接续"：从当前位置往后看，把**空白和零宽字符跳过**之后
+         * 仍然像 URL 字符的内容接上，再试一次。只接续一次（不再递归），
+         * 避免把 `https:// 说明文字` 这种真句子硬拼成地址。 */
+        let mut k = j;
+        while k < n && (chars[k].is_whitespace() || is_zero_width(chars[k])) {
+            k += 1;
+        }
+        if k > j {
+            let mut m = k;
+            while m < n && is_url_char(chars[m]) {
+                m += 1;
+            }
+            if m > k {
+                let joined: String = chars[i..k].iter().chain(chars[k..m].iter()).collect();
+                let joined = trim_tail(&joined);
+                if let Some(u) = text_to_url(&joined) {
+                    if seen.insert(u.clone()) {
+                        out.push(u);
+                    }
+                }
+                i = if m > i { m } else { i + 1 };
+                continue;
             }
         }
         i = if j > i { j } else { i + 1 };
@@ -667,6 +830,121 @@ mod tests {
         let t = "详情见https://example.com/a 说明，还有 www.b.cn 和 https://example.com/a";
         let v = extract_links(t);
         assert_eq!(v, vec!["https://example.com/a".to_string(), "https://www.b.cn".to_string()]);
+    }
+
+    /* ---------------- r97：划词选中网址却不弹按钮（OCR 噪声） ---------------- */
+
+    /// 用户报的 bug（2026-10-22）：
+    ///
+    /// 「我选中了一个网址但横条里并不能够弹出直达网址的按钮，但是如果我把这段网址
+    ///   复制下来了，因此而弹出的横条里面却能有直达网址的按钮」。
+    ///
+    /// 根因：划词路径在浏览器里走 **OCR 兜底**（UIA 内容树唤不醒），OCR 出来的
+    /// 东西带噪声 —— 最常见的是把 URL 从中间断开。复制路径拿的是剪贴板原文，
+    /// 干干净净。于是同一个"选中一个网址"的动作，两条路结论相反。
+    ///
+    /// 这些用例就是那几种真实噪声形状。**判决必须和复制路径一致**。
+    #[test]
+    fn text_to_url_survives_ocr_noise() {
+        // ① OCR 把协议和主机名断开（最常见）
+        assert_eq!(
+            text_to_url("https:// www.baidu.com").as_deref(),
+            Some("https://www.baidu.com")
+        );
+        assert_eq!(
+            text_to_url("http:// www.a.com").as_deref(),
+            Some("http://www.a.com")
+        );
+        // ② 主机名中间断开
+        assert_eq!(
+            text_to_url("https://www. baidu.com").as_deref(),
+            Some("https://www.baidu.com")
+        );
+        // ③ 尾部多一个空格 / 换行（trim 本来就管，这里钉住别退回去）
+        assert_eq!(
+            text_to_url("https://a.com\n").as_deref(),
+            Some("https://a.com")
+        );
+        // ④ 零宽字符（网页复制经常夹带）
+        assert_eq!(
+            text_to_url("https://\u{200B}a.com").as_deref(),
+            Some("https://a.com")
+        );
+        // ⑤ 整段话里夹一个网址（划词经常把说明文字一起带进来）
+        assert_eq!(
+            text_to_url("请访问 https://www.baidu.com 查看详情").as_deref(),
+            Some("https://www.baidu.com")
+        );
+    }
+
+    /// OCR 把 URL 断开之后，`extract_links`（按钮显隐的真正判据）也要能接上。
+    #[test]
+    fn extract_links_rejoins_ocr_broken_urls() {
+        // 断开成两段：接续逻辑要把它拼回来
+        assert_eq!(
+            extract_links("https:// www.baidu.com"),
+            vec!["https://www.baidu.com".to_string()]
+        );
+        // 一段话里夹一个断开的网址，前后都有中文
+        let v = extract_links("详情见 https:// www.baidu.com 谢谢");
+        assert_eq!(v, vec!["https://www.baidu.com".to_string()]);
+        // 干净的那种不受影响（回归）
+        assert_eq!(
+            extract_links("https://a.com/x"),
+            vec!["https://a.com/x".to_string()]
+        );
+    }
+
+    /// r97 放宽之后，**假阳性防线一条都不许退**。
+    ///
+    /// 这条和上面那条同样重要：为了修"漏判"把文件名放进来，用户就会看到
+    /// 「选中 report.docx 弹出 🔗、点下去打开一个奇怪域名」—— 比漏判更烦。
+    #[test]
+    fn ocr_relax_did_not_wake_up_filenames() {
+        for s in [
+            "index.html",
+            "package.json",
+            "test.js",
+            "C:\\Users\\me\\report.docx",
+            "C:\\www\\index.html",           // 带 www 的目录名，最容易误伤
+            "张三.李四",
+            "版本1.2",
+            "hello world",
+            "这是一句普通的话",
+        ] {
+            assert!(text_to_url(s).is_none(), "仍不该认成网址: {s}");
+            assert!(extract_links(s).is_empty(), "仍不该抠出链接: {s}");
+        }
+        // 只有协议名、没有主机名的照样拒（`host_of` 那一关）
+        for s in [
+            "https://",
+            "http://",
+            "https:// 说明",
+            "https://\u{200B}",               // 协议后只有一个零宽字符
+            "https://​ 说明",
+        ] {
+            assert!(text_to_url(s).is_none(), "空主机名必须拒: {s:?}");
+        }
+        // 主机名不完整（OCR 从中间断开，只剩一个孤零零的点结尾）
+        assert!(text_to_url("https://www.").is_none());
+        assert!(text_to_url("https://a.").is_none());
+    }
+
+    /// `host_of` 自己的边界：它是 r97 那道"主机名必须有个点"的关。
+    #[test]
+    fn host_of_accepts_real_hosts_rejects_shapes() {
+        assert_eq!(host_of("https://www.baidu.com"), Some("www.baidu.com"));
+        assert_eq!(host_of("https://a.com/x?y=1"), Some("a.com"));
+        assert_eq!(host_of("http://192.168.1.5:8080/x"), Some("192.168.1.5"));
+        assert_eq!(host_of("https://user@example.com/a"), Some("example.com"));
+        // 没有协议名的也认（extract_links 里 www. 那条路用）
+        assert_eq!(host_of("www.baidu.com"), Some("www.baidu.com"));
+        // 拒：空 / 没有点 / 有空段
+        assert_eq!(host_of("https://"), None);
+        assert_eq!(host_of("https://\u{200B}"), None);
+        assert_eq!(host_of("https://www."), None);
+        assert_eq!(host_of("https://www..com"), None);
+        assert_eq!(host_of("https://说明"), None);
     }
 
     #[test]
