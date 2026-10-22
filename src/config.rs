@@ -456,6 +456,12 @@ pub fn repair_dead_custom_engines(cfg: &mut Config) -> (usize, usize) {
         if custom_engine_usable(e) {
             continue;
         }
+        /* 名字上挂着「手工改写的地址」（url_overrides）也算能用 —— `engine_entry`
+         * 的优先级是 url_overrides > custom_engines，它真能打开 / 能搜，
+         * 这里就别把用户横条上那一格摘掉。 */
+        if cfg.url_overrides.contains_key(&e.name) {
+            continue;
+        }
         // ① 有按键序列 → 它本来就是快捷键类，只是种类丢了（老备份常见）
         if e.kind != EngineKind::Hotkey && !e.hotkey.trim().is_empty() {
             e.kind = EngineKind::Hotkey;

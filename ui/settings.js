@@ -2100,8 +2100,9 @@ function renderCustomList() {
          *   用户报的「设置里显示已在横条、横条里却没有」就是这种记录。
          *   这里当场标红说清楚，并且不给「加到横条」—— 免得再往横条里塞一颗幽灵
          *   （后端 `toggle_bar_engine` 也已经按同一口径拦了）。
-         *   后端读配置时会把这类记录修掉/清掉（config::repair_dead_custom_engines），
-         *   所以正常情况下用户看不到这一行；留着它是给"这一轮还没重启"兜底。 */
+         *   后端读配置时会把这类记录从横条/最近使用里**摘掉**、定义留着
+         *   （config::repair_dead_custom_engines），所以正常情况下这里显示的是
+         *   「可选但用不了」的状态 —— 把地址或按键补上就活。 */
         const usable = ceK === 'hotkey'
             ? !!(ce.hotkey || '').trim()
             : !!(ce.url || '').trim();
