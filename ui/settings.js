@@ -2095,6 +2095,22 @@ function renderCustomList() {
         const u = document.createElement('small');
         u.className = ceK === 'hotkey' ? 'chot' : 'curl';
         u.textContent = ceK === 'hotkey' ? (ce.hotkey || '') : ce.url;
+        /* ⚠ 「空壳」记录：快捷键类没按键序列、其余类没地址 —— 这种定义干什么都不行，
+         *   而且**横条上根本画不出来**（前端合并目录时按同一口径跳过它）。
+         *   用户报的「设置里显示已在横条、横条里却没有」就是这种记录。
+         *   这里当场标红说清楚，并且不给「加到横条」—— 免得再往横条里塞一颗幽灵
+         *   （后端 `toggle_bar_engine` 也已经按同一口径拦了）。
+         *   后端读配置时会把这类记录修掉/清掉（config::repair_dead_custom_engines），
+         *   所以正常情况下用户看不到这一行；留着它是给"这一轮还没重启"兜底。 */
+        const usable = ceK === 'hotkey'
+            ? !!(ce.hotkey || '').trim()
+            : !!(ce.url || '').trim();
+        if (!usable) {
+            u.textContent = ceK === 'hotkey'
+                ? '（没填按键序列 —— 这颗在横条上画不出来）'
+                : '（没填地址 —— 这颗在横条上画不出来）';
+            u.style.color = 'var(--danger, #E5484D)';
+        }
         nm.appendChild(u);
 
         const ops = document.createElement('span');
@@ -2119,8 +2135,15 @@ function renderCustomList() {
         if (CONF.overrideIcons[ce.name]) {
             mk('默认图标', '恢复成首字母徽标', () => invoke('reset_icon', { engine: ce.name }));
         }
-        mk(on ? '已在横条' : '加到横条', on ? '从横条上移除' : '加到横条上',
-            () => invoke('toggle_bar_engine', { engine: ce.name, on: !on }));
+        /* 空壳记录不给「加到横条」：加进去也画不出来（见上面 usable 那段）。
+         * 已经在横条里的，仍然给一颗「从横条移除」，让用户能自己把幽灵清掉。 */
+        if (usable) {
+            mk(on ? '已在横条' : '加到横条', on ? '从横条上移除' : '加到横条上',
+                () => invoke('toggle_bar_engine', { engine: ce.name, on: !on }));
+        } else if (on) {
+            mk('从横条移除', '这条定义是空的（没地址/没按键），横条上本来也画不出来 —— 点这里把引用清掉',
+                () => invoke('toggle_bar_engine', { engine: ce.name, on: false }));
+        }
         mk('编辑', '把这个引擎读进下面的表单', () => fillCeForm(idx));
         // 删除做成「点一下变成确认、再点一下才真的删」。
         // 不用 window.confirm 是因为 WebView2 里的原生对话框不一定放行，

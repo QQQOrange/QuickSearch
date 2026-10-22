@@ -409,8 +409,80 @@ pub fn prune_undefined_bar_engines(cfg: &mut Config) -> usize {
     before - cfg.bar_list.len()
 }
 
-/// r72：把识图按钮并进 `bar_list`（`@img` 哨兵）。返回是否改动过。
+/// 一条自定义引擎"能不能真的用起来"。
 ///
+/// 判据和前端 `qsMergeCustomEngines` **逐条同源**（那边是 `kind === 'hotkey' &&
+/// !hotkey → continue` / `kind !== 'hotkey' && !url → continue`）：
+///   · 快捷键类：要有一串按键（`hotkey`），地址本来就没意义；
+///   · 搜索 / 打开类：要有地址（搜索类还要求带 `%s`，那是写入时校验的，这里只管空）。
+///
+/// ⚠ 两边口径必须一致，否则就会出现用户报的那个 bug：后端认为"这条引擎是好的"
+///   （所以 `toggle_bar_engine` 放行、设置页显示「已在横条」），而前端合并目录时
+///   按同一份数据把它当成"没定义"跳过 —— 横条渲染时按名字查不到，那一格就
+///   **画不出来**。用户看到的正是「设置里明明在横条上，横条里却没有」。
+pub fn custom_engine_usable(e: &CustomEngine) -> bool {
+    match e.kind {
+        EngineKind::Hotkey => !e.hotkey.trim().is_empty(),
+        _ => !e.url.trim().is_empty(),
+    }
+}
+
+/// 修 / 摘「空壳」自定义引擎。返回 `(救回来的条数, 从横条摘掉的条数)`。
+///
+/// # 为什么需要（用户报的 bug，2026-10-22）
+///
+/// 「我把两个快捷键引擎固定到了横条里面，但横条里实际没显示，设置里又看到
+///   它们被放在了横条上。」
+///
+/// 现场：配置里那两条是 `{name:"微信截图", url:"", kind:"search", hotkey:""}` ——
+/// 既是搜索类（要求地址）又没地址、也没有按键序列，什么都干不了。它们大概率是
+/// **从老版本备份恢复**进来的（老 schema 的字段名不同，`kind`/`hotkey` 落空，
+/// 反序列化按默认值变成 `kind=search`）。
+///
+/// 这种记录会造成一个**必然的自相矛盾**：
+///   · `bar_list` 里有名字 → 设置页显示「已在横条」；
+///   · 前端合并目录时按 unusable 跳过 → 引擎库里没有它，横条上也画不出来。
+///
+/// 处理分两种：
+///   ① 只是**种类丢了**（有按键序列、只是被默认成了 search）→ 认回快捷键类；
+///   ② 什么都没有 → **定义留着**（别删用户数据：他起的名字、换过的图标都还挂在
+///      这个名字上），但把 `bar_list` / `recent_engines` 里的引用摘掉 ——
+///      于是"横条上有"这句话不再成立，设置页那颗「已在横条」变成「加到横条」，
+///      同时那一行会标红提示「没填地址/按键」。用户把地址或按键补上，它立刻恢复。
+pub fn repair_dead_custom_engines(cfg: &mut Config) -> (usize, usize) {
+    let mut fixed = 0usize;
+    let mut dead: Vec<String> = Vec::new();
+    for e in cfg.custom_engines.iter_mut() {
+        if custom_engine_usable(e) {
+            continue;
+        }
+        // ① 有按键序列 → 它本来就是快捷键类，只是种类丢了（老备份常见）
+        if e.kind != EngineKind::Hotkey && !e.hotkey.trim().is_empty() {
+            e.kind = EngineKind::Hotkey;
+            e.url = String::new();
+            fixed += 1;
+            continue;
+        }
+        dead.push(e.name.clone());
+    }
+    if dead.is_empty() {
+        return (fixed, 0);
+    }
+    for name in &dead {
+        crate::win::log(&format!(
+            "config: 自定义引擎「{name}」既没有地址也没有按键序列，横条上画不出来 —— 已从横条/最近使用里摘掉（定义保留，去设置里补上即可）"
+        ));
+    }
+    let before = cfg.bar_list.len();
+    cfg.bar_list.retain(|n| !dead.contains(n));
+    let unpinned = before - cfg.bar_list.len();
+    // 最近使用同理：留着它，面板那一栏会画一颗点了没反应的格子
+    // （renderRecentSection 按名字查目录，查不到会跳过 —— 但名单本身该干净）
+    cfg.recent_engines.retain(|n| !dead.contains(n));
+    (fixed, unpinned)
+}
+
+/// r72：把识图按钮并进 `bar_list`（`@img` 哨兵）。返回是否改动过。
 /// 以前识图是横条上一个**位置固定**的按钮（`#btnImg`），不在 bar_list 里，
 /// 所以设置页那一行只能写「位置固定」：不能上下移、不能拖、也没有「移出」。
 /// 用户原话：「识图搜索加入了横条之后，在引擎横条上的引擎这个框架里面，它只有
@@ -2145,6 +2217,22 @@ pub(crate) fn sanitize(mut c: Config) -> Config {
      * 「内置目录 + custom_engines」，孤儿名字在哪都查不到，只在 bar_list 里躺着。
      * 放在这里（读配置的统一归一点）而不是只放 UI 侧，理由和上面两条一样：
      * 配置可能从本地 / 备份 / 云端恢复 / 导入进来，每一路都该干净。 */
+    /* 自定义引擎里的「空壳」记录：既没地址也没按键 → 有按键的认回快捷键类，
+     * 什么都没有的从横条 / 最近使用里摘掉（定义保留，见 repair_dead_custom_engines）。
+     *
+     * ⚠ 必须放在下面那条「孤儿条目」剪除**之前**：这一步会改 bar_list，先摘引用
+     *   再判孤儿，日志语义才对（否则同一轮里它会先被当成"有定义"而留下）。 */
+    let (repaired, unpinned) = repair_dead_custom_engines(&mut c);
+    if repaired > 0 {
+        crate::win::log(&format!(
+            "config: 救回 {repaired} 条自定义引擎（有按键序列但没有种类，已按快捷键类处理）"
+        ));
+    }
+    if unpinned > 0 {
+        crate::win::log(&format!(
+            "config: 从横条上摘掉 {unpinned} 条空壳自定义引擎（没地址也没按键，画不出来）"
+        ));
+    }
     let pruned_undefined = prune_undefined_bar_engines(&mut c);
     if pruned_undefined > 0 {
         crate::win::log(&format!(
@@ -3949,6 +4037,94 @@ mod sanitize_tests {
 
         // 幂等：干净的数据再剪一次不该动
         assert_eq!(prune_undefined_bar_engines(&mut c), 0);
+    }
+
+    /// 「空壳自定义引擎」的修 / 摘（用户报的「设置里在横条上、横条里没有」）。
+    ///
+    /// 现场数据长这样：`{name:"微信截图", url:"", kind:"search", hotkey:""}` ——
+    /// 既没地址也没按键，前端合并目录时按 unusable 跳过，横条按名字查不到，
+    /// 于是"设置显示已在横条、横条上画不出来"。这条测试把四种形态一次钉住：
+    ///   ① 有按键、种类丢了  → 认回快捷键类（救回来，不删用户数据）
+    ///   ② 全空              → **定义留着**，只把 bar_list / recent_engines 的引用摘掉
+    ///   ③ 正常的搜索类      → 原样留着
+    ///   ④ 快捷键类没按键    → 同 ②
+    ///
+    /// ⚠ 为什么 ② 不删定义：名字是用户起的、`overrideIcons` 里换过的图标也挂在这个
+    ///   名字上。删掉定义 = 那一格的自定义图标变成孤儿。留着定义 + 标红提示
+    ///   「没填地址/按键」，用户补上就活，是更温和也更省事的一条路。
+    #[test]
+    fn repair_dead_custom_engines_fixes_and_unpins() {
+        let _serial = big_lock();
+        let mut c = Config::default();
+        c.custom_engines = vec![
+            CustomEngine {
+                name: "有按键但种类丢了".into(),
+                url: String::new(),
+                kind: EngineKind::Search,
+                hotkey: "alt+v".into(),
+                ..Default::default()
+            },
+            CustomEngine {
+                name: "空壳".into(),
+                url: String::new(),
+                kind: EngineKind::Search,
+                hotkey: String::new(),
+                ..Default::default()
+            },
+            CustomEngine {
+                name: "正常的搜索类".into(),
+                url: "https://example.com/s?q=%s".into(),
+                kind: EngineKind::Search,
+                ..Default::default()
+            },
+            CustomEngine {
+                name: "没按键的快捷键".into(),
+                kind: EngineKind::Hotkey,
+                hotkey: String::new(),
+                ..Default::default()
+            },
+        ];
+        c.bar_list = vec![
+            "空壳".to_string(),
+            "没按键的快捷键".to_string(),
+            "正常的搜索类".to_string(),
+            "有按键但种类丢了".to_string(),
+            SEP.to_string(),
+        ];
+        c.recent_engines = vec!["空壳".to_string(), "正常的搜索类".to_string()];
+
+        let (fixed, unpinned) = repair_dead_custom_engines(&mut c);
+        assert_eq!((fixed, unpinned), (1, 2), "该救回 1 条、从横条摘掉 2 条");
+
+        // 定义一条都不删（见上面 ⚠）
+        let names: Vec<&str> = c.custom_engines.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names.len(), 4, "自定义引擎的定义不能被删掉");
+
+        let rescued = c
+            .custom_engines
+            .iter()
+            .find(|e| e.name == "有按键但种类丢了")
+            .expect("救回来的那条还在");
+        assert_eq!(rescued.kind, EngineKind::Hotkey, "种类要认回快捷键类");
+        assert_eq!(rescued.hotkey, "alt+v", "按键序列要原样留着");
+        assert!(rescued.url.is_empty(), "快捷键类的地址保持空串");
+
+        assert!(!c.bar_list.iter().any(|n| n == "空壳"), "横条上的引用要摘掉");
+        assert!(
+            !c.bar_list.iter().any(|n| n == "没按键的快捷键"),
+            "横条上的引用要摘掉"
+        );
+        assert!(c.bar_list.iter().any(|n| n == "正常的搜索类"));
+        assert!(
+            c.bar_list.iter().any(|n| n == "有按键但种类丢了"),
+            "救回来的那条在横条上要留着"
+        );
+        assert!(c.bar_list.iter().any(|n| n == SEP), "分隔线不能被误剪");
+        assert!(!c.recent_engines.iter().any(|n| n == "空壳"), "最近使用也要剔名");
+        assert!(c.recent_engines.iter().any(|n| n == "正常的搜索类"));
+
+        // 幂等
+        assert_eq!(repair_dead_custom_engines(&mut c), (0, 0));
     }
 
     /// 外部软件地址的三类正当形态都要放行：网页、软件自己的协议、

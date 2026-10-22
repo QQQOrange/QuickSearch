@@ -4471,7 +4471,20 @@ fn restore_from_text(text: &str) -> Result<(), String> {
     {
         let mut cfg = st().cfg.lock().map_err(|_| "配置正忙，稍后再试".to_string())?;
         match fmt {
-            BackupFormat::View => apply_view(&v, &mut cfg),
+            /* View 格式（老备份 / 明文导出那一套）恢复完**也要过一遍 sanitize**。
+             *
+             * ⚠ 以前只有 Config 那条走 sanitize，View 这条直接把字段搬进 cfg 就完事 ——
+             *   于是一份"当年 schema 还不同"的旧备份恢复进来之后，会带着一堆
+             *   启动归一本该清掉的东西活到下次重启：
+             *     · 指向已删收藏 / 外部软件的横条哨兵；
+             *     · **空壳自定义引擎**（`kind=search` 但 url 为空、hotkey 也为空）——
+             *       用户报的「设置里显示已在横条、横条里却没有」就是这么进来的
+             *       （详见 config::repair_dead_custom_engines 的注释）。
+             *   恢复本来就有"整份覆盖"的破坏性，归一正是为了让它落成一份能用的配置。 */
+            BackupFormat::View => {
+                apply_view(&v, &mut cfg);
+                *cfg = config::sanitize(std::mem::take(&mut *cfg));
+            }
             /* 配置格式的备份本身就是一份完整的 `Config`，直接整份替换。
              *
              * 为什么不像 View 那样过 `apply_view`：那样要先把 Config 翻成
@@ -11187,15 +11200,29 @@ fn toggle_bar_engine_impl(cfg: &mut Config, engine: &str, on: bool) {
     // 「@app:<id>」是外部软件的哨兵，同理 —— 但要多查一步：
     // 软件已经被删掉时不能把一根悬空哨兵又塞回去（那正是设置页
     // 「横条上的引擎」显示乱码的来路）。
-    if engine != config::BAR_OCR
+    if on
+        && engine != config::BAR_OCR
         && engine != config::BAR_IMG
         && !config::is_fav_sentinel(engine)
         && !config::is_app_sentinel(engine)
     {
+        /* ⚠ 这道闸**只在"加进去"时管**（`on == true`），移出（`on == false`）永远放行。
+         *
+         * 移出要是也被拦，用户就彻底没办法清掉一条坏数据了 —— 设置页那颗
+         * 「从横条移除」会变成点不动的假按钮，而横条上本来就画不出来，
+         * 用户只能手动改 config.json。 */
         // 和 engine_entry() 同一个准入口径（url_overrides > custom_engines >
         // 内置），但必须用**手里这把锁里的 cfg** 现算 —— engine_entry 自己会
         // 去锁 st().cfg，在已持锁的情况下调它是自锁死等。
-        let known = cfg.custom_engines.iter().any(|e| e.name == engine)
+        //
+        // ⚠ 自定义引擎还得是**能用**的那一条（快捷键类要有按键序列、其余类要有
+        //   地址）。理由见 config::repair_dead_custom_engines 的注释：空壳定义
+        //   在横条上画不出来（前端合并目录时就跳过了），放进去只会变成
+        //   「设置里显示已在横条、横条里什么都没有」的幽灵。
+        let known = cfg
+            .custom_engines
+            .iter()
+            .any(|e| e.name == engine && config::custom_engine_usable(e))
             || cfg.url_overrides.contains_key(engine)
             || engines::engines().contains_key(engine);
         if !known {
