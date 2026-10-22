@@ -1169,13 +1169,14 @@ fn capture_selection(target_pid: u32) -> Option<String> {
         win::log("capture: 剪贴板被别的程序占着，快照失败 —— 本次跳过还原，取词继续");
     }
     /* 这一次取词的"现场记录"。排查时最想知道的三件事就是：目标窗口属于哪个进程、
-     * 快照拿没拿到、复制前剪贴板里是什么 —— 一行写全，省得来回要日志。 */
+     * 快照拿没拿到、复制前剪贴板里是什么 —— 一行写全，省得来回要日志。
+     *
+     * ⚠ v1.4.0：剪贴板内容**只记字数**。以前这里会把前 20 个字原样写进日志，
+     * 那等于把用户上一条复制的内容（可能是密码、可能是私信）明文落盘。 */
     win::log(&format!(
-        "capture: 开始 目标pid={target_pid} 快照={} 复制前剪贴板={:?}",
+        "capture: 开始 目标pid={target_pid} 快照={} 复制前剪贴板={} 字",
         if snap.is_some() { "ok" } else { "失败" },
-        old_text
-            .as_deref()
-            .map(|s| s.chars().take(20).collect::<String>())
+        old_text.as_deref().map(|s| s.chars().count()).unwrap_or(0)
     ));
     /* 先等选区落地，再读「取词前」的序号 —— 顺序反了的话，软件在稳定期
      * 里自己提交的选区会把 before 带成新值，等我们自己的 Ctrl+C 反而
@@ -1277,12 +1278,13 @@ fn capture_selection(target_pid: u32) -> Option<String> {
          * 放宽的代价有界：要在 460ms 窗口里恰好有第三方程序改写剪贴板，
          * 且写进去的内容和复制前不一样，才会误弹一次（日志留痕）。 */
         let valid = text.is_some() && (owned || (round == last_round && fresh));
+        // ⚠ v1.4.0：读到的东西**只记字数**（内容属于用户数据，不落明文日志）
         win::log(&format!(
             "capture: round={round} ch={ch} changed={changed} owned={owned} fresh={fresh} valid={valid} \
-             目标={target_pid} owner={} 前台={} 读到={:?}",
+             目标={target_pid} owner={} 前台={} 读到={} 字",
             win::window_pid(win::clipboard_owner()),
             win::window_pid(win::foreground_window()),
-            raw.as_deref().map(|s| s.chars().take(40).collect::<String>())
+            raw.as_deref().map(|s| s.chars().count()).unwrap_or(0)
         ));
         if !valid {
             /* 读不到就**把剪贴板上挂着的格式列出来**。这次排查就是因为缺这一行
@@ -2486,10 +2488,35 @@ fn show_ocr_only_bar() {
 ///   「设置按钮」探针全程跑在"没有锚点、窗口永不缩放"的退化环境里还全 PASS。
 ///   注册之后探针走的和真实用户完全同一条路（设锚点 → 前端 layout_bar → 真摆窗）。
 ///   对本机单用户桌面应用来说，多一个内部命令的暴露面可以忽略。
+/// 日志里展示 URL 时**抹掉查询串**，只留"哪个站、哪条路径"。
+///
+/// # 为什么（v1.4.0）
+///
+/// 用户要求「所有本地数据都要加密，不能以任何明文方式显示任何的用户数据」。
+/// 而搜索引擎的 URL 里就带着用户划的词（`https://www.google.com/search?q=张三`），
+/// `open_search` / `open_app` / `open_link` 这三行以前把整条 URL 原样写进
+/// `log.txt` —— 等于把搜索历史明文落在磁盘上。
+///
+/// 保留 scheme + host + path 已经够定位"URL 模板坏了"这类问题；查询串只记长度。
+fn redact_url(u: &str) -> String {
+    match u.find('?') {
+        Some(i) => {
+            let (head, tail) = u.split_at(i);
+            format!("{head}?<{} 字>", tail.chars().count().saturating_sub(1))
+        }
+        None => u.chars().take(180).collect(),
+    }
+}
+
 #[tauri::command]
 fn show_bar(text: String, at_mouse: bool, via_copy: bool) -> usize {
     let t0 = std::time::Instant::now();
-    win::log(&format!("show_bar: {:?}", text.chars().take(60).collect::<String>()));
+    /* ⚠ v1.4.0：**日志里不记用户选中的文字**，只记字数。
+     *
+     * 用户要求「所有的本地数据都要加密，不能以任何明文方式显示任何的用户数据」。
+     * 日志是明文文件，以前这一行把划到的原文（最多 60 字）原样写进去 ——
+     * 那是货真价实的用户数据。排查"有没有取到词"看字数就够了。 */
+    win::log(&format!("show_bar: {} 字", text.chars().count()));
     let a = app();
     // 选区 / 选区 URL 的共享状态走 remember_text，和"迟到补丁"用同一套，
     // 免得两条路各写各的、前后端对不上（点引擎到底搜哪份文字那种事）。
@@ -4236,9 +4263,9 @@ fn export_config(app: AppHandle) {
                 return;
             }
         };
-        // 备份里全是敏感数据（OCR Key、WebDAV 密码、收藏内容）——
-        // 设了备份密码就加密，没设就原样导出（用户自己的选择）。
-        let text = match crypto::encrypt(&text, &cfg_with(|c| c.backup_password.clone())) {
+        // 备份里全是敏感数据（OCR Key、WebDAV 密码、收藏内容）。
+        // v1.4.0：**没设密码也不许明文导出** —— `seal` 会退回 DPAPI。
+        let text = match crypto::seal(&text, &cfg_with(|c| c.backup_password.clone())) {
             Ok(s) => s,
             Err(e) => {
                 win::log(&format!("export_config encrypt failed: {e}"));
@@ -4323,9 +4350,13 @@ fn wd_toast(msg: impl Into<String>) {
 /// 自定义图标已经在 config_view() 里编成了 data URL，所以这一份就是完整配置包。
 fn backup_payload() -> Result<String, String> {
     let plain = serde_json::to_string_pretty(&config_view()).map_err(|e| format!("打包配置失败：{e}"))?;
-    // ⚠ 所有备份（云端 + 本机导出）都从这里出 —— 设了备份密码就自动加密，
-    //   用户不用记得手动做什么。
-    crypto::encrypt(&plain, &cfg_with(|c| c.backup_password.clone()))
+    /* ⚠ 所有备份（云端 + 本机导出）都从这里出。
+     *
+     * v1.4.0：改成 `seal` —— 设了备份密码就用密码（可跨机恢复），
+     * **没设也不能落明文**，退回 DPAPI（只在本机可解）。
+     * 以前这里是 `encrypt`，空密码时它原样返回明文：一份含 OCR Key /
+     * WebDAV 密码 / 收藏内容的备份就这么明文传上了云端。 */
+    crypto::seal(&plain, &cfg_with(|c| c.backup_password.clone()))
 }
 
 /// 覆盖配置目录里的一份安全副本。
@@ -11981,7 +12012,7 @@ fn open_app(id: String, text: Option<String>) -> Result<(), String> {
         dismiss_bar();
         return Ok(());
     }
-    win::log(&format!("open_app: {id} -> {}", url.chars().take(180).collect::<String>()));
+    win::log(&format!("open_app: {id} -> {}", redact_url(&url)));
     // 打开前再校验一次：配置可能是旧版本留下来的、或用户手改过 config.json
     if let Err(e) = config::validate_app_url(&url) {
         win::log(&format!("open_app: 地址不合法，拒绝打开（{e}）"));
@@ -12318,7 +12349,7 @@ fn open_search(engine: String, text: Option<String>) {
             // 有选中词就顺手填进去（填了不亏，用户确实是圈了词才点的）
             tpl.replace("%s", &engines::encode_query(&query))
         };
-        win::log(&format!("open_search: {engine} -> {}", url.chars().take(180).collect::<String>()));
+        win::log(&format!("open_search: {engine} -> {}", redact_url(&url)));
         /* r51 速度：**先收横条，再把拉浏览器丢到后台**。
          * open::that() 在 Windows 上就是 ShellExecuteW，**会阻塞**（等 shell 找关联程序、
          * 发 DDE，冷启动几百毫秒很常见）。原来 dismiss_bar() 压在这一行后面 ——
@@ -12403,7 +12434,7 @@ fn open_link(text: Option<String>) {
         // 兜底：共享状态里的单条（老路），再没有就用这段文字本身
         let url = st().sel_url.lock().ok().and_then(|u| u.clone());
         if let Some(u) = url {
-            win::log(&format!("open_link: 开 sel_url {u}"));
+            win::log(&format!("open_link: 开 sel_url {}", redact_url(&u)));
             let _ = open::that(u);
         } else if !from_ui.trim().is_empty() {
             let t = from_ui.trim();
@@ -13099,6 +13130,16 @@ fn main() {
     let env_on = |k: &str| std::env::var(k).map(|v| v == "1").unwrap_or(false);
 
     let no_elevate = flag("--no-elevate") || env_on("QS_NO_ELEVATE");
+    /* v1.4.0：老用户的数据从 `%APPDATA%\QuickSearch` 迁到 **exe 旁边的
+     * `Quick search data`**（备份进 `QuickSearch back`）。
+     *
+     * 位置：**所有 `config::load()` / `data_dir()` 之前** —— 下面那串探针命令
+     * （`--touch-config` 之类）第一句就读配置，晚一步就会在旧目录里读/写一遍，
+     * 迁移的"先搬再删"前提（新目录还没有配置）当场失效。
+     * 函数内部有 `OnceLock`，重复调用只跑一次。 */
+    if let Some(msg) = config::migrate_legacy_if_needed() {
+        win::log(&format!("migrate: {msg}"));
+    }
     // --settings：启动后直接打开设置面板（也给用户留个快捷入口：
     //             QuickSearch.exe --settings）
     let open_settings_at_start = flag("--settings");
@@ -13382,6 +13423,11 @@ fn main() {
         std::process::exit(0);
     }
 
+    /* v1.4.0 的数据迁移已经在 `main` 最开头跑过了（`OnceLock`，只跑一次）——
+     * 这里不再重复调用：那时还没做单实例检查，但迁移本身是幂等的，
+     * 而且"早于任何一次 config::load()"这条比"等单实例检查"更重要
+     * （探针命令 `--touch-config` 在单实例检查之前就会读配置）。 */
+
     // 2. 默认以管理员跑（这样才能把 Ctrl+C 送进同样是管理员的程序里）。
     //    设置面板里可以关掉，所以要**先把配置文件读出来**再决定 —— 这一步只读磁盘，
     //    不需要 STATE 就绪。
@@ -13399,6 +13445,26 @@ fn main() {
 
     init_state();
     config::ensure_dirs();
+    /* v1.4.0：本地配置是加密的，钥匙（备份密码）平时由 `backup.key` 用 DPAPI
+     * 保管。**换过 Windows 用户/机器**时 DPAPI 解不开 → 这次只能带默认设置跑，
+     * 但原文件一个字节都没动（见 `config::LOCKED`）。
+     *
+     * 这种情况必须**明确告诉用户**：否则他看到的只是"设置全没了"，会以为
+     * 数据被清空了；而实际上只要把备份密码填回来（或从云端恢复）就能全部找回。
+     * 弹一次系统消息框，比写在日志里（没人看）有意义得多。 */
+    if config::is_locked() {
+        win::message_box(
+            "Quick Search：本地配置解不开",
+            &format!(
+                "这次没能解开本地配置（通常是换了 Windows 用户或换了电脑）。\n\n\
+                 程序先按默认设置运行，**你的原配置没有被删除、也没有被覆盖**，\
+                 原样保留在：\n{}\n\n\
+                 找回办法：在设置里重新填写备份密码后重启；或者用「从云端恢复」\
+                 （需要备份密码）。",
+                config::config_path().display()
+            ),
+        );
+    }
     let cfg0 = cfg_snapshot();
     if cfg0.auto_start {
         win::set_autostart(true);
@@ -15769,6 +15835,7 @@ mod tests {
     ///    并行跑会互相把对方的目录拆掉（踩过：写图标时报「找不到路径」）。
     struct AppDataTemp {
         old: Option<String>,
+        old_qs: Option<String>,
         dir: std::path::PathBuf,
     }
 
@@ -15784,7 +15851,13 @@ mod tests {
             std::fs::create_dir_all(&dir).expect("临时目录建不出来");
             let old = std::env::var("APPDATA").ok();
             std::env::set_var("APPDATA", &dir);
-            Self { old, dir }
+            /* v1.4.0：数据目录改成便携式（exe 旁边）之后，光改 APPDATA 已经
+             * 指不动 `data_dir()` 了 —— 必须同时设 `QS_DATA_DIR`，否则测试
+             * 会往 exe 旁边（target\release\deps\）写东西。两个都设上，
+             * 老代码路径（直接读 APPDATA 的地方）也一并隔离。 */
+            let old_qs = std::env::var("QS_DATA_DIR").ok();
+            std::env::set_var("QS_DATA_DIR", dir.join("QuickSearch"));
+            Self { old, old_qs, dir }
         }
     }
 
@@ -15793,6 +15866,10 @@ mod tests {
             match &self.old {
                 Some(v) => std::env::set_var("APPDATA", v),
                 None => std::env::remove_var("APPDATA"),
+            }
+            match &self.old_qs {
+                Some(v) => std::env::set_var("QS_DATA_DIR", v),
+                None => std::env::remove_var("QS_DATA_DIR"),
             }
             let _ = std::fs::remove_dir_all(&self.dir);
         }

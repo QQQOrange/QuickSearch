@@ -1,13 +1,34 @@
-//! 配置持久化：%APPDATA%\QuickSearch\config.json
+//! 配置持久化：`<exe>\Quick search data\config.json`（v1.4.0 起便携 + 全加密）
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
 
 use crate::imgsearch;
 
 pub const APP_DIR: &str = "QuickSearch";
+
+/* ══════════════════════════════════════════════════════════════════════
+ * v1.4.0：`LOCKED` —— 「主文件解不开」时**禁止任何写盘**
+ *
+ * 场景：换过 Windows 用户/机器（或者 backup.key 丢了），本地 config.json
+ * 是用备份密码加密的、现在没钥匙。这时程序只能带着默认配置跑。
+ *
+ * 如果不拦住写盘：`load()` 一看"主文件不可用"就 `save_to` 一份默认配置，
+ * 把那份**完好但解不开**的加密配置直接覆盖掉 —— 用户一旦想起密码，
+ * 数据已经没了。这比"这次没读到设置"严重一万倍。
+ *
+ * 所以只要出现过"解不开"，整个进程内 `save` 一律拒绝（日志留痕），
+ * 用户的文件原样躺着，等他把密码填回来（或从云端恢复）再说。
+ * ══════════════════════════════════════════════════════════════════════ */
+static LOCKED: AtomicBool = AtomicBool::new(false);
+
+/// 本次运行是不是处于「主文件解不开、已锁写」的状态（设置页可以据此提示）。
+pub fn is_locked() -> bool {
+    LOCKED.load(Ordering::SeqCst)
+}
 
 /// 程序版本 —— **直接取自 `Cargo.toml`**，不手写。
 ///
@@ -1130,9 +1151,121 @@ pub fn ocr_window_size(cfg: &Config) -> (f64, f64) {
     }
 }
 
+/* ══════════════════════════════════════════════════════════════════════
+ * v1.4.0：便携数据目录
+ *
+ * 用户要求（原话）：「这个软件的所有数据都要保存在软件所在的文件夹当中，
+ *   命名为 Quick search data，所有备份的文件也要备份在这个文件夹里面，
+ *   文件夹的名字叫做 quicksearch back」。
+ *
+ * 默认布局：
+ *   `<exe 所在目录>\Quick search data\`   配置 / 图标 / 日志 / AI 模型
+ *   `<exe 所在目录>\QuickSearch back\`    所有备份（滚动 + 立即备份 + 快照）
+ *
+ * `data_dir()` 的三条优先级：
+ *   ① `QS_DATA_DIR` 环境变量 —— 测试 / 调试 / 用户想自己指定；
+ *   ② 便携目录 —— 能建、能写就用（正常安装走这条）；
+ *   ③ `%APPDATA%\QuickSearch` —— exe 落在 Program Files 这类只读位置时兜底。
+ *
+ * ⚠ 只有"生产 + 没设环境变量"这条分支才缓存（`OnceLock`）。
+ *   `QS_DATA_DIR` 是进程级环境变量，测试里每条都改它 —— 缓存了就会串味，
+ *   这正是 2026-10-22 那次"测试把用户配置洗成默认值"的同款隐患。
+ * ══════════════════════════════════════════════════════════════════════ */
+
+/// 便携数据目录名（exe 旁边）。
+pub const DATA_DIR_NAME: &str = "Quick search data";
+/// 备份目录名（exe 旁边）。
+pub const BACKUP_DIR_NAME: &str = "QuickSearch back";
+
+/// 可执行文件所在目录 —— 便携模式的一切都挂在它下面。
+///
+/// 取不到（理论上不会）就退回当前工作目录，宁可写错地方也不要 panic：
+/// 这个函数在启动最早期就会被调用。
+pub fn exe_dir() -> PathBuf {
+    static C: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    C.get_or_init(|| {
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|x| x.to_path_buf()))
+            .unwrap_or_else(|| PathBuf::from("."))
+    })
+    .clone()
+}
+
+/// `<exe>\Quick search data`（不管存不存在）。
+pub fn portable_data_dir() -> PathBuf {
+    exe_dir().join(DATA_DIR_NAME)
+}
+
+/// `<exe>\QuickSearch back`（不管存不存在）。
+pub fn portable_backup_dir() -> PathBuf {
+    exe_dir().join(BACKUP_DIR_NAME)
+}
+
+/// 目录能不能建出来、能不能写 —— 便携模式的准入判据。
+///
+/// 为什么要真写一个探针文件：`create_dir_all` 成功不代表能写（只读介质、
+/// 杀软拦截、组策略只给"列出"权限都会这样）。写一次再删，最可靠。
+fn ensure_writable(dir: &std::path::Path) -> bool {
+    if std::fs::create_dir_all(dir).is_err() {
+        return false;
+    }
+    let probe = dir.join(".qs-write-probe");
+    let ok = std::fs::write(&probe, b"1").is_ok();
+    let _ = std::fs::remove_file(&probe);
+    ok
+}
+
+/// 测试专用：一个进程级临时目录（**永远不碰真实目录**）。
+///
+/// 2026-10-22 的事故就是测试写到了真实 `%APPDATA%`。现在测试二进制连
+/// "便携目录"这条路都走不到 —— 就算某条测试忘了设 `QS_DATA_DIR`，
+/// 也只会在临时目录里乱写。
+#[cfg(test)]
+fn test_scratch_dir() -> PathBuf {
+    static C: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    C.get_or_init(|| {
+        let p = std::env::temp_dir().join(format!("qs-test-data-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&p);
+        p
+    })
+    .clone()
+}
+
 pub fn data_dir() -> PathBuf {
-    let base = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(base).join(APP_DIR)
+    // ① 显式覆盖（测试、调试、以及"我想把数据放别处"的用户）
+    if let Ok(d) = std::env::var("QS_DATA_DIR") {
+        let d = d.trim();
+        if !d.is_empty() {
+            return PathBuf::from(d);
+        }
+    }
+    // ② 测试二进制绝不落到真实目录
+    #[cfg(test)]
+    {
+        return test_scratch_dir();
+    }
+    // ③ 生产：便携目录优先，只读位置兜底 %APPDATA%（结果缓存，含探测）
+    #[cfg(not(test))]
+    {
+        static C: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+        C.get_or_init(|| {
+            let portable = portable_data_dir();
+            if ensure_writable(&portable) {
+                return portable;
+            }
+            let base = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
+            let fallback = PathBuf::from(base).join(APP_DIR);
+            let _ = std::fs::create_dir_all(&fallback);
+            crate::win::log(&format!(
+                "config: exe 旁边的数据目录不可写（{}），退回 {}",
+                portable.display(),
+                fallback.display()
+            ));
+            fallback
+        })
+        .clone()
+    }
 }
 
 pub fn icons_dir() -> PathBuf {
@@ -1141,6 +1274,262 @@ pub fn icons_dir() -> PathBuf {
 
 pub fn config_path() -> PathBuf {
     data_dir().join("config.json")
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+ * v1.4.0：老用户迁移（`%APPDATA%\QuickSearch` → exe 旁边的便携目录）
+ *
+ * 顺序刻意是「**先搬、再校验、最后才删**」：
+ *   1. 用老目录自己的钥匙读出老配置（可能是明文，也可能是密码/DPAPI 信封）；
+ *   2. 写进新目录（`save_to` 顺手把主文件、备份、`backup.key` 全部换成加密形态）；
+ *   3. 图标 / 模型整目录搬过去（同盘 rename 是瞬时的）；
+ *   4. 老备份**逐个重新封装**后放进 `QuickSearch back`（明文备份不能原样搬）；
+ *   5. 回读新配置，和搬之前那份逐字节比一次；
+ *   6. 只有 5 通过了，才删老目录 —— 用户要求「迁移成功后删掉整个旧目录」，
+ *      但这条必须以"新目录真的能用"为前提，否则等于删库。
+ *
+ * ⚠ `log.txt` **不搬**：里面记着用户划过的文字（老版本没脱敏），
+ *   搬过去就等于把明文用户数据带进了新目录。日志是诊断材料，不搬。
+ * ══════════════════════════════════════════════════════════════════════ */
+
+/// 从某个 `backup.key` 文件里读出备份密码（兼容 DPAPI 信封与老式明文）。
+fn read_password_file(p: &std::path::Path) -> String {
+    let Ok(s) = std::fs::read_to_string(p) else {
+        return String::new();
+    };
+    let s = s.trim();
+    if s.is_empty() {
+        return String::new();
+    }
+    if crate::crypto::looks_dpapi(s) {
+        return crate::crypto::decrypt_dpapi(s)
+            .map(|t| t.trim().to_string())
+            .unwrap_or_default();
+    }
+    for line in s.lines() {
+        let t = line.trim();
+        if t.is_empty() || t.starts_with('#') {
+            continue;
+        }
+        return t.to_string();
+    }
+    String::new()
+}
+
+/// 目录递归复制（跨盘迁移时用；同盘优先走 rename）。
+fn copy_dir_all(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for e in std::fs::read_dir(from)? {
+        let e = e?;
+        let src = e.path();
+        let dst = to.join(e.file_name());
+        if src.is_dir() {
+            copy_dir_all(&src, &dst)?;
+        } else {
+            std::fs::copy(&src, &dst)?;
+        }
+    }
+    Ok(())
+}
+
+/// 把一个目录搬到新位置：同盘 rename（瞬时、原子）；跨盘或目标已存在就逐文件复制。
+fn move_dir(from: &std::path::Path, to: &std::path::Path) -> bool {
+    if !from.is_dir() {
+        return true;
+    }
+    if !to.exists() && std::fs::rename(from, to).is_ok() {
+        return true;
+    }
+    copy_dir_all(from, to).is_ok()
+}
+
+/// 判断老目录里的一个文件是不是"配置/备份"（要搬走并重新封装的那些）。
+fn is_config_family(name: &str) -> bool {
+    name == "config.json"
+        || name.starts_with("config(")
+        || name.starts_with("config.auto(")
+        || name.starts_with("config.before-")
+        || name.starts_with("config.broken")
+        || name.starts_with("config.wiped")
+        || name.starts_with("config.json.bad-")
+}
+
+/// 老版本数据目录（`%APPDATA%\QuickSearch`）。
+fn legacy_data_dir() -> Option<PathBuf> {
+    let base = std::env::var("APPDATA").ok()?;
+    let p = PathBuf::from(base).join(APP_DIR);
+    p.is_dir().then_some(p)
+}
+
+/// 需要迁移就迁移。返回一句人话（进日志 / 托盘提示），没事可做返回 None。
+///
+/// 幂等：进程内只真跑一次（`OnceLock`），外部条件不满足就直接返回。
+pub fn migrate_legacy_if_needed() -> Option<String> {
+    static DONE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    DONE.get_or_init(migrate_legacy_inner).clone()
+}
+
+fn migrate_legacy_inner() -> Option<String> {
+    // 测试、以及用户显式指定了数据目录 —— 都不碰真实目录
+    if cfg!(test) {
+        return None;
+    }
+    if std::env::var("QS_DATA_DIR")
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    let new_dir = data_dir();
+    let old_dir = legacy_data_dir()?;
+    if old_dir == new_dir {
+        return None;
+    }
+    // 新目录已经有配置 = 已经迁移过（或本来就是便携安装）→ 不动老目录
+    if config_path().exists() {
+        return None;
+    }
+    let old_cfg_path = old_dir.join("config.json");
+    if !old_cfg_path.exists() {
+        return None;
+    }
+
+    /* ⚠ 先把日志开关搬过去，**再**打第一条日志。
+     *
+     * `win::log` 的开关是进程级 `OnceLock`（`log_on`），第一次判断时如果新目录
+     * 里还没有 `log.on`，整个进程的日志就永久关闭 —— 迁移这种"一辈子一次、
+     * 出事必须能查"的操作，不能连一行记录都留不下来（第一次实测就踩了）。 */
+    let _ = std::fs::create_dir_all(&new_dir);
+    if old_dir.join("log.on").exists() {
+        let _ = std::fs::copy(old_dir.join("log.on"), new_dir.join("log.on"));
+    }
+    crate::win::log(&format!(
+        "migrate: 开始从 {} 迁移到 {}",
+        old_dir.display(),
+        new_dir.display()
+    ));    // ① 用老目录自己的钥匙读老配置
+    let old_pw = read_password_file(&old_dir.join("backup.key"));
+    let Ok(text) = std::fs::read_to_string(&old_cfg_path) else {
+        crate::win::log("migrate: 老配置读不出来，放弃迁移（老数据原样保留）");
+        return None;
+    };
+    let plain = match crate::crypto::unseal(&text, &old_pw) {
+        Ok(p) => p,
+        Err(e) => {
+            crate::win::log(&format!(
+                "migrate: 老配置解不开（{e}）—— 放弃迁移，老数据原样保留"
+            ));
+            return None;
+        }
+    };
+    let Ok(cfg) = serde_json::from_str::<Config>(&plain) else {
+        crate::win::log("migrate: 老配置不是有效 JSON —— 放弃迁移");
+        return None;
+    };
+    /* 期望值用 `sanitize(cfg)`：`load_from` 读回来会过一遍 sanitize，
+     * 而这里是从老文件直接解析的（没过）。老版本留下的"该被剪掉的值"
+     * （比如百度不认的 `ocr_lang = CHN`）会让两边天然不一致 —— 拿 sanitize
+     * 之后的形态当基准，校验才既严格又不会误判。
+     *
+     * ⚠ 用 Value 比（键顺序无关）：Config 里的 HashMap 每次序列化顺序都不一样 */
+    let want = serde_json::to_value(sanitize(cfg.clone())).unwrap_or_default();
+
+    // ② 写进新目录（save_to 会把主文件、滚动备份、backup.key 全换成加密形态）
+    if !ensure_writable(&new_dir) {
+        crate::win::log("migrate: 新数据目录不可写 —— 放弃迁移");
+        return None;
+    }
+    save_to(&config_path(), &cfg);
+    // ③ 图标 / 模型整目录搬过去
+    let _ = move_dir(&old_dir.join("icons"), &icons_dir());
+    let _ = move_dir(&old_dir.join("models"), &new_dir.join("models"));
+    // ④ 老备份逐个重新封装进备份目录（明文备份不能原样搬）
+    let bdir = default_backup_dir();
+    let mut moved = 0usize;
+    let mut kept = 0usize;
+    if let Ok(rd) = std::fs::read_dir(&old_dir) {
+        for e in rd.filter_map(|e| e.ok()) {
+            let p = e.path();
+            let Some(name) = p.file_name().and_then(|s| s.to_str()).map(|s| s.to_string()) else {
+                continue;
+            };
+            if !p.is_file() || !is_config_family(&name) || name == "config.json" {
+                continue;
+            }
+            let Ok(raw) = std::fs::read_to_string(&p) else {
+                kept += 1;
+                continue;
+            };
+            // 已经是密文的原样搬；明文的先封再搬（用老密码，保证搬过去还能解）
+            let body = if crate::crypto::looks_encrypted(&raw) {
+                raw
+            } else {
+                match crate::crypto::seal(&raw, &old_pw) {
+                    Ok(t) => t,
+                    Err(_) => {
+                        kept += 1;
+                        continue;
+                    }
+                }
+            };
+            let dst = bdir.join(&name);
+            if std::fs::write(&dst, body.as_bytes()).is_ok() {
+                moved += 1;
+            } else {
+                kept += 1;
+            }
+        }
+    }
+    // log.on（空标记文件，不含数据）也搬；log.txt 刻意不搬
+    let _ = std::fs::copy(old_dir.join("log.on"), new_dir.join("log.on"));
+
+    // ⑤ 回读校验：新目录里那份必须和搬之前**完全一致**（按 JSON 值比，与键序无关）
+    let back = load_from(&config_path());
+    let got = serde_json::to_value(&back).unwrap_or_default();
+    if got != want {
+        /* 不一致就**保留老目录**，一份东西都不删。
+         * 诊断只打"哪个字段不一样 + 两边长度" —— 不打值（那是用户数据）。 */
+        let a: serde_json::Value = want.clone();
+        let b: serde_json::Value = got.clone();
+        let mut diff: Vec<String> = Vec::new();
+        if let (Some(oa), Some(ob)) = (a.as_object(), b.as_object()) {
+            for (k, va) in oa {
+                match ob.get(k) {
+                    Some(vb) if vb == va => {}
+                    Some(vb) => diff.push(format!(
+                        "{k}({}→{}字)",
+                        serde_json::to_string(va).map(|s| s.len()).unwrap_or(0),
+                        serde_json::to_string(vb).map(|s| s.len()).unwrap_or(0)
+                    )),
+                    None => diff.push(format!("{k}(没了)")),
+                }
+            }
+            for k in ob.keys() {
+                if !oa.contains_key(k) {
+                    diff.push(format!("{k}(多了)"));
+                }
+            }
+        }
+        crate::win::log(&format!(
+            "migrate: 回读校验不一致 —— 保留老目录，不删任何东西。差异字段：{}",
+            diff.join("、")
+        ));
+        return Some(format!(
+            "数据迁移校验没通过（差异字段：{}），旧目录已保留",
+            diff.join("、")
+        ));
+    }
+
+    // ⑥ 删老目录（含明文 config.json / 明文备份 / 旧日志）
+    let removed = std::fs::remove_dir_all(&old_dir).is_ok();
+    crate::win::log(&format!(
+        "migrate: 完成 —— 备份搬了 {moved} 份、跳过 {kept} 份；旧目录{}",
+        if removed { "已删除" } else { "删除失败（可手工删）" }
+    ));
+    Some(format!(
+        "数据已迁到 exe 旁边的「{}」，备份在「{}」（搬了 {moved} 份备份）",
+        DATA_DIR_NAME, BACKUP_DIR_NAME
+    ))
 }
 
 /* ══════════════════════════════════════════════════════════════════════
@@ -1173,6 +1562,13 @@ pub fn backup_key_path() -> PathBuf {
 }
 
 /// 把备份密码写进独立存档（空密码 = 删掉存档）。
+///
+/// ⚠ v1.4.0：**存档本身也必须加密**。用户要求「所有本地数据都要加密，不能
+///   以任何明文方式显示用户数据」—— 密码是最敏感的那一项，明文躺在
+///   `backup.key` 里等于前功尽弃。
+///
+/// 用什么加密：DPAPI（跟着当前 Windows 用户走、不需要密码）。这里是唯一
+/// 必须"无钥匙自解"的地方 —— 它是钥匙的钥匙，不能自己问自己要密码。
 pub fn stash_backup_password(pw: &str) {
     let p = backup_key_path();
     let pw = pw.trim();
@@ -1180,19 +1576,42 @@ pub fn stash_backup_password(pw: &str) {
         let _ = std::fs::remove_file(&p);
         return;
     }
-    // 内容只有密码本身，一行。带个前缀方便人肉辨认这是什么文件。
-    let body = format!("# QuickSearch 备份密码（用于解开加密备份，删了就无法恢复）\n{pw}\n");
+    let Ok(body) = crate::crypto::encrypt_dpapi(pw) else {
+        crate::win::log("config: 备份密码存档加密失败（DPAPI 不可用）—— 不写明文");
+        return;
+    };
     if std::fs::write(&p, body).is_err() {
         crate::win::log("config: 备份密码独立存档写入失败（不影响主流程）");
     }
 }
 
 /// 从独立存档里读备份密码（读不到返回空串）。
+///
+/// 兼容三种形态：
+///   · v1.4.0 起的 DPAPI 信封（正常路径）；
+///   · 老版本的明文存档（`# 注释` + 一行密码）—— 读出来之后调用方会立刻
+///     用 `stash_backup_password` 重写成加密的（见 `migrate_legacy_if_needed`）；
+///   · 文件不存在 / 解不开 → 空串（调用方按"没有密码"处理）。
 pub fn load_backup_password() -> String {
     let Ok(s) = std::fs::read_to_string(backup_key_path()) else {
         return String::new();
     };
-    // 跳过以 # 开头的注释行，取第一行非空内容
+    let s = s.trim();
+    if s.is_empty() {
+        return String::new();
+    }
+    if crate::crypto::looks_dpapi(s) {
+        return match crate::crypto::decrypt_dpapi(s) {
+            Ok(pw) => pw.trim().to_string(),
+            Err(e) => {
+                crate::win::log(&format!(
+                    "config: backup.key 解不开（{e}）—— 换过 Windows 用户/机器？"
+                ));
+                String::new()
+            }
+        };
+    }
+    // 老格式：跳过以 # 开头的注释行，取第一行非空内容
     for line in s.lines() {
         let t = line.trim();
         if t.is_empty() || t.starts_with('#') {
@@ -1254,24 +1673,53 @@ pub fn rolling_backup_name(stamp: &str) -> String {
     format!("config.auto({stamp}).QuickSearch")
 }
 
-/// 本地备份目录：用户在设置里指定的；没指定（或指定的不可用）就用数据目录。
-/// .bak、WebDAV 同步前的时间戳快照、导出文件都落在这里。
+/// 默认备份目录：exe 旁边的 `QuickSearch back`（v1.4.0 起）。
+///
+/// 用户要求：「所有备份的文件也要备份在这个文件夹里面」。建不出来（只读位置）
+/// 就退回数据目录 —— 备份绝不能因为"目录不可写"而整个失败。
+pub fn default_backup_dir() -> PathBuf {
+    #[cfg(test)]
+    {
+        // 测试里绝不往 exe 旁边写（理由见 `test_scratch_dir`）
+        return data_dir();
+    }
+    #[cfg(not(test))]
+    {
+        static C: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+        C.get_or_init(|| {
+            let p = portable_backup_dir();
+            if ensure_writable(&p) {
+                p
+            } else {
+                crate::win::log(&format!(
+                    "config: 备份目录 {} 不可写，退回数据目录",
+                    p.display()
+                ));
+                data_dir()
+            }
+        })
+        .clone()
+    }
+}
+
+/// 本地备份目录：用户在设置里指定的；没指定（或指定的不可用）就用默认备份目录。
+/// 滚动备份、立即备份、WebDAV 同步前的时间戳快照、导出文件都落在这里。
 pub fn backup_dir_of(cfg: &Config) -> PathBuf {
     let d = cfg.backup_dir.trim();
     if d.is_empty() {
-        return data_dir();
+        return default_backup_dir();
     }
     let p = PathBuf::from(d);
-    // 目录不存在就试着建；建不出来（盘没了/权限）就退回数据目录，
+    // 目录不存在就试着建；建不出来（盘没了/权限）就退回默认目录，
     // 备份这件事绝不能因为"用户填了个怪路径"而整个失败。
     if std::fs::create_dir_all(&p).is_ok() && p.is_dir() {
         p
     } else {
         crate::win::log(&format!(
-            "config: 备份目录 {:?} 不可用，回退到数据目录",
+            "config: 备份目录 {:?} 不可用，回退到默认备份目录",
             p
         ));
-        data_dir()
+        default_backup_dir()
     }
 }
 
@@ -1297,16 +1745,28 @@ pub fn load() -> Config {
     // 否则磁盘上那份坏文件会一直躺着 —— 用户看到的仍然是「配置没回来」，
     // 而且下一次启动还要再走一遍同样的兜底。
     //
-    // 什么时候才算坏：磁盘上的正式文件此刻解析不出来。
-    if std::fs::read_to_string(&p)
-        .ok()
-        .and_then(|s| serde_json::from_str::<Config>(&s).ok())
-        .is_none()
-    {
+    // 什么时候才算坏：磁盘上的正式文件此刻**用不了**（读不出 / 解不开 / 不是配置）。
+    // ⚠ v1.4.0：主文件是密文，"解析不出来"不再等于"坏了" —— 必须真的能解出
+    //   一份配置才算可用，见 `main_file_usable`。
+    if !main_file_usable(&p) && !is_locked() {
         crate::win::log("config: 磁盘上的配置不可用，已按恢复结果重建 config.json");
         save_to(&p, &c);
     }
     c
+}
+
+/// 主文件此刻是不是"能用"：存在 + 能解 + 能解析成配置。
+///
+/// 注意 `is_locked()` 单独判断：解不开的时候 `main_file_usable` 也是 false，
+/// 但那种情况**绝不能**重建（会把完好的密文覆盖成默认配置）。
+fn main_file_usable(path: &std::path::Path) -> bool {
+    let Ok(s) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    match crate::crypto::unseal(&s, &load_backup_password()) {
+        Ok(plain) => serde_json::from_str::<Config>(&plain).is_ok(),
+        Err(_) => false,
+    }
 }
 
 /// `load` 的可注入版本（测试专用）。
@@ -1316,21 +1776,57 @@ pub fn load() -> Config {
 /// 用户配置**真的还在**，而不是静默变成默认值。这个性质没法靠读代码确认。
 pub fn load_from(path: &std::path::Path) -> Config {
     ensure_dirs();
+    let pw = load_backup_password();
     let parsed = match std::fs::read_to_string(path) {
-        Ok(s) => match serde_json::from_str::<Config>(&s) {
-            Ok(c) => Some(c),
-            Err(e) => {
-                crate::win::log(&format!("config: config.json 解析失败（{e}），尝试读备份"));
-                preserve_broken(path, &s);
-                match load_backup_of(path) {
-                    Some(c) => Some(c),
-                    None => {
-                        crate::win::log("config: 备份也没有，用默认配置启动（坏文件已留档）");
+        Ok(s) => {
+            /* ⚠⚠ v1.4.0：**先判信封，再解析**。
+             *
+             * 顺序反了就是 r92 那个事故的翻版：`Config` 整份带
+             * `#[serde(default)]`，密文信封也会"解析成功"但内容全默认。
+             * 明文（老版本 / 迁移前的文件）原样放行。 */
+            let plain = match crate::crypto::envelope_version(&s) {
+                Some(v) => match crate::crypto::unseal(&s, &pw) {
+                    Ok(p) => Some(p),
+                    Err(e) => {
+                        /* 解不开有两种：钥匙没了（换机/换用户）或者文件坏了。
+                         * 两种都**绝不能覆盖**原文件 —— 见 LOCKED 的注释。 */
+                        crate::win::log(&format!(
+                            "config: config.json 是加密的（信封 v{v}）但解不开：{e}"
+                        ));
+                        LOCKED.store(true, Ordering::SeqCst);
                         None
+                    }
+                },
+                None => Some(s.clone()),
+            };
+            match plain {
+                Some(p) => match serde_json::from_str::<Config>(&p) {
+                    Ok(c) => Some(c),
+                    Err(e) => {
+                        crate::win::log(&format!("config: config.json 解析失败（{e}），尝试读备份"));
+                        preserve_broken(path, &s);
+                        match load_backup_of(path) {
+                            Some(c) => Some(c),
+                            None => {
+                                crate::win::log("config: 备份也没有，用默认配置启动（坏文件已留档）");
+                                None
+                            }
+                        }
+                    }
+                },
+                // 解不开：留档可以（密文留档仍是密文），但绝不当作"配置已恢复"
+                None => {
+                    preserve_broken(path, &s);
+                    match load_backup_of(path) {
+                        Some(c) => {
+                            crate::win::log("config: 主文件解不开，但备份能用 —— 本次按备份启动");
+                            Some(c)
+                        }
+                        None => None,
                     }
                 }
             }
-        },
+        }
         // 文件压根不存在 = 第一次运行，不是错误
         Err(_) => None,
     };
@@ -1352,10 +1848,17 @@ pub fn load_from(path: &std::path::Path) -> Config {
     // 判据用「序列化结果是否一致」：sanitize 改的字段不止 bar_list 一个
     // （语言归一 / OCR 名单 / WebDAV 地址…），逐个 diff 太碎；整个 JSON
     // 对比一次最省心，且只在启动时跑一次（几 KB 的序列化，微秒级）。
-    let before = parsed.as_ref().map(|c| serde_json::to_string(c).unwrap_or_default());
+    /* ⚠ 判据必须用 `serde_json::Value` 比，**不能**比 `to_string` 的结果：
+     * `Config` 里有好几个 `HashMap`（overrides / fav_panel_sizes / ocr_keys…），
+     * 每次序列化的键顺序是随机的 —— 同一份配置两次 to_string 出来的文本
+     * 就可能不一样。v1.4.0 第一版迁移校验就是被这个坑到："差异字段"一个都没有，
+     * 但字符串不相等，于是迁移永远判失败。 */
+    let before = parsed
+        .as_ref()
+        .map(|c| serde_json::to_value(c).unwrap_or_default());
     let raw = parsed.map(sanitize).unwrap_or_default();
     if let (Some(before), true) = (&before, path.exists()) {
-        let after = serde_json::to_string(&raw).unwrap_or_default();
+        let after = serde_json::to_value(&raw).unwrap_or_default();
         if before != &after {
             /* ⚠ r99：这里必须写回**刚读的那个 path**，不能写 `save()`。
              *
@@ -2060,20 +2563,16 @@ pub fn read_backup_config(path: &std::path::Path, password: &str) -> Option<Conf
      * 后果：一份完好的加密备份被当成"解析成功但内容是全默认"，
      * 于是恢复出一份空配置 —— 用户看到的就是"更新后所有设置归零"。
      *
-     * 所以必须**先看它是不是密文信封**，是就只走解密这条路。 */
+     * 所以必须**先看它是不是密文信封**，是就只走解密这条路。
+     *
+     * v1.4.0：`unseal` 已经把两种信封（密码 / DPAPI）都收了口 ——
+     * 这里不再自己判 kdf，交给它按信封版本选钥匙。 */
     if crate::crypto::looks_encrypted(&s) {
-        if password.trim().is_empty() {
-            crate::win::log(&format!(
-                "config: {} 是加密备份，但没有备份密码可用 —— 跳过",
-                path.display()
-            ));
-            return None;
-        }
-        return match crate::crypto::decrypt(&s, password) {
+        return match crate::crypto::unseal(&s, password) {
             Ok(plain) => match serde_json::from_str::<Config>(&plain) {
                 Ok(c) => {
                     crate::win::log(&format!(
-                        "config: {} 是加密备份，已用备份密码解开（完整度 {}）",
+                        "config: {} 是加密备份，已解开（完整度 {}）",
                         path.display(),
                         backup_quality(&c)
                     ));
@@ -2171,7 +2670,23 @@ pub fn is_snapshot(name: &str) -> bool {
 }
 
 /// 把坏内容留档，别直接覆盖掉 —— 用户还能手工捞。
+///
+/// ⚠ v1.4.0：留档也**必须加密**。坏文件里可能是明文（老版本）也可能是密文；
+///   明文那份如果原样写到 `.bad-N`，等于在磁盘上又留了一份明文用户数据。
+///   所以：已经是密文就原样留，明文就先封再留（封不了就干脆不留 —— 宁可
+///   少一份排查材料，也不能违反"不留明文"）。
 fn preserve_broken(path: &std::path::Path, text: &str) {
+    let body = if crate::crypto::looks_encrypted(text) {
+        text.to_string()
+    } else {
+        match crate::crypto::seal(text, &load_backup_password()) {
+            Ok(t) => t,
+            Err(e) => {
+                crate::win::log(&format!("config: 坏配置留档失败（加密不了：{e}），不写明文"));
+                return;
+            }
+        }
+    };
     for i in 0..9 {
         let mut p = path.to_path_buf();
         p.set_file_name(format!(
@@ -2180,8 +2695,8 @@ fn preserve_broken(path: &std::path::Path, text: &str) {
             i + 1
         ));
         if !p.exists() {
-            let _ = std::fs::write(&p, text);
-            crate::win::log(&format!("config: 坏配置已留档 {}", p.display()));
+            let _ = std::fs::write(&p, body.as_bytes());
+            crate::win::log(&format!("config: 坏配置已留档（加密）{}", p.display()));
             return;
         }
     }
@@ -2204,53 +2719,54 @@ pub fn save(cfg: &Config) {
 /// `save` 的可注入版本（测试专用，理由同 `load_from`）。
 pub fn save_to(path: &std::path::Path, cfg: &Config) {
     ensure_dirs();
+    /* ⚠⚠ v1.4.0：主文件解不开时**一律不写盘**（详见 `LOCKED` 的注释）。
+     * 否则"带着默认配置跑一次"就会把那份完好但解不开的加密配置覆盖掉。 */
+    if is_locked() {
+        crate::win::log("config: 主文件解不开（已锁写），本次不保存 —— 数据原样保留");
+        return;
+    }
     let Ok(s) = serde_json::to_string_pretty(cfg) else {
         return;
     };
     /* ══════════════════════════════════════════════════════════════════
-     * r92：**滚动备份按备份密码加密**（用户要求）
+     * v1.4.0：**主文件和备份全部加密，磁盘上不留任何明文**
      *
-     * 用户原话：「我备份的文件都是加密了，怎么能有没有加密的呢？那这是一个
-     * 问题，也得修。」
+     * 用户要求（原话）：「仔细核查一下，我们这个软件的所有的本地数据都要
+     *   加密，就不能够以任何明文的方式来显示任何的用户数据」。
      *
-     * 他说的没错 —— 之前的设计是**分裂的**：
-     *   · 云端备份（`backup_payload`）→ 加密 ✅
-     *   · 手动导出（`export_config`）→ 加密 ✅
-     *   · **本地滚动备份（这里）→ 明文** ❌
+     * r92 时只加密了备份，主文件 `config.json` 故意留明文（理由写在这儿：
+     * "加密它就得在启动最早期要密码"）。v1.4.0 把这条口子堵上：
+     *   · 有备份密码 → 用密码加密（可跨机，用户选的口径）；
+     *   · 没有密码（首次运行）→ DPAPI 加密（跟 Windows 账户走）；
+     *   · **加密失败就整体放弃写盘**，绝不退化成写明文。
      *
-     * 而滚动备份里装着 OCR Key、WebDAV 密码、收藏内容 —— 和云端那份
-     * 一模一样敏感。明文躺在磁盘上，任何一个能读 `%APPDATA%` 的程序
-     * 都能直接拿走，加密云端反而成了自我安慰。
-     *
-     * 所以这里也加密：设了 `backup_password` 就加密，没设就保持明文
-     * （没密码的人没法解，硬加密等于自己把备份锁死）。
-     *
-     * ⚠ 主文件 `config.json` **本身保持明文** —— 它是程序启动时必须读的，
-     *   加密它就得在启动最早期要密码，用户忘密码等于程序打不开。
-     *   主文件的保护靠的是文件系统权限（`%APPDATA%` 是用户私有目录）。
-     *   **备份**是给"主文件坏了/想回退"用的，加密不影响可用性。
+     * 启动时"要不要输密码"的问题用 `backup.key` 解决：密码本身用 DPAPI
+     * 存一份（`stash_backup_password`），所以本机上无感解锁；换机时才需要
+     * 用户重新填（见 `load_backup_password`）。
      * ══════════════════════════════════════════════════════════════════ */
     // 备份密码先取出来：写备份要用它加密，轮转时读旧备份也要用它解密
     let backup_pw = cfg.backup_password.trim().to_string();
     /* r92：把密码另存一份到 `backup.key` —— 这样 config.json 坏了
      * 之后仍然解得开加密备份（详见 `stash_backup_password` 的说明）。 */
     stash_backup_password(&backup_pw);
-    let backup_text = {
-        let pw = backup_pw.as_str();
-        if pw.is_empty() {
-            s.clone()
-        } else {
-            match crate::crypto::encrypt(&s, pw) {
-                Ok(enc) => enc,
-                Err(e) => {
-                    // 加密失败不能写明文（那就把用户的"加密"承诺破了）——
-                    // 宁可这次不留备份，主文件照常写。
-                    crate::win::log(&format!(
-                        "config: 滚动备份加密失败（{e}），本次不留备份（不写明文）"
-                    ));
-                    String::new()
-                }
+    let seal = |plain: &str| -> Option<String> {
+        match crate::crypto::seal(plain, &backup_pw) {
+            Ok(t) => Some(t),
+            Err(e) => {
+                crate::win::log(&format!("config: 加密失败（{e}）—— 本次不写盘，绝不落明文"));
+                None
             }
+        }
+    };
+    let Some(main_text) = seal(&s) else {
+        return;
+    };
+    let backup_text = match seal(&s) {
+        Some(t) => t,
+        None => {
+            // 加密失败不能写明文（那就把用户的"加密"承诺破了）
+            crate::win::log("config: 滚动备份加密失败，本次不留备份（不写明文）");
+            String::new()
         }
     };
     // 滚动备份落在**备份目录**（用户在设置里指定的目录；没指定就是数据目录），
@@ -2269,20 +2785,21 @@ pub fn save_to(path: &std::path::Path, cfg: &Config) {
     // ⚠ 但"先删旧的、再写新的"顺序是错的：主文件写失败时这里会 return，
     //   那时旧的滚动备份已经被删干净、新的还没写 —— 备份族一份不剩。
     //   正确顺序是**先写新备份、成功了再删旧的**（下面就是这么排的）。
-    /* r99：没设备份目录时，滚动备份落在**主文件旁边**。
+    /* 滚动备份落点（v1.4.0 口径）：
      *
-     * 生产环境 `path` 恒为 `data_dir()/config.json`，parent 就是数据目录 ——
-     * 行为和以前完全一样。但 `save_to` 是可注入版本，测试传的是临时文件：
-     * 以前这里恒等于 `data_dir()`（= 真实 `%APPDATA%`），于是**跑一次
-     * `cargo test` 就会往用户真实数据目录里塞一堆"测试配置"的滚动备份**，
-     * 还会按轮转规则删旧的（2026-10-22 的真实事故就是这么发生的，
-     * 见 `load_from` 里 r99 那段记录）。跟着 path 走，这条污染也断了。 */
-    let bdir = if cfg.backup_dir.trim().is_empty() {
+     *   · 用户设了备份目录 → 用他的；
+     *   · 没设 + 写的是**正式主文件** → exe 旁边的 `QuickSearch back`
+     *     （用户要求"所有备份都放这个文件夹"）；
+     *   · 没设 + 写的是**注入的路径**（测试传临时文件）→ 就放它旁边，
+     *     绝不往真实目录里塞测试配置（2026-10-22 的事故，见 r99 记录）。 */
+    let bdir = if !cfg.backup_dir.trim().is_empty() {
+        backup_dir_of(cfg)
+    } else if path == config_path() {
+        default_backup_dir()
+    } else {
         path.parent()
             .map(|p| p.to_path_buf())
-            .unwrap_or_else(data_dir)
-    } else {
-        backup_dir_of(cfg)
+            .unwrap_or_else(default_backup_dir)
     };
     let bak = bdir.join(rolling_backup_name(&backup_stamp()));
     let tmp = path.with_extension("json.tmp");
@@ -2295,7 +2812,8 @@ pub fn save_to(path: &std::path::Path, cfg: &Config) {
     // ——宁可这次没存上，也不能冒"把唯一的好文件写坏"的风险。
     let mut write_ok = false;
     for attempt in 0..3 {
-        if std::fs::write(&tmp, s.as_bytes()).is_ok()
+        // ⚠ 写的是 `main_text`（密文信封），**不是** `s`（明文）
+        if std::fs::write(&tmp, main_text.as_bytes()).is_ok()
             && std::fs::rename(&tmp, path).is_ok()
         {
             write_ok = true;
@@ -2683,6 +3201,32 @@ mod tests {
         }
     }
 
+    /// 把 `data_dir()` 临时指到某个目录（v1.4.0 起走 `QS_DATA_DIR`）。
+    ///
+    /// 为什么不再用 `APPDATA`：便携模式的数据目录在 exe 旁边，`data_dir()`
+    /// 只有在 `QS_DATA_DIR` 没设、且**不是测试二进制**时才会去探便携目录。
+    /// 测试想模拟"真实数据目录"，唯一正确的方式就是设 `QS_DATA_DIR`。
+    struct DataDirEnv {
+        old: Option<String>,
+    }
+
+    impl DataDirEnv {
+        fn new(dir: &std::path::Path) -> Self {
+            let old = std::env::var("QS_DATA_DIR").ok();
+            std::env::set_var("QS_DATA_DIR", dir);
+            Self { old }
+        }
+    }
+
+    impl Drop for DataDirEnv {
+        fn drop(&mut self) {
+            match &self.old {
+                Some(v) => std::env::set_var("QS_DATA_DIR", v),
+                None => std::env::remove_var("QS_DATA_DIR"),
+            }
+        }
+    }
+
     // ENV_LOCK 声明在模块级（文件上方），main.rs 的测试拿的是同一把 ——
     // 那边也要写 icons 目录，必须和这里改 APPDATA 的测试串行。
 
@@ -2704,8 +3248,7 @@ mod tests {
 
         // 假装"真实数据目录"就是这个空目录
         let fake = TempDir::new("global");
-        let old = std::env::var("APPDATA").ok();
-        std::env::set_var("APPDATA", &fake.0);
+        let _dir_env = DataDirEnv::new(&fake.0);
 
         // 摆一份"启动归一会改动"的配置：`CHN` 是百度不认的旧枚举，会归一成 CHN_ENG
         let t = TempDir::new("inject");
@@ -2719,11 +3262,123 @@ mod tests {
             "load_from 把测试配置写进了真实数据目录：{}",
             config_path().display()
         );
+    }
 
-        match old {
-            Some(v) => std::env::set_var("APPDATA", v),
-            None => std::env::remove_var("APPDATA"),
+    /* ══════════════════════════════════════════════════════════════════
+     * v1.4.0：磁盘上**不许有明文用户数据**
+     *
+     * 用户要求（原话）：「仔细核查一下，我们这个软件的所有的本地数据都要加密，
+     *   就不能够以任何明文的方式来显示任何的用户数据」。
+     *
+     * 这三条测试就是那句话的可执行版本：主文件、备份、backup.key 三处
+     * 落盘之后，文件内容里都不能出现任何一条用户数据。
+     * ══════════════════════════════════════════════════════════════════ */
+
+    /// 有备份密码时：主文件是密码信封，磁盘上看不到 OCR key / 密码 / 字段名。
+    #[test]
+    fn config_on_disk_is_encrypted_with_password() {
+        let _serial = big_lock();
+        let _env_lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let t = TempDir::new("enc1");
+        let _dir_env = DataDirEnv::new(&t.0);
+
+        let mut c = Config::default();
+        c.backup_password = "pw-秘密-123".into();
+        c.ocr_key = "AKID-秘密-密钥".into();
+        save_to(&t.file(), &c);
+
+        let raw = std::fs::read_to_string(t.file()).unwrap();
+        assert_eq!(
+            crate::crypto::envelope_version(&raw),
+            Some(1),
+            "有密码时主文件必须是密码信封"
+        );
+        for secret in ["AKID-秘密-密钥", "pw-秘密-123", "ocr_key", "backup_password"] {
+            assert!(!raw.contains(secret), "磁盘上出现了明文：{secret}");
         }
+        // 而且必须能原样读回来
+        let back = load_from(&t.file());
+        assert_eq!(back.ocr_key, "AKID-秘密-密钥");
+        assert_eq!(back.backup_password, "pw-秘密-123");
+    }
+
+    /// 没有备份密码时：退回 DPAPI 信封，**依然**看不到明文。
+    #[test]
+    fn config_on_disk_is_encrypted_without_password() {
+        let _serial = big_lock();
+        let _env_lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let t = TempDir::new("enc2");
+        let _dir_env = DataDirEnv::new(&t.0);
+
+        let mut c = Config::default();
+        c.webdav_user = "我的坚果云账号".into();
+        c.ocr_key = "AKID-无密码也要密".into();
+        save_to(&t.file(), &c);
+
+        let raw = std::fs::read_to_string(t.file()).unwrap();
+        assert_eq!(
+            crate::crypto::envelope_version(&raw),
+            Some(2),
+            "没密码时应当退回 DPAPI 信封"
+        );
+        for secret in ["AKID-无密码也要密", "我的坚果云账号", "webdav_user"] {
+            assert!(!raw.contains(secret), "磁盘上出现了明文：{secret}");
+        }
+        let back = load_from(&t.file());
+        assert_eq!(back.ocr_key, "AKID-无密码也要密");
+        assert_eq!(back.webdav_user, "我的坚果云账号");
+    }
+
+    /// `backup.key` 里也不能有明文密码（以前它是纯文本一行）。
+    #[test]
+    fn backup_key_is_not_plaintext() {
+        let _serial = big_lock();
+        let _env_lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let t = TempDir::new("bkey");
+        let _dir_env = DataDirEnv::new(&t.0);
+
+        stash_backup_password("我的密码-abc123");
+        let raw = std::fs::read_to_string(backup_key_path()).unwrap();
+        assert!(!raw.contains("我的密码-abc123"), "backup.key 里出现了明文密码");
+        assert!(crate::crypto::looks_dpapi(&raw), "backup.key 应当是 DPAPI 信封");
+        assert_eq!(load_backup_password(), "我的密码-abc123");
+
+        // 清空密码 = 删掉存档（不能留个空文件让人误会）
+        stash_backup_password("");
+        assert!(!backup_key_path().exists());
+    }
+
+    /// 迁移时"哪些文件算配置族"的判据（搬走并重新封装的那些）。
+    #[test]
+    fn migration_classifies_config_files() {
+        for n in [
+            "config.json",
+            "config(2026-10-22 10-00-00).QuickSearch",
+            "config.auto(2026-10-22 10-00-00).QuickSearch",
+            "config.before-webdav(2026-10-22 10-00-00).QuickSearch",
+            "config.broken(2026-10-22 10-00-00).QuickSearch",
+            "config.wiped(2026-10-21 07-29-56).QuickSearch",
+            "config.json.bad-1",
+        ] {
+            assert!(is_config_family(n), "{n} 应当算配置族");
+        }
+        for n in ["log.txt", "log.on", "last-backup.txt", "icons", "backup.key"] {
+            assert!(!is_config_family(n), "{n} 不该算配置族");
+        }
+    }
+
+    /// 便携目录的名字必须和用户说的一字不差（这是他自己要去文件夹里找的）。
+    #[test]
+    fn portable_dir_names_match_the_request() {
+        assert_eq!(DATA_DIR_NAME, "Quick search data");
+        assert_eq!(BACKUP_DIR_NAME, "QuickSearch back");
+        assert!(portable_data_dir().ends_with(DATA_DIR_NAME));
+        assert!(portable_backup_dir().ends_with(BACKUP_DIR_NAME));
+        assert_eq!(
+            portable_data_dir().parent(),
+            portable_backup_dir().parent(),
+            "数据目录和备份目录必须都在 exe 旁边"
+        );
     }
 
     /* ══════════════════════════════════════════════════════════════════
@@ -2858,13 +3513,9 @@ mod tests {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let t = TempDir::new("nobak");
         let f = t.file();
-        let old_appdata = std::env::var("APPDATA").ok();
-        std::env::set_var("APPDATA", &t.0);
+        let _dir_env = DataDirEnv::new(&t.0);
         std::fs::write(&f, "{ this is not json").unwrap();
         let c = load_from(&f);
-        if let Some(v) = old_appdata {
-            std::env::set_var("APPDATA", v);
-        }
         assert_eq!(c.delay_ms, Config::default().delay_ms);
         let kept = std::fs::read_dir(&t.0)
             .unwrap()

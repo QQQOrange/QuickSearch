@@ -10,10 +10,16 @@
 //!     用 OWASP 推荐参数（m=19MiB, t=2, p=1）。一次派生几十毫秒，
 //!     备份/恢复各只做一次，用户无感；但攻击者每猜一个密码都要付同样的代价。
 //!
-//! 备份文件形态（人可读的 JSON，坏不了）：
+//! 两种信封（都是"人能看出这是密文"的 JSON，坏不了）：
+//!
 //! ```json
 //! { "qsEnc": 1, "kdf": "argon2id", "salt": "...", "nonce": "...", "data": "..." }
+//! { "qsEnc": 2, "alg": "dpapi", "data": "..." }
 //! ```
+//!
+//! `qsEnc:1` = **用备份密码加密**（可跨机，用户 v1.4.0 选的口径）；
+//! `qsEnc:2` = **Windows DPAPI 加密**（跟当前用户账户走，不需要密码）——
+//! 只在"还没有备份密码"这种首次运行状态下兜底，保证磁盘上永远没有明文。
 
 use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};
@@ -29,14 +35,149 @@ const ARGON_T: u32 = 2;
 const ARGON_P: u32 = 1;
 const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 12;
+/// DPAPI 信封的版本号（`qsEnc: 2`）
+const DPAPI_VERSION: i64 = 2;
 
-/// 备份内容是不是加密过的（恢复时用它决定要不要先解密）。
-pub fn looks_encrypted(text: &str) -> bool {
-    serde_json::from_str::<serde_json::Value>(text)
-        .ok()
-        .map(|v| v.get(MAGIC).and_then(|x| x.as_i64()).unwrap_or(0) == 1)
-        .unwrap_or(false)
+/// 这份内容的信封版本：`Some(1)` 密码信封、`Some(2)` DPAPI 信封、`None` 明文。
+///
+/// ⚠ 判断"是不是密文"必须只看这个，**不能**靠 `serde_json::from_str::<Config>`
+/// 成功与否 —— `Config` 整份带 `#[serde(default)]`，密文信封也会"解析成功"
+/// 但内容全默认（r92 踩过，那是"更新后设置归零"的真根因）。
+pub fn envelope_version(text: &str) -> Option<i64> {
+    let v: serde_json::Value = serde_json::from_str(text).ok()?;
+    match v.get(MAGIC).and_then(|x| x.as_i64()) {
+        Some(n @ (1 | DPAPI_VERSION)) => Some(n),
+        _ => None,
+    }
 }
+
+/// 内容是不是加密过的（两种信封都算）。
+pub fn looks_encrypted(text: &str) -> bool {
+    envelope_version(text).is_some()
+}
+
+/// 是不是 DPAPI 信封（不需要密码就能解）。
+pub fn looks_dpapi(text: &str) -> bool {
+    envelope_version(text) == Some(DPAPI_VERSION)
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+ * DPAPI 信封（v1.4.0）
+ *
+ * 用途只有两个，都很窄：
+ *   ① 还没有备份密码时，本地配置也得有东西加密（不能落明文）；
+ *   ② `backup.key`（备份密码的存档）本身不能明文躺盘上。
+ *
+ * 作用域是**当前 Windows 用户**（`CRYPTPROTECT_UI_FORBIDDEN`：不弹任何系统
+ * 对话框）。也就是说：把整个数据文件夹拷到别的电脑/别的用户下解不开 ——
+ * 这不是缺陷，是"本地数据加密"的应有之义；跨机搬数据走 WebDAV 加密备份
+ * （那份是用备份密码加密的，能跨机）。
+ * ══════════════════════════════════════════════════════════════════════ */
+fn dpapi(protect: bool, data: &[u8]) -> Result<Vec<u8>, String> {
+    use windows::Win32::Foundation::{HLOCAL, LocalFree};
+    use windows::Win32::Security::Cryptography::{
+        CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB, CryptProtectData, CryptUnprotectData,
+    };
+
+    if data.is_empty() {
+        return Err("没有要处理的数据".into());
+    }
+    let input = CRYPT_INTEGER_BLOB {
+        cbData: data.len() as u32,
+        pbData: data.as_ptr() as *mut u8,
+    };
+    let mut out = CRYPT_INTEGER_BLOB::default();
+    unsafe {
+        let r = if protect {
+            CryptProtectData(
+                &input,
+                windows::core::PCWSTR::null(),
+                None,
+                None,
+                None,
+                CRYPTPROTECT_UI_FORBIDDEN,
+                &mut out,
+            )
+        } else {
+            CryptUnprotectData(
+                &input,
+                None,
+                None,
+                None,
+                None,
+                CRYPTPROTECT_UI_FORBIDDEN,
+                &mut out,
+            )
+        };
+        // ⚠ 输出缓冲是系统分配的，**成败都要还**（失败时也可能是非空指针）
+        let bytes = if out.pbData.is_null() {
+            Vec::new()
+        } else {
+            std::slice::from_raw_parts(out.pbData, out.cbData as usize).to_vec()
+        };
+        if !out.pbData.is_null() {
+            let _ = LocalFree(Some(HLOCAL(out.pbData as *mut _)));
+        }
+        r.map_err(|e| {
+            format!(
+                "DPAPI {}失败（{e}）—— 换过 Windows 用户/机器，或文件被改过",
+                if protect { "加密" } else { "解密" }
+            )
+        })?;
+        Ok(bytes)
+    }
+}
+
+/// 用 DPAPI 加密成信封。
+pub fn encrypt_dpapi(plain: &str) -> Result<String, String> {
+    let ct = dpapi(true, plain.as_bytes())?;
+    Ok(serde_json::json!({
+        MAGIC: DPAPI_VERSION,
+        "alg": "dpapi",
+        "data": b64_encode(&ct),
+    })
+    .to_string())
+}
+
+/// 解开 DPAPI 信封。
+pub fn decrypt_dpapi(text: &str) -> Result<String, String> {
+    let v: serde_json::Value =
+        serde_json::from_str(text).map_err(|e| format!("不是有效 JSON：{e}"))?;
+    if v.get(MAGIC).and_then(|x| x.as_i64()) != Some(DPAPI_VERSION) {
+        return Err("这不是 DPAPI 信封".into());
+    }
+    let data = base64_decode(v.get("data").and_then(|x| x.as_str()).unwrap_or(""));
+    if data.is_empty() {
+        return Err("信封里没有数据（文件可能被截断）".into());
+    }
+    let plain = dpapi(false, &data)?;
+    String::from_utf8(plain).map_err(|_| "解密后的内容不是文本".to_string())
+}
+
+/// 本地数据的统一「封」：**有备份密码就用密码**（可跨机，用户选的口径），
+/// 没有（首次运行还没设密码）就退回 DPAPI —— 无论如何不落明文。
+pub fn seal(plain: &str, password: &str) -> Result<String, String> {
+    if password.trim().is_empty() {
+        encrypt_dpapi(plain)
+    } else {
+        encrypt(plain, password)
+    }
+}
+
+/// 本地数据的统一「解」：按信封自己的版本号选钥匙，明文原样返回（老文件）。
+pub fn unseal(text: &str, password: &str) -> Result<String, String> {
+    match envelope_version(text) {
+        Some(DPAPI_VERSION) => decrypt_dpapi(text),
+        Some(_) => {
+            if password.trim().is_empty() {
+                return Err("这份数据是用备份密码加密的，但本机没有可用的密码".into());
+            }
+            decrypt(text, password)
+        }
+        None => Ok(text.to_string()),
+    }
+}
+
 
 /// 用 Argon2id 把口令派生成 32 字节的 AES 密钥。盐每次加密随机生成。
 ///
@@ -181,6 +322,38 @@ mod tests {
         assert_eq!(encrypt(s, "").unwrap(), s);
         assert!(!looks_encrypted(s));
         assert_eq!(decrypt(s, "").unwrap(), s);
+    }
+
+    /// v1.4.0：DPAPI 信封（不需要密码那条路）—— 磁盘上永远没有明文。
+    #[test]
+    fn dpapi_envelope_round_trip() {
+        let s = r#"{"backup_password":"秘密","ocr_key":"AKID123"}"#;
+        let enc = encrypt_dpapi(s).expect("DPAPI 加密失败（测试机上应可用）");
+        assert!(looks_dpapi(&enc), "应当被识别成 DPAPI 信封");
+        assert!(looks_encrypted(&enc), "DPAPI 信封也算密文");
+        assert!(!enc.contains("秘密"), "密文里不许出现原文");
+        assert!(!enc.contains("AKID123"));
+        assert_eq!(decrypt_dpapi(&enc).unwrap(), s);
+        // 用密码去解 DPAPI 信封 → 明确报错，而不是"解出一堆乱码"
+        assert!(decrypt(&enc, "随便").is_err() || decrypt(&enc, "随便").unwrap() != s);
+    }
+
+    /// `seal` / `unseal`：有密码走密码，没密码走 DPAPI；明文原样放行。
+    #[test]
+    fn seal_unseal_picks_the_right_key() {
+        let s = r#"{"a":1}"#;
+        // 有密码 → 密码信封（可跨机）
+        let with_pw = seal(s, "pw").unwrap();
+        assert_eq!(envelope_version(&with_pw), Some(1));
+        assert_eq!(unseal(&with_pw, "pw").unwrap(), s);
+        assert!(unseal(&with_pw, "").is_err(), "没密码就该报错，不能静默");
+        // 没密码 → DPAPI 信封
+        let no_pw = seal(s, "").unwrap();
+        assert_eq!(envelope_version(&no_pw), Some(2));
+        assert_eq!(unseal(&no_pw, "").unwrap(), s);
+        // 明文（老文件）原样放行
+        assert_eq!(unseal(s, "").unwrap(), s);
+        assert_eq!(envelope_version(s), None);
     }
 
     #[test]
