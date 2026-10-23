@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -25,8 +26,10 @@
     <!-- 2026-10-23：用户要求把「横条外观」「黑名单/白名单」「AI 抠图」从通用里
          拆出来单独成栏 —— 通用页当时塞了 7 张卡片，触发、主题、外观、预览、
          范围、系统、抠图混在一起，找个开关要滚半天。现在：
-           通用 = 触发（含自动收起）/ 界面主题（设置窗口与横条共用）/ 系统
-           外观 = 横条外观 + 预览
+           通用 = 触发（含自动收起）/ 系统
+           外观 = 界面主题 → 预览 → 横条外观
+                  （顺序也是用户点名的：主题定明暗 → 预览摆最上面才看得见参数
+                    变化 → 参数放最后。预览在最下面时拖滑块根本看不到它。）
            范围 = 在哪些软件里不弹 / 只在哪里弹
            抠图 = AI 抠图（图标编辑器） -->
     <button type="button" data-tab="look"><span class="tb-i" aria-hidden="true">🎨</span>外观</button>
@@ -81,6 +84,24 @@
     </section>
 
     <section class="card">
+        <h2>系统</h2>
+        <div class="row">
+            <div class="rt"><b>开机自动启动</b><small>登录 Windows 后自动在后台待命</small></div>
+            <label class="sw"><input type="checkbox" id="s-autoStart"><i></i></label>
+        </div>
+        <div class="row">
+            <div class="rt"><b>默认以管理员身份运行</b><small>只有管理员进程才能把 Ctrl+C 送进同样是管理员的软件（任务管理器、部分编辑器）。改完下次启动生效</small></div>
+            <label class="sw"><input type="checkbox" id="s-autoElevate"><i></i></label>
+        </div>
+    </section>
+    </div>
+
+    <!-- ============================ 外观 ============================ -->
+    <!-- 顺序是用户点名的：**主题 → 预览 → 外观参数**。
+         预览必须排在参数**前面** —— 放最下面时拖滑块根本看不见它，
+         「即时观察」就白搭了；主题（明暗）放最前，是因为它一变整条预览跟着换皮。 -->
+    <div class="pane" data-pane="look" hidden>
+    <section class="card">
         <h2>界面主题 <small>设置窗口与横条共用的明暗皮肤</small></h2>
         <div class="row col">
             <div class="rt"><b>主题</b><small>「跟随系统」随 Windows 的日/夜间模式自动切换。横条与设置窗口用同一套明暗，不再有单独的取色开关</small></div>
@@ -95,22 +116,17 @@
             <input type="range" id="s-itemRadius" min="0" max="18" step="1">
         </div>
     </section>
-
     <section class="card">
-        <h2>系统</h2>
-        <div class="row">
-            <div class="rt"><b>开机自动启动</b><small>登录 Windows 后自动在后台待命</small></div>
-            <label class="sw"><input type="checkbox" id="s-autoStart"><i></i></label>
+        <h2>预览 <small>改完立刻看到横条长什么样</small></h2>
+        <div class="preview-stage" id="previewStageA">
+            <div class="qs-preview" id="qsPreviewA"></div>
         </div>
-        <div class="row">
-            <div class="rt"><b>默认以管理员身份运行</b><small>只有管理员进程才能把 Ctrl+C 送进同样是管理员的软件（任务管理器、部分编辑器）。改完下次启动生效</small></div>
-            <label class="sw"><input type="checkbox" id="s-autoElevate"><i></i></label>
+        <div class="row" style="margin-top:8px">
+            <div class="rt"><b>在深色背景上预览</b><small>把预览舞台换成深色背景，看横条在深色页面上长什么样</small></div>
+            <label class="sw"><input type="checkbox" id="s-previewDark"><i></i></label>
         </div>
+        <div class="rt" style="margin-top:8px"><small>预览里的图标点了不会真的去搜索，纯粹给你看效果</small></div>
     </section>
-    </div>
-
-    <!-- ============================ 外观 ============================ -->
-    <div class="pane" data-pane="look" hidden>
     <section class="card">
         <h2>横条外观</h2>
         <div class="row col">
@@ -211,19 +227,8 @@
             </div>
         </div>
     </section>
-
-    <section class="card">
-        <h2>预览 <small>改完立刻看到横条长什么样</small></h2>
-        <div class="preview-stage" id="previewStageA">
-            <div class="qs-preview" id="qsPreviewA"></div>
-        </div>
-        <div class="row" style="margin-top:8px">
-            <div class="rt"><b>在深色背景上预览</b><small>把预览舞台换成深色背景，看横条在深色页面上长什么样</small></div>
-            <label class="sw"><input type="checkbox" id="s-previewDark"><i></i></label>
-        </div>
-        <div class="rt" style="margin-top:8px"><small>预览里的图标点了不会真的去搜索，纯粹给你看效果</small></div>
-    </section>
     </div>
+
 
     <!-- ============================ 范围 ============================ -->
     <div class="pane" data-pane="scope" hidden>

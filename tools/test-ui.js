@@ -345,6 +345,20 @@ async function testSettings() {
         ok('  外观栏里有「横条外观」+ 预览',
             paneOf('look').textContent.includes('横条外观')
             && paneOf('look').textContent.includes('预览'));
+        /* 2026-10-23 追加：用户点名「界面主题也放进外观，顺序是 主题 → 预览 →
+         * 外观参数」，理由是预览摆最下面时拖滑块根本看不见它，「即时观察」白搭。
+         * 这条按 DOM 顺序断言 —— 改布局把预览又挪下去时会立刻红。 */
+        ok('  界面主题搬到了外观栏（通用里不再有）',
+            paneOf('look').textContent.includes('界面主题')
+            && !paneOf('general').textContent.includes('界面主题'));
+        {
+            const heads = [...paneOf('look').querySelectorAll('h2')].map((h) => h.textContent.trim());
+            ok('  外观栏的卡片顺序 = 界面主题 → 预览 → 横条外观',
+                heads.length >= 3
+                && /^界面主题/.test(heads[0]) && /^预览/.test(heads[1])
+                && /^横条外观/.test(heads[2]),
+                heads.join(' / '));
+        }
         ok('  范围栏里有黑白名单（应用范围）',
             paneOf('scope').textContent.includes('应用范围'));
         ok('  抠图栏里有 AI 抠图',
