@@ -1,6 +1,6 @@
 [package]
 name = "quicksearch"
-version = "1.4.3"
+version = "1.4.4"
 edition = "2021"
 description = "Quick Search 桌面版 —— 任意软件里选中文字即可弹出搜索横条"
 build = "build.rs"

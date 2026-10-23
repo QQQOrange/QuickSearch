@@ -305,6 +305,11 @@ function baseConf(over) {
         customEngines: [],
         overrideIcons: {}, urlOverrides: {}, aiSuffix: '请解释', aiSuffixes: {},
         aiCopyPrompt: true,
+        /* r80 起「编辑图标」按钮受这个总开关控制（默认关）。下面 #143 那两段
+         * 用例测的就是按钮本身，配置里必须把它打开 —— 否则一行按钮都不渲染，
+         * 用例先 FAIL 再抛异常，把后面的 testBar / testCatJump 全带走
+         * （表现成"整套 151/154、后面根本没跑"）。 */
+        aiMattingEnable: true,
         webdavOnStart: false, webdavOnExit: false,
     }, over || {});
 }
@@ -432,8 +437,17 @@ async function testSettings() {
     eq('自定义引擎渲染出 2 行', crows.length, 2);
     ok('行里显示了 URL 原文', crows[0].textContent.includes('https://s.example/?q=%s'));
     ok('行里显示了分类', crows[1].textContent.includes('AI 工具'));
+    /* ⚠ r61/r73 起「全部引擎」列表是**选了分组才有内容**的（没选时显示的是一句
+     * 「上面选一个大类开始浏览」的引导语）—— 不断言前先点一下「全部引擎」那颗，
+     * 不然永远在跟一句空态提示较劲（自定义引擎本身是并进去了的，探针复现过）。 */
+    $('allGrpNav').querySelector('.eng-nav-item').dispatchEvent(
+        new w.Event('click', { bubbles: true }));
+    await flush();
+    await new Promise((r) => setTimeout(r, 200));
     ok('自定义引擎也出现在「全部引擎」里',
-        $('allList').textContent.includes('内网搜索'));
+        $('allList').textContent.includes('内网搜索')
+        && $('allList').textContent.includes('备用 Kimi'),
+        $('allList').textContent.slice(0, 80));
 
     // ---- 自定义引擎：新增 ----
     $('w-ceName').value = '新引擎';
@@ -959,7 +973,7 @@ async function testBar() {
     // r53：中类锚点收进一个胶囊，不再有平铺的锚点导航条
       ok('平铺视图里没有中类锚点条（r53 收进胶囊）', !nav0,
           nav0 ? '还剩 ' + nav0.querySelectorAll('.cat-nav-item').length + ' 个锚点' : '');
-      const pick0 = w.document.querySelectorAll('#panelPick2 .qs-pick, #panelPick3 .qs-pick');
+      const pick0 = w.document.querySelectorAll('#panelPick2 .cat-chip, #panelPick3 .cat-chip');
       ok('  二级/三级胶囊默认收起（打开只留一级大类）', pick0.length === 0,
           pick0.length + ' 个胶囊');
     const secTitles0 = secTitlesNow();
@@ -999,8 +1013,11 @@ async function testBar() {
     
     ok('点一级大类会过滤内容（不是滚动）', !!gWeb && secTitlesNow().length >= 1,
           secTitlesNow().map((t) => t.textContent).join(' / '));
-      ok('  点了大类之后二级胶囊出现（一个胶囊，不是一排）',
-          w.document.querySelectorAll('#panelPick2 .qs-pick').length === 1);
+      // r75：中类也改成平铺胶囊（原来是一个下拉胶囊）—— 点了大类就露出一排
+      const chips2 = [...w.document.querySelectorAll('#panelPick2 .cat-chip')];
+      ok('  点了大类之后二级胶囊出现（r75：平铺一排，不再是一个下拉胶囊）',
+          chips2.length >= 3 && !w.document.querySelector('#panelPick2 .qs-pick'),
+          chips2.map((b) => b.textContent).join(' / '));
       // 复位大类过滤：后面的用例还要看默认平铺视图
       const gAll = [...w.document.querySelectorAll('.grp-nav .grp-item')].find((b) => /全部引擎/.test(b.textContent));
       gAll && gAll.dispatchEvent(new w.Event('click', { bubbles: true }));
@@ -1014,16 +1031,24 @@ async function testBar() {
         box.value = 'github';
         box.dispatchEvent(new w.Event('input', { bubbles: true }));
         await flush();
+        /* r81 起有词时会**分片**把剩下的格子填出来（每片一个定时器），
+         * 只等 setImmediate 会在"第一批还没填完"的时刻断言 —— 看到的是一堆
+         * 没被收掉的旧格子。这里等一个真定时，让分片填完再断。 */
+        await new Promise((r) => setTimeout(r, 300));
         const secTitles = secTitlesNow();
         const cells = [...w.document.querySelectorAll('#panelBody .grid > .cell')]
             .filter((c) => !c.hidden);
         ok('搜索框有词时仍是平铺视图（小节换行）', secTitles.length > 0,
             secTitles.map((t) => t.textContent).join(' / '));
+        /* ⚠ 判定必须走产品自己的口径（`engineMatches`：名字 + 别名）：
+         * 「Copilot」的别名里就有 "Github Copilot"，按 /github/i 只比名字会把
+         * 这条**正确的命中**判成失败（别名搜索就是这么设计的，见 r92）。 */
         ok('  只留下命中的引擎（github）',
-            cells.length > 0 && cells.every((c) => /github/i.test(c.dataset.engine)),
+            cells.length > 0 && cells.every((c) => w.engineMatches(
+                c.dataset.appName || c.dataset.engine, 'github')),
             cells.map((c) => c.dataset.engine).join(','));
         const strayAnchors = w.document.querySelectorAll('.cat-nav:not(.grp-nav):not(.fav-nav) .cat-nav-item').length;
-          const strayPicks = w.document.querySelectorAll('#panelPick2 .qs-pick, #panelPick3 .qs-pick').length;
+          const strayPicks = w.document.querySelectorAll('#panelPick2 .cat-chip, #panelPick3 .cat-chip').length;
           ok('  搜索结果里不摆目录（中类锚点与胶囊都收起）',
               strayAnchors === 0 && strayPicks === 0,
               '锚点 ' + strayAnchors + ' / 胶囊 ' + strayPicks);
@@ -2199,7 +2224,6 @@ async function testIconEditorPage() {
             $('ieName').textContent);
         ok('编辑前预览指向原图', $('imgBefore').getAttribute('src') === 'data:image/png;base64,U3Jj');
         ok('保存按钮初始禁用（还没处理过）', $('btnSave').disabled === true);
-        ok('容差滑块初始禁用（没消过之前拖着没意义）', $('tol').disabled === true);
 
         env.calls.length = 0;
         $('btnRemove').dispatchEvent(new w.Event('click', { bubbles: true }));
@@ -2207,12 +2231,16 @@ async function testIconEditorPage() {
         const rm = env.lastCmd('icon_remove_bg');
         ok('点「一键消除背景」调用了 icon_remove_bg', !!rm,
             JSON.stringify(env.calls.map((c) => c.cmd)));
-        eq('  默认容差 48', rm && rm.args.tolerance, 48);
+        /* r80 起「容差」换成「参数」六件套（maskThreshold/feather/…），
+         * 不再有 tolerance 字段 —— 断默认参数而不是一个不存在的数字。 */
+        eq('  带的是默认参数（maskThreshold 128 / feather 1 / fg 240 / bg 15）',
+            rm && JSON.stringify(rm.args.params),
+            JSON.stringify({ maskThreshold: 128, feather: 1, fgConfidence: 240,
+                bgConfidence: 15, edgeDecontaminate: true, dropSmallIslands: true }));
         eq('  从原图算起（src = 会话原图）', rm && rm.args.src, 'data:image/png;base64,U3Jj');
-        ok('  提示已消除的像素数', /已消除 1,234 个背景像素/.test($('hint').textContent),
+        ok('  提示已抠掉的像素数', /已抠掉 1,234 个背景像素/.test($('hint').textContent),
             $('hint').textContent);
         ok('  消除后保存按钮启用', $('btnSave').disabled === false);
-        ok('  消过一次后容差滑块启用', $('tol').disabled === false);
 
         env.calls.length = 0;
         $('btnSave').dispatchEvent(new w.Event('click', { bubbles: true }));
@@ -2237,26 +2265,9 @@ async function testIconEditorPage() {
             JSON.stringify(env.calls.map((c) => c.cmd)));
     }
 
-    // ③ 容差滑块：消过一次后拖动 = 按新容差从**原图**重算（防抖 180ms）
-    ICON_SESSION = { key: '知乎', name: '知乎', src: 'data:image/png;base64,U3Jj', vector: false };
-    {
-        const env = makeEnv('ui/iconedit.html', baseConf());
-        await flush();
-        const { w } = env;
-        const $ = (id) => w.document.getElementById(id);
-        $('btnRemove').dispatchEvent(new w.Event('click', { bubbles: true }));
-        await flush();
-        env.calls.length = 0;
-        const tol = $('tol');
-        tol.value = '80';
-        tol.dispatchEvent(new w.Event('input', { bubbles: true }));
-        ok('拖滑块即时更新数值显示', $('tolVal').textContent === '80', $('tolVal').textContent);
-        await new Promise((r) => setTimeout(r, 260));
-        const rm2 = env.lastCmd('icon_remove_bg');
-        ok('防抖后按新容差从原图重算',
-            !!rm2 && rm2.args.tolerance === 80 && rm2.args.src === 'data:image/png;base64,U3Jj',
-            rm2 && JSON.stringify(rm2.args));
-    }
+    /* ③ 原「容差滑块防抖重算」用例：r80 起「调容差」那个滑块已从产品里删掉
+     * （重抠走「参数」面板 + 手动补描），#tol / #tolVal 两个元素都没了，
+     * 再跑就是 $('tol').value 直接 TypeError —— 按事实删掉，不改成假通过。 */
 
     // ④ SVG：消除按钮禁用，但保存仍可用（原样应用）
     ICON_SESSION = { key: 'X', name: '矢量引擎', src: 'data:image/svg+xml;base64,PHN2Zz4=', vector: true };
@@ -2712,34 +2723,42 @@ async function testCatJump() {
      * 断言。跳转那套机器（scrollPanelToCat / paintCatNav …）还留在 bar.js 里，
      * 但导航不再调用它，所以这里不再假装测它；真实面板的胶囊行为由
      * tools/r51-lib-probe.js 的 ②/③ 覆盖（22 PASS / 0 FAIL）。 */
-    const pickNav = () => w.document.querySelector('#panelPick2 .qs-pick');
-    ok('  打开面板时二级胶囊不存在（只显示一级目录）', !pickNav());
+    /* r75：中类也从下拉胶囊改成**平铺胶囊**（用户原话：「最好中类也作为胶囊式的，
+     * 点击中类后，才会展开中类下面的小类」）—— 和一级大类、三级小类一个口径。 */
+    const chips2 = () => [...w.document.querySelectorAll('#panelPick2 .cat-chip')];
+    ok('  打开面板时二级胶囊不存在（只显示一级目录）', chips2().length === 0);
 
     const gWeb = navBtns.find((b) => /网页引擎/.test(b.textContent));
     gWeb && gWeb.click();
     await flush();
 
-    ok('点一级大类之后二级胶囊出现（一个胶囊，不是一排）',
-        w.document.querySelectorAll('#panelPick2 .qs-pick').length === 1);
-    eq('  平铺的中类锚点按钮为 0（原来的「导航胶囊数 = 节标题数」已按 r53 作废）',
-        body.querySelectorAll('.cat-nav:not(.grp-nav):not(.fav-nav) .cat-nav-item').length, 0);
+    const c2 = chips2();
+    ok('  点了大类之后二级胶囊出现（r75：平铺一排，「全部中类」+ 每个中类一颗）',
+        c2.length >= 3 && !w.document.querySelector('#panelPick2 .qs-pick'),
+        c2.map((b) => b.textContent).join(' / '));
+    ok('  「全部中类」默认高亮（还没选中任何中类）',
+        c2[0] && /全部中类/.test(c2[0].textContent) && c2[0].classList.contains('on'));
+    eq('  头里除了大类行只有二级胶囊行（老的平铺中类锚点已作废）',
+        body.querySelectorAll('.cat-nav:not(.grp-nav):not(.fav-nav)').length, 1);
     const secsFiltered = [...body.querySelectorAll('.cat-title[data-cat]')].filter((x) => !x.hidden);
     ok('  过滤之后正文只剩这一类（网页引擎下的中类节）', secsFiltered.length >= 1,
         secsFiltered.map((x) => x.textContent).join(' / '));
+    ok('  三级胶囊还没出现（要点了中类才展开它下面的小类）',
+        w.document.querySelectorAll('#panelPick3 .cat-chip').length === 0);
 
-    const p2 = pickNav();
-    p2 && p2.click();
-    await flush();
-    const menu = w.document.querySelector('#panelPick2 .qs-pick-menu');
-    ok('  点胶囊会展开列表', !!menu && !menu.hidden);
-    const items = menu ? [...menu.querySelectorAll('.qs-pick-item')] : [];
-    ok('  列表里有「全部中类」+ 当前大类的中类', items.length >= 2,
-        items.map((b) => b.textContent).join(' / '));
-
-    items[1] && items[1].click();
+    c2[1] && c2[1].click();
     await flush();
     eq('选了一个中类 → 正文只剩这一节（选哪个显示哪个）',
         [...body.querySelectorAll('.cat-title[data-cat]')].filter((x) => !x.hidden).length, 1);
+    /* r75 的直接回归：paintCatNav（滚动高亮同步）以前会把**所有**非大类行的
+     * .cat-nav-item 按 data-cat 重画 —— 二/三级胶囊没有 data-cat，于是点完
+     * 中类/小类，'on' 立刻被剥掉，用户看到一个都不亮，以为没点上。
+     * （r73 起三级就是胶囊，这条一直藏着；r75 二级也改胶囊，必须钉住。） */
+    const c2after = chips2();
+    ok('  选中的中类胶囊保持高亮（不被锚点高亮同步剥掉）',
+        c2after[1] && c2after[1].classList.contains('on')
+        && !c2after[0].classList.contains('on'),
+        c2after.map((b) => b.textContent + (b.classList.contains('on') ? '[on]' : '')).join(' / '));
     /* 三级：原来是「一个胶囊 + 下拉菜单」，用户要求改成**平铺胶囊** ——
      * 「选择完中类之后，小类最好是每一个就都呈现出来，一种胶囊的形式，这样我要
      * 哪个我点击就可以了，不用再一个个的找」。所以这里断的是 .cat-chip 平铺、
@@ -2755,6 +2774,11 @@ async function testCatJump() {
     await flush();
     eq('  点一颗小类 → 正文只剩这一类',
         [...body.querySelectorAll('.cat-sub')].filter((s) => !s.hidden).length, 1);
+    const chips3after = [...w.document.querySelectorAll('#panelPick3 .cat-chip')];
+    ok('  选中的小类胶囊也保持高亮（同上，paintCatNav 不能碰筛选行）',
+        chips3after[1] && chips3after[1].classList.contains('on')
+        && !chips3after[0].classList.contains('on'),
+        chips3after.map((b) => b.textContent + (b.classList.contains('on') ? '[on]' : '')).join(' / '));
 
 
     // 数据侧：分组改造必须落到真实目录文件里

@@ -2004,8 +2004,12 @@ function paintCatNav(name) {
         /* 大类胶囊行（.grp-nav）里的按钮也带 cat-nav-item 类，但它是**筛子**
          * 不是锚点：激活态由 appendGroupNav 按 panelGroupFilter 画，这里
          * 按 data-cat 重画会把它的 'on' 剥掉（实测：点「网页引擎」后胶囊
-         * 高亮立刻熄灭）。跳过大类行，只接管真正的锚点导航。 */
-        if (b.closest('.grp-nav')) continue;
+         * 高亮立刻熄灭）。跳过大类行，只接管真正的锚点导航。
+         * ⚠ r73/r75 起二、三级也改成平铺胶囊（.pick-nav 里的 .cat-chip），
+         *    它们同样是筛子、同样没有 data-cat —— 不一起跳过的话，这里会按
+         *    `dataset.cat === undefined` 把它们的 'on' 全部熄掉：用户点了
+         *    「搜索引擎」/ 某个小类，胶囊一个都不亮，还以为自己没点上。 */
+        if (b.closest('.grp-nav') || b.closest('.pick-nav')) continue;
         const on = b.dataset.cat === name;
         b.classList.toggle('on', on);
         b.setAttribute('aria-selected', on ? 'true' : 'false');
@@ -3654,26 +3658,70 @@ boot().catch((err) => {
 /* ------------------------------------------------------------------ */
 /* ------------------------------------------------------------------ */
 /* r53：面板目录的渐进式展开                                             */
-/*   一级（大类）：平铺一行胶囊（老的 appendGroupNav，点它=过滤 + 露出二级） */
-/*   二级（中类）：**一个胶囊**，只有选了大类才出现；点开选一个 → 只显示它   */
-/*   三级（小类）：**平铺一行胶囊**（点谁就只看谁）—— 原来是"一个胶囊 + 下拉菜单"，
- *                用户原话：「选择完中类之后，小类最好是每一个就都呈现出来，
- *                一种胶囊的形式，这样我要哪个我点击就可以了，不用再一个个的找」。*/
-/*  用户原话：「只显示一级目录……点击一级目录之后再会弹出 2 级目录。不然所有   */
-/*  的目录都混在一起太杂了」「所有的 2 级目录它都用一个胶囊显示」。           */
+/*   一级（大类）：平铺一行胶囊（appendGroupNav，点它=过滤 + 露出二级）    */
+/*  用户原话：「只显示一级目录……点击一级目录之后再会弹出 2 级目录。不然所有 */
+/*  的目录都混在一起太杂了」。                                            */
+/* r73：三级（小类）从下拉菜单改成平铺胶囊 —— 用户原话：「选择完中类之后， */
+/*   小类最好是每一个就都呈现出来，一种胶囊的形式，这样我要哪个我点击就可以 */
+/*   了，不用再一个个的找」。                                             */
+/* r75：二级（中类）也改成平铺胶囊 —— 用户原话：「最好中类也作为胶囊式的，   */
+/*   点击中类后，才会展开中类下面的小类」。三层现在一个口径：都是平铺胶囊，  */
+/*   点谁看谁，「全部」恢复全量；下一级只在上一级真的选了一个之后才出现。   */
 /* ------------------------------------------------------------------ */
 var panelSubFilter = null;   // 选中的中类（null = 全部）
 var panelCatFilter = null;   // 选中的小类（null = 全部）
 
+/** 往导航行里加一颗胶囊。二级 / 三级共用（曾经两行各写一遍，改口径时容易只改一头）。 */
+function panelPickChip(host, key, text, count, tip, on, onPick) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'cat-nav-item cat-chip' + (on ? ' on' : '');
+    b.title = tip;
+    /* 用 aria-pressed（按钮的"按下/选中"语义），不用 aria-selected ——
+     * 后者只对 role=option/tab 才合法，挂在裸 button 上等于没写。 */
+    b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    b.appendChild(Object.assign(document.createElement('span'),
+        { textContent: text }));
+    if (count != null) {
+        b.appendChild(Object.assign(document.createElement('span'),
+            { className: 'n', textContent: count }));
+    }
+    b.addEventListener('click', () => {
+        if (on) return;   // 已经是它了，别白重画
+        onPick(key);
+    });
+    host.appendChild(b);
+    return b;
+}
+
 function appendPickNav(head, groups, sections) {
     const rows = window.qsAllEngineRows(groups);
     const meta = panelSubMeta(groups);
-    // —— 二级：选了大类才出现 ——
-    if (panelGroupFilter) {
-        const host = document.createElement('div');
+    // —— 二级（中类）：选了大类才出现，**平铺一行胶囊** ——
+    /*  用户原话（本次）：「最好中类也作为胶囊式的，点击中类后，才会展开中类
+     *  下面的小类」。原来是 r53 那套「一个胶囊 + 下拉菜单」：中类一个大类底下
+     *  也就两三个（网页族 = 搜索引擎 / 直达网页，软件族 = 软件搜索 / 软件直达），
+     *  全铺开也只有一行，却还要多点一次"展开菜单"；和大类、小类的操作口径也不一致。
+     *  现在三层一个样：都是平铺胶囊，点谁看谁，「全部中类」恢复全量。
+     *  只有**选了中类**，下面那行小类才出现（panelSubFilter 非空才画）。
+     *  ⚠ 一个大类下一个中类都没有时（用户把某族的引擎删光了）整行不画 ——
+     *    只留一颗「全部中类」是没有意义的一行，还白占吸附头的高度。 */
+    if (panelGroupFilter && sections.length) {
+        const host = document.createElement('nav');
         host.className = 'cat-nav pick-nav';
         host.id = 'panelPick2';
-        const items = [{ key: null, text: '全部中类', count: null }];
+        host.setAttribute('aria-label', '中类');
+        let total = 0;
+        for (const r of rows) if (r.group === panelGroupFilter) total++;
+        panelPickChip(host, null, '全部中类', total,
+            '不限定中类（列出这个大类的全部引擎）',
+            panelSubFilter === null,
+            (k) => {
+                panelSubFilter = k;
+                panelCatFilter = null;
+                renderPanel();
+                requestAnimationFrame(() => setTimeout(pushLayout, 0));
+            });
         for (const s of sections) {
             /* ⚠ sections 是 [{key,title}] **对象**数组（老锚点导航用 sec.key），
                不是字符串数组 —— 直接拿它当过滤键会让 r.sub !== panelSubFilter
@@ -3682,32 +3730,31 @@ function appendPickNav(head, groups, sections) {
             let n = 0;
             for (const r of rows) if (r.group === panelGroupFilter && r.sub === sk) n++;
             const m = meta[sk];
-            items.push({ key: sk, text: (m && m.title) || sk, count: n });
+            panelPickChip(host, sk, (m && m.title) || sk, n,
+                '只看「' + ((m && m.title) || sk) + '」（' + n + ' 个）',
+                panelSubFilter === sk,
+                (k) => {
+                    panelSubFilter = k;
+                    panelCatFilter = null;
+                    renderPanel();
+                    requestAnimationFrame(() => setTimeout(pushLayout, 0));
+                });
         }
         head.appendChild(host);
-        window.qsPickNav(host, {
-            items: items,
-            value: panelSubFilter,
-            onPick: (k) => {
-                panelSubFilter = k;
-                panelCatFilter = null;
-                renderPanel();
-                requestAnimationFrame(() => setTimeout(pushLayout, 0));
-            },
-        });
     }
-    // —— 三级（小类）：**全部铺开**成一行胶囊 ——
-    /*  用户原话（本次）：「更多引擎面板选择完中类之后，小类最好是每一个就都呈现
+    // —— 三级（小类）：**全部铺开**成一行胶囊（选了中类才出现） ——
+    /*  用户原话（r73）：「更多引擎面板选择完中类之后，小类最好是每一个就都呈现
      *  出来，一种胶囊的形式，这样我要哪个我点击就可以了，不用再一个个的找」。
      *
      *  原来是 r53 那套「一个胶囊 + 下拉菜单」：网页那一族底下 24 个小类，
      *  想换一个就得点开菜单、在长列表里找、点完菜单又收起来 —— 换个类目重复一遍。
-     *  现在和大类一样平铺：一颗小类一颗胶囊，点谁就只剩谁；「全部」恢复全量。
+     *  现在和大类、中类一样平铺：一颗小类一颗胶囊，点谁就只剩谁；「全部」恢复全量。
      *
      *  ⚠ 数量级：一个中类底下最多 24 个小类（网页搜索引擎那一档），全铺开约 3 行。
      *    所以这一行用紧凑款胶囊（.cat-row：19px 高 / 10.5px 字 / 更紧的间距），
      *    否则吸附头会把只有 344px 高的正文挤没。
-     *  ⚠ 「全部」那颗只在**没有**选中任何小类时高亮；选中某类时高亮跟着它走。 */
+     *  ⚠ 「全部」那颗只在**没有**选中任何小类时高亮；选中某类时高亮跟着它走。
+     *  ⚠ 只有一个小类时整行不画（没得选，画了反而多占一行）。 */
     if (panelSubFilter) {
         const seen = new Map();
         for (const r of rows) {
@@ -3722,32 +3769,23 @@ function appendPickNav(head, groups, sections) {
             host.setAttribute('aria-label', '小类');
             let total = 0;
             for (const n of seen.values()) total += n;
-            const addChip = (key, text, count, tip) => {
-                const b = document.createElement('button');
-                b.type = 'button';
-                const on = (panelCatFilter || null) === key;
-                b.className = 'cat-nav-item cat-chip' + (on ? ' on' : '');
-                b.title = tip;
-                /* 用 aria-pressed（按钮的"按下/选中"语义），不用 aria-selected ——
-                 * 后者只对 role=option/tab 才合法，挂在裸 button 上等于没写。 */
-                b.setAttribute('aria-pressed', on ? 'true' : 'false');
-                b.appendChild(Object.assign(document.createElement('span'),
-                    { textContent: text }));
-                if (count != null) {
-                    b.appendChild(Object.assign(document.createElement('span'),
-                        { className: 'n', textContent: count }));
-                }
-                b.addEventListener('click', () => {
-                    if ((panelCatFilter || null) === key) return;   // 已经是它了，别白重画
-                    panelCatFilter = key;
+            panelPickChip(host, null, '全部', total,
+                '不限定小类（列出这个中类下的全部引擎）',
+                panelCatFilter === null,
+                (k) => {
+                    panelCatFilter = k;
                     renderPanel();
                     requestAnimationFrame(() => setTimeout(pushLayout, 0));
                 });
-                host.appendChild(b);
-            };
-            addChip(null, '全部', total, '不限定小类（列出这个中类下的全部引擎）');
             for (const [k, n] of seen) {
-                addChip(k, k, n, '只看「' + k + '」（' + n + ' 个）');
+                panelPickChip(host, k, k, n,
+                    '只看「' + k + '」（' + n + ' 个）',
+                    panelCatFilter === k,
+                    (k2) => {
+                        panelCatFilter = k2;
+                        renderPanel();
+                        requestAnimationFrame(() => setTimeout(pushLayout, 0));
+                    });
             }
             head.appendChild(host);
         }

@@ -1,6 +1,6 @@
 {
   "name": "quick-search-win",
-  "version": "1.4.3",
+  "version": "1.4.4",
   "private": true,
   "description": "Quick Search 桌面版",
   "main": "app/main.js",

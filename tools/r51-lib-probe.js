@@ -225,8 +225,8 @@ async function connect(sub, ms) {
         midHeads: body.querySelectorAll('.cat-title').length,
         subHeads: body.querySelectorAll('.cat-sub').length,
         subChips: document.querySelectorAll('.sub-nav .sub-item').length,
-        pick2: document.querySelectorAll('#panelPick2 .qs-pick').length,
-        pick3: document.querySelectorAll('#panelPick3 .qs-pick').length,
+        pick2: document.querySelectorAll('#panelPick2 .cat-chip').length,
+        pick3: document.querySelectorAll('#panelPick3 .cat-chip').length,
         headH: head ? head.offsetHeight : 0,
       });
     })()`);
@@ -254,32 +254,23 @@ async function connect(sub, ms) {
       if (!g1) return 'NO-GRP1';
       g1.click();
       await sleep(500);
-      out.pick2 = document.querySelectorAll('#panelPick2 .qs-pick').length;
+      // r75：二级也改成平铺胶囊（原来是一个下拉胶囊 + 菜单）
+      out.pick2 = document.querySelectorAll('#panelPick2 .cat-chip').length;
       out.pick2Chips = document.querySelectorAll('#panelPick2 .cat-nav-item').length;
+      out.pick2Texts = Array.from(document.querySelectorAll('#panelPick2 .cat-chip'))
+        .map((b) => b.textContent);
       out.headH = head ? head.offsetHeight : 0;
       out.secsAfterGrp = body.querySelectorAll('.cat-title').length;
-      const p2 = document.querySelector('#panelPick2 .qs-pick');
-      if (!p2) return JSON.stringify(out);
-      p2.click();
-      await sleep(200);
-      const menu = document.querySelector('#panelPick2 .qs-pick-menu');
-      out.menuOpen = !!menu && !menu.hidden;
-      out.menuItems = menu ? menu.querySelectorAll('.qs-pick-item').length : 0;
-      const it = menu ? menu.querySelectorAll('.qs-pick-item')[1] : null;
+      out.pick3Before = document.querySelectorAll('#panelPick3 .cat-chip').length;
+      const it = document.querySelectorAll('#panelPick2 .cat-chip')[1] || null;
       if (it) it.click();
       await sleep(500);
       out.secsAfterSub = body.querySelectorAll('.cat-title').length;
-      out.pick3 = document.querySelectorAll('#panelPick3 .qs-pick').length;
-      const p3 = document.querySelector('#panelPick3 .qs-pick');
-      if (p3) {
-        p3.click();
-        await sleep(220);
-        const m3 = document.querySelector('#panelPick3 .qs-pick-menu');
-        out.menu3Open = !!m3 && !m3.hidden;
-        out.menu3Items = m3 ? m3.querySelectorAll('.qs-pick-item').length : 0;
-        const i3 = m3 ? m3.querySelectorAll('.qs-pick-item')[1] : null;
-        out.pick3Text = i3 ? i3.textContent : '';
-        if (i3) i3.click();
+      out.pick3 = document.querySelectorAll('#panelPick3 .cat-chip').length;
+      const i3 = document.querySelectorAll('#panelPick3 .cat-chip')[1] || null;
+      if (i3) {
+        out.pick3Text = i3.textContent;
+        i3.click();
         await sleep(500);
         out.subsVisible = [...document.querySelectorAll('#panelBody .cat-sub')].filter((s) => !s.hidden).length;
         out.subsHidden = [...document.querySelectorAll('#panelBody .cat-sub')].filter((s) => s.hidden).length;
@@ -301,14 +292,16 @@ async function connect(sub, ms) {
     {
         let F3 = {};
         try { F3 = JSON.parse(pflow); } catch (e) { F3 = {}; }
-        check('③ 面板：点一级之后二级胶囊才出现（一个胶囊，不是一排）',
-            F3.pick2 === 1 && F3.pick2Chips === 0, String(pflow));
-        check('③ 面板：点胶囊展开、选一个就只剩这一个',
-            F3.menuOpen === true && F3.menuItems >= 2 && F3.secsAfterSub === 1, String(pflow));
+        // r75：二级从下拉改成平铺胶囊 —— 点一级之后露出「全部中类 + 每个中类一颗」
+        check('③ 面板：点一级之后二级胶囊才出现（r75：平铺一排 ≥ 3 颗）',
+            F3.pick2 >= 3 && F3.pick2Chips === F3.pick2 && F3.pick3Before === 0,
+            String(pflow));
+        check('③ 面板：点一颗中类 → 只剩这一个（三级此时才展开）',
+            F3.secsAfterSub === 1 && F3.pick3 >= 2, String(pflow));
         check('③ 面板：目录不遮内容（第一个分类标题在吸附头下沿之下）',
             F3.covered === false, String(pflow));
         check('③ 面板：三级胶囊里选一个小类 → 只剩这一个小类',
-            F3.menu3Open === true && F3.subsVisible === 1, String(pflow));
+            F3.subsVisible === 1, String(pflow));
     }
 
     /* ---------- 进设置页，查引擎库 ---------- */
