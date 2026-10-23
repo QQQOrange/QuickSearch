@@ -22,8 +22,18 @@
          图标把「形状」这一维也利用上，眼睛扫过去先认形状再读字。纯装饰：
          aria-hidden 让读屏软件跳过它（字才是 tab 的可访问名）。 -->
     <button type="button" data-tab="general"><span class="tb-i" aria-hidden="true">⚙️</span>通用</button>
+    <!-- 2026-10-23：用户要求把「横条外观」「黑名单/白名单」「AI 抠图」从通用里
+         拆出来单独成栏 —— 通用页当时塞了 7 张卡片，触发、主题、外观、预览、
+         范围、系统、抠图混在一起，找个开关要滚半天。现在：
+           通用 = 触发（含自动收起）/ 界面主题（设置窗口与横条共用）/ 系统
+           外观 = 横条外观 + 预览
+           范围 = 在哪些软件里不弹 / 只在哪里弹
+           抠图 = AI 抠图（图标编辑器） -->
+    <button type="button" data-tab="look"><span class="tb-i" aria-hidden="true">🎨</span>外观</button>
+    <button type="button" data-tab="scope"><span class="tb-i" aria-hidden="true">🚫</span>范围</button>
     <button type="button" data-tab="engines"><span class="tb-i" aria-hidden="true">🔎</span>引擎</button>
     <button type="button" data-tab="ai"><span class="tb-i" aria-hidden="true">🤖</span>AI 工具</button>
+    <button type="button" data-tab="matte"><span class="tb-i" aria-hidden="true">✂️</span>抠图</button>
     <button type="button" data-tab="ocr"><span class="tb-i" aria-hidden="true">🔤</span>文字识别</button>
     <!-- r54：识图搜索。放「文字识别」后面 —— 两者是同类动作（框一块屏幕 → 交给某个
          引擎），用户心智上会挨着找。 -->
@@ -56,6 +66,18 @@
             <div class="rt"><b>出现延迟</b><small>松手后等这么久才弹，调大可避免还在拖选时就冒出来 · 当前 <span id="s-delayVal">0</span> ms</small></div>
             <input type="range" id="s-delay" min="0" max="1500" step="20">
         </div>
+        <div class="row col">
+            <div class="rt"><b>无操作自动收起</b><small>横条弹出后，这么久没有任何操作（指针没移上来、没点、没按键、面板也没开）就自己收起来 · 0 = 不收起 · 当前 <span id="s-barIdleVal">5 秒</span></small></div>
+            <input type="range" id="s-barIdle" min="0" max="30" step="1">
+        </div>
+        <div class="row col">
+            <div class="rt"><b>鼠标移远就收起</b><small>指针离弹出位置超过这么远，说明这条你不需要了 —— 立刻收起 · 0 = 不收起 · 当前 <span id="s-barAwayVal">400 px</span></small></div>
+            <input type="range" id="s-barAway" min="0" max="1000" step="20">
+        </div>
+        <div class="row">
+            <div class="rt"><b>没取到文字就不弹</b><small>划选 / Ctrl+C 没拿到任何内容时不弹横条 —— 这是"误触也弹"最主要的来源。关掉之后一律弹（适合游戏、自绘界面这类取不到词的软件）</small></div>
+            <label class="sw"><input type="checkbox" id="s-barNeedText"><i></i></label>
+        </div>
     </section>
 
     <section class="card">
@@ -74,6 +96,21 @@
         </div>
     </section>
 
+    <section class="card">
+        <h2>系统</h2>
+        <div class="row">
+            <div class="rt"><b>开机自动启动</b><small>登录 Windows 后自动在后台待命</small></div>
+            <label class="sw"><input type="checkbox" id="s-autoStart"><i></i></label>
+        </div>
+        <div class="row">
+            <div class="rt"><b>默认以管理员身份运行</b><small>只有管理员进程才能把 Ctrl+C 送进同样是管理员的软件（任务管理器、部分编辑器）。改完下次启动生效</small></div>
+            <label class="sw"><input type="checkbox" id="s-autoElevate"><i></i></label>
+        </div>
+    </section>
+    </div>
+
+    <!-- ============================ 外观 ============================ -->
+    <div class="pane" data-pane="look" hidden>
     <section class="card">
         <h2>横条外观</h2>
         <div class="row col">
@@ -186,7 +223,10 @@
         </div>
         <div class="rt" style="margin-top:8px"><small>预览里的图标点了不会真的去搜索，纯粹给你看效果</small></div>
     </section>
+    </div>
 
+    <!-- ============================ 范围 ============================ -->
+    <div class="pane" data-pane="scope" hidden>
     <section class="card">
         <h2>应用范围 <small>在哪些软件里不弹 / 只在哪里弹</small></h2>
         <div class="row col">
@@ -208,19 +248,10 @@
             </div>
         </div>
     </section>
+    </div>
 
-    <section class="card">
-        <h2>系统</h2>
-        <div class="row">
-            <div class="rt"><b>开机自动启动</b><small>登录 Windows 后自动在后台待命</small></div>
-            <label class="sw"><input type="checkbox" id="s-autoStart"><i></i></label>
-        </div>
-        <div class="row">
-            <div class="rt"><b>默认以管理员身份运行</b><small>只有管理员进程才能把 Ctrl+C 送进同样是管理员的软件（任务管理器、部分编辑器）。改完下次启动生效</small></div>
-            <label class="sw"><input type="checkbox" id="s-autoElevate"><i></i></label>
-        </div>
-    </section>
-
+    <!-- ============================ AI 抠图 ============================ -->
+    <div class="pane" data-pane="matte" hidden>
     <!-- ==================== r80：AI 抠图（图标编辑器） ====================
          用户要求：「图标的编辑功能处于可选，在设置通用里面打开，打开之后就会验证
          本地有没有这个模型，有的话就直接调用，没有的话那要下载，会弹出下载窗口
@@ -296,6 +327,7 @@
         </div>
     </section>
     </div>
+
 
     <!-- ============================ 引擎 ============================ -->
     <div class="pane" data-pane="engines" hidden>

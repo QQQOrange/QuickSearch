@@ -226,6 +226,60 @@ let barVisible = false;
  *  两者都没有 → 弹出一个淡淡的横条（就是不透明的那层在等用户过来）。 */
 let barHovered = false;
 
+/* ------------------- 横条「无操作自动收起」 -------------------
+ * 用户 2026-10-23 原话：「还要给横条有一个时间逻辑，比如说横条出来了 5 秒，
+ * 但 5 秒没有任何的操作，那么就消失，这个时间逻辑在设置当中可调」。
+ *
+ * 为什么这条放在前端而不是和后端那个"鼠标走远"放在一起：**"有没有操作"只有
+ * 页面知道** —— 指针移进横条、点击、滚轮、按键、在搜索框里打字，全在页面里。
+ * 后端只管"指针离得够远了"（那条要全局坐标，页面收不到）。
+ *
+ * 三条不算"没操作"的例外，缺一条都会被骂：
+ *   · 指针正搁在横条上（哪怕一动不动）—— 人家正指着要点的按钮；
+ *   · 「更多引擎」面板开着 —— 那是正在翻目录；
+ *   · 右键菜单开着 —— 同上。
+ */
+let idleTimer = 0;
+
+/** 配置里的秒数 → 毫秒。0 / 未设置 = 关掉这条。 */
+function idleMs() {
+    const s = Number(CONF && CONF.barIdleSec);
+    return (Number.isFinite(s) && s > 0) ? Math.round(s * 1000) : 0;
+}
+
+/** （重新）开始计时。不满足条件就只清掉旧计时器。 */
+function armIdle() {
+    if (idleTimer) { clearTimeout(idleTimer); idleTimer = 0; }
+    if (!barVisible) return;
+    if (!panelEl.hidden) return;
+    if (!menuEl.hidden) return;
+    const ms = idleMs();
+    if (!ms) return;
+    idleTimer = setTimeout(onIdleFire, ms);
+}
+
+function onIdleFire() {
+    idleTimer = 0;
+    if (!barVisible) return;
+    if (!panelEl.hidden || !menuEl.hidden) return;
+    if (barHovered || barEl.matches(':hover')) {
+        // 指针就在横条上（只是没动）—— 再等一轮，别把人正要点的东西收走
+        armIdle();
+        return;
+    }
+    invoke('log_msg', {
+        msg: 'idle: 横条 ' + Math.round(idleMs() / 1000) + ' 秒没有任何操作，自动收起',
+    }).catch(() => {});
+    invoke('hide_bar').catch(() => {});
+}
+
+/* 任何一点操作都重新计时。capture 阶段、passive —— 只是"记一笔"，不拦事件。 */
+for (const ev of ['pointermove', 'pointerdown', 'pointerup', 'wheel', 'keydown', 'input']) {
+    document.addEventListener(ev, () => { if (idleTimer) armIdle(); },
+        { passive: true, capture: true });
+}
+
+
 /** 横条待机淡度的唯一落点：该淡的时候挂 `qs-dim`，不该淡的时候摘。
  *
  *  「不该淡」的两种情况：① 鼠标正压在横条上；② 面板开着 —— 用户正在面板里
@@ -2734,6 +2788,9 @@ function togglePanel(force) {
     }
     // 面板开合直接决定横条该不该淡（开着 = 用户在里面点东西，横条陪着亮着）
     syncDim();
+    /* 面板开合也算"在用它"：开着时停掉无操作计时，收起后重新开始计。
+     * （armIdle 自己会看 panelEl.hidden，这里两边都调一次是最省事的写法。） */
+    armIdle();
     // 布局变了，等一帧再量
     requestAnimationFrame(() => setTimeout(pushLayout, 0));
     // 窗口矩形跟着变了 → 玻璃纹理要按新矩形重抓（需求 6）
@@ -2968,6 +3025,8 @@ function openMenu(x, y, engineName) {
 
     // 菜单不参与 stage 的尺寸计算，所以得把窗口撑开才看得见
     pushLayout();
+    // 菜单开着也算"在用它"，别在这时候把横条收走
+    armIdle();
 }
 
 function closeMenu() {
@@ -2975,6 +3034,7 @@ function closeMenu() {
     menuEl.hidden = true;
     menuOwner = null;
     pushLayout();
+    armIdle();
 }
 
 document.addEventListener('mousedown', (e) => {
@@ -3106,6 +3166,9 @@ listen('qs://show', (ev) => {
     // 液态玻璃：建上下文（首次）/ 重新起渲染循环。背景字节等 Rust 的
     // qs://glass 事件（layout_bar 抓完了才发），到了再 onFresh。
     if (window.QSGlass) QSGlass.onShow();
+    /* 弹出即开始"无操作计时"（配置里关掉 / 面板菜单开着时它自己会跳过）。
+     * 放在最后：上面那些 pushLayout / 动画都不算用户操作。 */
+    armIdle();
 });
 
 /* Rust 的「迟到补」通道 —— 配合 Ctrl+C 路径的加速（见 Rust 侧 read_current /
@@ -3184,6 +3247,9 @@ listen('qs://config', (ev) => {
         }
     }
     requestAnimationFrame(() => setTimeout(pushLayout, 0));
+    /* 用户可能在设置里改了「几秒无操作就收起」—— 按新值重新计时。
+     * （armIdle 会先清旧计时器，所以改成更大的值也不会被旧的那一发提前收掉。） */
+    armIdle();
 });
 
 /* 主题（后端 qs://theme 的载荷，只含 dark）。
@@ -3524,6 +3590,8 @@ listen('qs://rclick', (ev) => {
 });
 
 listen('qs://hidden', () => {
+    // 收起来了 —— 无操作计时器没有任何意义了，直接停（别让它在后台再发一次 hide）
+    if (idleTimer) { clearTimeout(idleTimer); idleTimer = 0; }
     ocrOnly = false;
     renderedSignature = null;
     /* 横条收回去了：下一次 qs://show 是 隐藏→弹出 跳变，

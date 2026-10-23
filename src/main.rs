@@ -146,6 +146,17 @@ static REGION_HWND: AtomicIsize = AtomicIsize::new(0);
 static BUSY: AtomicBool = AtomicBool::new(false);
 static GEN: AtomicUsize = AtomicUsize::new(0);
 
+/// 「用户收起过一次横条」的计数器 —— 只在 `dismiss_bar` 里自增。
+///
+/// 用途只有一个：**取词比用户的手慢的时候，别再硬弹出来**。
+/// 一次拖选的取词要依次试"编辑控件 → UIA → OCR"，慢的时候几百毫秒；这期间
+/// 用户可能已经点了别处、按了 Esc（甚至又划了下一段）—— 那说明他不要这条了。
+/// 取词开始时记一个值，真要弹之前再看一眼：变了就作废这一次。
+///
+/// 不做这条时的现象很难查：用户"点了一下就没了"，过一会儿横条又自己冒出来，
+/// 主观上就是「横条会莫名其妙地出来」。
+static DISMISS_EPOCH: AtomicUsize = AtomicUsize::new(0);
+
 /// 剪贴板操作的串行锁。
 ///
 /// 为什么要它：取词有**两条**路径会同时动剪贴板 —— 拖选那条要先模拟 Ctrl+C
@@ -424,6 +435,9 @@ fn is_bar_shown() -> bool {
 }
 
 fn dismiss_bar() {
+    /* 先记一笔"用户收过一次"（见 DISMISS_EPOCH 的注释）—— 必须放在下面那些
+     * 提前 return 之前：横条还在读词、压根没显示时用户点了别处，这条也算数。 */
+    DISMISS_EPOCH.fetch_add(1, Ordering::SeqCst);
     let h = bar_hwnd();
     if h.0.is_null() {
         return;
@@ -1958,26 +1972,60 @@ fn capture_by_ocr(drag: (i32, i32, i32, i32)) -> Option<String> {
 ///
 /// 行为口径（用户拍板）：**按了 Ctrl+C 就一定在鼠标位置弹横条**。
 /// 剪贴板变了就用新复制的内容，没变就用剪贴板里现成的那份（可能为空）。
-/// 细节见 `read_current` 末尾那段注释。
+/// 细节见 `read_current` 里那段注释。
 enum Got {
     /// 拿到文字，正常弹横条。
     ///
     /// 字段是 `(文字, 是不是还可能有个迟到的复制)`。
     ///
-    /// **文字可能是空串** —— 用户按了 Ctrl+C 但当时没选中文字时，我们照样把横条叫出来，
-    /// 只是没有预填文字（见 read_current 末尾）。
+    /// **文字可能是空串** —— 剪贴板确实变了（用户真的复制了），但里面既没有
+    /// 文本也没有图片（多半是文件）。要不要弹由调用方按 `bar_need_text` 决定。
     /// `true` = 这次复制多半还在路上，调用方要给 `late_text_patch` 一个机会
     /// 把真正的文字补上（"立刻弹 + 迟到补"）。
     Text(String, bool),
     /// 剪贴板里进的是一张图 —— 图片上的字是选不中的，这时候弹一条
     /// 「识别图片文字」的横条，点一下就能框选 OCR
     Image,
+    /// **这一次 Ctrl+C 根本没复制任何东西**（剪贴板序号一直没变）。
+    ///
+    /// 用户 2026-10-23 报的最主要一条「横条会莫名其妙地出来，明明我没选中
+    /// 文字」就是它：老版本"只要按了 Ctrl+C 就弹"，于是 Ctrl+C 在终端里是
+    /// SIGINT、在对话框里是"复制一个空选区"、手滑碰一下……都会弹出一条
+    /// 装着**上一次剪贴板内容**的横条。现在等不到序号变化就什么都不做。
+    NoCopy,
 }
 
 fn read_current(before: u32) -> Got {
-    // 同上：这条线也必须串行化，不能和拖选那条同时动剪贴板。
-    // 这条路径上用户等着横条出来，不能无期限地排队 —— 最多等 600ms，
-    // 等不到就跳过（宁可这次弹条内容不完整，也不能把界面卡死）。
+    /* ① 先等「剪贴板真的变了」。
+     *
+     * ⚠ 这一段**不持剪贴板锁**：等的时候持锁会把同时进行的拖选取词整整堵住
+     *   （它也要拿同一把锁读剪贴板），用户"划一下、再按 Ctrl+C"就会互相拖。
+     *   锁只在真读的那一刻拿（下面 ②）。
+     *
+     * 为什么是"等"而不是"立刻弹 + 迟到补"：那条路的前提是"按了 Ctrl+C 就该有
+     * 反应"，代价是**没复制也会弹**。用户现在明确要求收紧 —— 宁可晚 20ms，
+     * 也不要弹一条内容对不上的横条。
+     *
+     * 窗口 500ms：主流软件把内容放进剪贴板都在几毫秒内，500ms 只是给
+     * "远程桌面 / 剪贴板管理器转一手"留的余量。真没复制到的，就什么都不弹。 */
+    const COPY_WAIT_MS: u64 = 500;
+    let deadline = std::time::Instant::now() + Duration::from_millis(COPY_WAIT_MS);
+    let mut waited = false;
+    while clip::seq() == before {
+        if std::time::Instant::now() >= deadline {
+            if waited {
+                win::log(&format!(
+                    "copy path: 等了 {COPY_WAIT_MS}ms 剪贴板序号都没变 —— 这次没有真的复制，不弹"
+                ));
+            }
+            return Got::NoCopy;
+        }
+        waited = true;
+        std::thread::sleep(Duration::from_millis(8));
+    }
+
+    // ② 复制真落地了，再拿锁读内容。这条线也必须串行化，不能和拖选那条同时动剪贴板。
+    //    读的时候不排队等太久：内容已经在剪贴板里了，正常是毫秒级。
     let _clip = {
         let deadline = std::time::Instant::now() + Duration::from_millis(600);
         loop {
@@ -1987,66 +2035,28 @@ fn read_current(before: u32) -> Got {
                 Err(std::sync::TryLockError::WouldBlock) => {
                     if std::time::Instant::now() >= deadline {
                         win::log("copy path: 剪贴板被另一条取词占着，跳过本次");
-                        return Got::Text(String::new(), false);
+                        return Got::NoCopy;
                     }
                     std::thread::sleep(Duration::from_millis(10));
                 }
             }
         }
     };
-    /* ⚡ 这里原来有一段「等剪贴板变序号」的等待窗口（最早 800ms → 收到 150ms →
-     *   上一轮为了"别拿旧内容糊弄用户"又抬到 400ms）。现在**整段去掉**。
-     *
-     * 那段时间怎么算都是亏的：
-     *   · 等到了 → 白等几十~几百毫秒（复制落地那一刻我们本来就知道了）；
-     *   · 等不到 → 把剪贴板里**现成的旧内容**当成这次的文字弹出去。用户报过
-     *     「选中文字后点引擎，搜的却是剪贴板里的东西」——就是这个兜底兜歪了；
-     *     而且横条上不显示文字，拿到了旧的也看不出来，只能等搜错才发现。
-     * 用户这轮的要求很明确：「Control+C 方式唤起的横条也需要同样加速」。
-     *
-     * 改成「**立刻弹 + 迟到补**」：
-     *   · 现在剪贴板里有什么就先当预填文字（"按了 Ctrl+C 就得有反应"）；
-     *   · 同时告诉调用方 pending=true —— 这次复制多半还在路上，由后台线程盯着
-     *     剪贴板，真落地了再把文字补进去（late_text_patch）。用户在这几十毫秒里
-     *     不可能已经点完引擎，所以补丁一定赶得上。
-     * 结果是：Ctrl+C 出手即弹（没有固定等待），文字最终也一定是对的。 */
-    let changed = clip::seq() != before;
     // 多格式读（UTF-16 → ANSI → OEM → CF_HTML）：微信这类宿主复制时
     // CF_UNICODETEXT 可能是空的，只认它会在 Ctrl+C 这条路也取不到词。
     let t = clip::read_text_any()
         .map(|t| t.trim().to_string())
         .unwrap_or_default();
 
-    if changed {
-        win::log("copy path: 读的时候复制已经落地了");
-        if !t.is_empty() {
-            return Got::Text(t, false); // 文字就是新的，不需要再补
-        }
-        if clip::has_image() && cfg_with(|c| c.ocr_enable) {
-            win::log("copy path: 剪贴板里是图片 —— 弹出「识别图片文字」横条");
-            return Got::Image;
-        }
-        win::log("copy path: 序号变了但既没文本也没图（大概是文件）");
-        return Got::Text(String::new(), false);
+    if !t.is_empty() {
+        return Got::Text(t, false); // 文字就是新的，不需要再补
     }
-
-    /* ⚠ 关键行为（用户明确要求）：**只要按了 Ctrl+C，横条就要出现** ——
-     * 哪怕当时一个字都没选中、哪怕复制还没落地。
-     *
-     * 早先的版本是「序号没变就不弹」，理由是"避免空按 Ctrl+C 也弹条"。
-     * 但那让 Ctrl+C 变成一个时灵时不灵的动作：用户明明按了、却没反应，
-     * 观感就是"这功能没实现"。现在无条件响应：
-     *   · 剪贴板里有文字 → 先预填进去，几毫秒后复制落地会再补一次；
-     *   · 没有（空剪贴板 / 复制的不是文字）→ 弹一条没有预填文字的横条，
-     *     仍然可以在上面点「⋯」输入关键词，或者点引擎搜剪贴板里现成的内容。
-     *
-     * 真正"不该弹"的情况（暂停中、前台是我们自己的窗口、命中黑/白名单）
-     * 在 trigger_allowed() 那一步就已经挡掉了，这里不用再操心。 */
-    win::log(&format!(
-        "copy path: 立刻弹（预填 {} 字），复制落地后再补",
-        t.chars().count()
-    ));
-    Got::Text(t, true)
+    if clip::has_image() && cfg_with(|c| c.ocr_enable) {
+        win::log("copy path: 剪贴板里是图片 —— 弹出「识别图片文字」横条");
+        return Got::Image;
+    }
+    win::log("copy path: 序号变了但既没文本也没图（大概是文件）");
+    Got::Text(String::new(), false)
 }
 
 /// 剪贴板 owner 是不是「按下 Ctrl+C 那一刻的前台进程」。
@@ -2344,6 +2354,10 @@ fn start_capture(target_pid: u32, drag: (i32, i32, i32, i32)) {
         .name("qs-capture".into())
         .spawn(move || {
             let _g = BusyGuard;
+            /* 取词开始时的"用户收起过几次"。三条通道（编辑控件 → UIA → OCR）
+             * 加起来可能要几百毫秒，这期间用户完全可能点了别处、按了 Esc ——
+             * 那他就不要这条了，读完也别再弹（见 DISMISS_EPOCH 的注释）。 */
+            let epoch0 = DISMISS_EPOCH.load(Ordering::SeqCst);
             /* QS_FORCE_COPY=1：**仅测试用**，走"模拟复制 + 还原"的老通道 ——
              * 用来把 UIA 通道的结果和老通道并排对比。平时永远走下面那条。 */
             let out = if std::env::var("QS_FORCE_COPY").map(|v| v == "1").unwrap_or(false) {
@@ -2386,6 +2400,22 @@ fn start_capture(target_pid: u32, drag: (i32, i32, i32, i32)) {
                 Some((t, v)) => (t, v),
                 None => (String::new(), ""),
             };
+            /* ⚠ 2026-10-23 收紧（用户报「横条会莫名其妙地出来，明明我没选中文字」）。
+             *
+             * r89 那条"取不到文字也要弹"的兜底，实际效果是**任何一次拖动**都会
+             * 弹一条空横条：拖窗口、拖滚动条、拖画布、拖文件图标……落在客户区里
+             * 全都算"划选"，三条取词通道一个都没拿到文字时照样弹（这就是用户
+             * 说的"误触也出来"）。
+             *
+             * 现在默认改成：**没拿到文字就不弹**。`bar_need_text = false` 可以把
+             * 老行为开回来（自绘界面 / 游戏的用户划词取不到词，仍然需要那条空横条
+             * 去点「识图搜索」「OCR」）。设置页在「通用 → 触发」里。 */
+            if text.trim().is_empty() && cfg_with(|c| c.bar_need_text) {
+                win::log(
+                    "start_capture: 没取到任何文字，且开着「没取到文字就不弹」—— 这次不弹",
+                );
+                return;
+            }
             /* r98：OCR 认出来的文字**经常把网址认错**（用户实测：选中的是
              * `https://github.com/xanderfrangos/twinkle-tray`，OCR 给的是
              * `nttos.'//altnuo.corrvxanaenranaos/twlnl<le-tray`），于是
@@ -2401,6 +2431,13 @@ fn start_capture(target_pid: u32, drag: (i32, i32, i32, i32)) {
              * 只在「这段文字里可能藏着网址/路径」时才动剪贴板（见
              * `exact_reread_why` 的注释），普通中文划词一个字节都不碰。 */
             let in_browser = win::uia_foreground_is_browser();
+            /* ⚠ 取词的这几百毫秒里，用户可能已经点了别处 / 按了 Esc —— 那说明
+             * 他不要这条。此时再弹出来，主观上就是「横条会莫名其妙地冒出来」
+             * （而且是在他已经去干别的之后）。作废这一次。 */
+            if DISMISS_EPOCH.load(Ordering::SeqCst) != epoch0 {
+                win::log("start_capture: 取词期间用户收了条/点了别处 —— 这一次不弹");
+                return;
+            }
             let gen = show_bar(text.clone(), false, true);
             /* ⚠ `via` 为空串 = 三条通道**全都没拿到文字**（OCR 也失败）——
              * 那也是 OCR 这条路上的失败，同样要复核：用户日志里"选中的是网址，
@@ -2886,6 +2923,68 @@ fn spawn_bar_topmost_watch() {
         .ok();
 }
 
+/// 「鼠标走远了就把横条收了」（用户 2026-10-23 要求）。
+///
+/// 用户原话：「如果横条出来之后，如果鼠标移动了很大的一个范围，那么就说明这个
+/// 横条是不会需要的，那这个时候横条就要消失」。
+///
+/// # 为什么必须在 Rust 这边做
+///
+/// 判据是**全局**指针位置。页面里只能收到"指针在横条上"的移动事件，指针跑到
+/// 窗口外面之后就一个事件都没有了 —— 前端根本不知道用户已经走到屏幕另一头。
+/// 而 Rust 这边 `win::cursor_pos()` 随时可读，也不需要装任何钩子。
+///
+/// # 判据：指针到**横条矩形**的距离
+///
+/// 不用"离弹出点多远"：横条是贴着选中的文字弹的，用户可能横跨半屏去点它（那是
+/// **要用**），而拖面板边缘缩放时指针也一定离开过窗口 —— 按"离弹出点"判都会误收。
+/// 按"离窗口矩形多远"判就干净了：指针还在窗口附近（含面板、菜单）一律不算走开，
+/// 一旦离矩形超过阈值，说明人已经去干别的了。
+///
+/// 面板开着的时候窗口本身会撑大，指针在面板里、或贴着面板边缘拖动都不会被收。
+fn spawn_bar_away_guard() {
+    const TICK_HIDDEN_MS: u64 = 250;   // 横条收着时没必要勤看
+    const TICK_SHOWN_MS: u64 = 70;     // 显示时 70ms —— 手感上跟得住手
+    std::thread::Builder::new()
+        .name("qs-baraway".into())
+        .spawn(move || loop {
+            let shown = bar_rects().is_some();
+            std::thread::sleep(Duration::from_millis(
+                if shown { TICK_SHOWN_MS } else { TICK_HIDDEN_MS },
+            ));
+            let Some((outer, _)) = bar_rects() else { continue };
+            let away = cfg_with(|cf| cf.bar_away_px);
+            if away <= 0 {
+                continue;   // 用户把这条关了
+            }
+            let c = win::cursor_pos();
+            // 指针到矩形的最短距离（在矩形内 / 贴边 = 0）
+            let dx = if c.x < outer.0 {
+                (outer.0 - c.x) as i64
+            } else if c.x > outer.2 {
+                (c.x - outer.2) as i64
+            } else {
+                0
+            };
+            let dy = if c.y < outer.1 {
+                (outer.1 - c.y) as i64
+            } else if c.y > outer.3 {
+                (c.y - outer.3) as i64
+            } else {
+                0
+            };
+            let d2 = dx * dx + dy * dy;
+            if d2 > (away as i64) * (away as i64) {
+                win::log(&format!(
+                    "bar-away: 指针离横条 {:.0}px，超过 {away}px —— 收起横条",
+                    (d2 as f64).sqrt()
+                ));
+                dismiss_bar();
+            }
+        })
+        .ok();
+}
+
 /// 收藏面板「钉在屏幕上」：钉住期间**点击面板外面不收起**（面板要留在屏幕上）。
 /// 用户要求：面板能自己拖动位置、并且能钉住不被别的点击带走。
 static FAV_PINNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -3151,24 +3250,32 @@ fn spawn_detector() {
                             if !trigger_allowed(None) {
                                 continue;
                             }
-                            win::log("copy path: 收到 Ctrl+C，立刻弹条（不等剪贴板）");
-                            // 「立刻弹 + 迟到补」（见 read_current）：
-                            //   · 先按剪贴板里现成的内容弹出来，用户零等待；
-                            //   · pending=true 时挂一个后台补丁，复制真落地了再把文字补上。
+                            win::log("copy path: 收到 Ctrl+C，等剪贴板真的变了再弹");
                             // 归属校验要用**按 Ctrl+C 那一刻**的前台进程 —— 补丁跑起来时
                             // 用户可能已经点到横条上了，那时前台是我们自己。
                             let fg_pid = win::window_pid(win::foreground_window());
                             std::thread::spawn(move || match read_current(seq0) {
                                 // Ctrl+C 这条路贴鼠标：这条路没有可靠的「文字在哪」，
                                 // 而且此刻用户的手就在鼠标和键盘之间，贴鼠标最顺手。
-                                // t 可能是空串（没选中文字）—— 照样弹，见 read_current。
                                 Got::Text(t, pending) => {
+                                    /* 复制落地了但一个字都没有（剪的是文件之类）——
+                                     * 横条上没有可搜的东西，弹出来只是打扰。按
+                                     * `barNeedText` 决定：默认不弹。 */
+                                    if t.is_empty() && cfg_with(|c| c.bar_need_text) {
+                                        win::log(
+                                            "copy path: 复制到的是文件/空内容，没有文字 —— 不弹",
+                                        );
+                                        return;
+                                    }
                                     let gen = show_bar(t, true, true);
                                     if pending {
                                         late_text_patch(seq0, gen, fg_pid);
                                     }
                                 }
                                 Got::Image => show_ocr_only_bar(),
+                                // 序号一直没变 = 这次 Ctrl+C 没真的复制任何东西
+                                // （终端里是 SIGINT、对话框里是空选区、手滑碰一下…）。
+                                Got::NoCopy => {}
                             });
                         }
                     }
@@ -3313,6 +3420,11 @@ fn config_view() -> Value {
         "barBlur": cfg.bar_blur,
         "anchorAtMouse": cfg.anchor_at_mouse,
         "delayMs": cfg.delay_ms,
+        // 2026-10-23：横条自己收起来的两条阈值（见 config.rs 对应字段的注释）。
+        "barIdleSec": cfg.bar_idle_sec,
+        "barAwayPx": cfg.bar_away_px,
+        // 没取到文字就不弹（默认开）—— 误触乱弹的主要来源。
+        "barNeedText": cfg.bar_need_text,
         "filterMode": cfg.filter_mode,
         "filterList": cfg.filter_list,
         "ocrEnable": cfg.ocr_enable,
@@ -3478,6 +3590,11 @@ fn apply_view(v: &Value, cfg: &mut config::Config) {
     if let Some(x) = n("barBlur") { cfg.bar_blur = x.clamp(0, 32) as u32; }
     if let Some(x) = b("anchorAtMouse") { cfg.anchor_at_mouse = x; }
     if let Some(x) = n("delayMs") { cfg.delay_ms = x.clamp(0, 5000) as u32; }
+    /* 恢复备份：老备份里没有这三个键 → 保持当前默认值（不要硬写 0，
+     * 那等于把"自动收起"给用户关掉了）。 */
+    if let Some(x) = n("barIdleSec") { cfg.bar_idle_sec = x.clamp(0, 300) as u32; }
+    if let Some(x) = n("barAwayPx") { cfg.bar_away_px = x.clamp(0, 4000) as i32; }
+    if let Some(x) = b("barNeedText") { cfg.bar_need_text = x; }
     if let Some(x) = s("filterMode") {
         cfg.filter_mode = match x.as_str() {
             "blacklist" | "whitelist" => x,
@@ -3780,6 +3897,15 @@ fn apply_one_setting(cfg: &mut config::Config, key: &str, value: Value) -> Resul
     match key {
         "triggerSelect" => cfg.trigger_select = value.as_bool().unwrap_or(true),
         "triggerCopy" => cfg.trigger_copy = value.as_bool().unwrap_or(false),
+        /* 2026-10-23：横条"自己收起来"的两条阈值 + 误弹开关。
+         * 数值一律夹在合法区间（界面是滑块，但 IPC 也可能来自探针/手改配置）。 */
+        "barIdleSec" => {
+            cfg.bar_idle_sec = value.as_u64().unwrap_or(5).min(300) as u32
+        }
+        "barAwayPx" => {
+            cfg.bar_away_px = value.as_i64().unwrap_or(400).clamp(0, 4000) as i32
+        }
+        "barNeedText" => cfg.bar_need_text = value.as_bool().unwrap_or(true),
         // 收藏夹整树（设置页本地编辑完一次性写回）
         "favorites" => {
             if let Ok(f) = serde_json::from_value::<Vec<config::FavGroup>>(value.clone()) {
@@ -13938,6 +14064,8 @@ fn main() {
                 spawn_detector();
                 spawn_rbutton_watch();
                 spawn_bar_topmost_watch();
+                // 2026-10-23：鼠标走远了自动收起（"这个横条我不会要了"）
+                spawn_bar_away_guard();
                 // r75：设置窗关掉一段时间后真正销毁（回收那 200~300MB）
                 spawn_settings_reaper();
                 // 后台先把 UIA 热起来：第一次调用要加载 UIAutomationCore、
@@ -16073,6 +16201,10 @@ mod tests {
         c.bar_blur = 12;
         c.anchor_at_mouse = true;
         c.delay_ms = 321;
+        // 2026-10-23：横条自己收起来的两条阈值 + 误弹开关，也得跟着备份走
+        c.bar_idle_sec = 9;
+        c.bar_away_px = 260;
+        c.bar_need_text = false;
         c.filter_mode = "whitelist".to_string();
         c.filter_list = vec!["notepad.exe".into(), "mspaint.exe".into()];
         // —— 文字识别 API ——
@@ -16396,6 +16528,9 @@ mod tests {
         assert_eq!(dst.bar_blur, 12);
         assert!(dst.anchor_at_mouse);
         assert_eq!(dst.delay_ms, 321);
+        assert_eq!(dst.bar_idle_sec, 9, "「无操作收起」的秒数没还原");
+        assert_eq!(dst.bar_away_px, 260, "「鼠标移远收起」的像素没还原");
+        assert!(!dst.bar_need_text, "「没取到文字就不弹」没还原");
         assert_eq!(dst.filter_mode, "whitelist");
         assert_eq!(dst.filter_list, vec!["notepad.exe", "mspaint.exe"]);
         // 文字识别 API

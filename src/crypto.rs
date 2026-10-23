@@ -210,9 +210,12 @@ fn derive_key(password: &str, salt: &[u8], m_kib: u32, t: u32, p: u32) -> Result
 ///
 ///   ⚠ 比对的是**密码原文**：用户一改密码立刻失效、重新派生 + 换盐，
 ///     绝不会拿旧密钥去加密新密码的内容。
-static KEY_CACHE: std::sync::OnceLock<
-    std::sync::Mutex<Option<(String, [u8; SALT_LEN], [u8; 32])>>,
-> = std::sync::OnceLock::new();
+///
+/// （缓存条目 = (密码, 盐, 密钥)。抽成别名只是为了别让 clippy 把这一长串
+///   类型当成"过于复杂"—— `type_complexity` 纯外观，不影响任何行为。）
+type KeyCacheEntry = Option<(String, [u8; SALT_LEN], [u8; 32])>;
+static KEY_CACHE: std::sync::OnceLock<std::sync::Mutex<KeyCacheEntry>> =
+    std::sync::OnceLock::new();
 
 /// 取（或派生并缓存）当前密码对应的盐与密钥。
 fn cached_key(password: &str) -> Result<([u8; SALT_LEN], [u8; 32]), String> {

@@ -324,6 +324,83 @@ async function testSettings() {
 
     // ---- 基础：脚本没在半路抛异常，页面被真的渲染过 ----
     ok('启动后没有把面板渲染成空白', $('barList').children.length > 0);
+
+    /* ---- 分栏结构（2026-10-23：外观 / 范围 / 抠图 从「通用」拆了出来） ----
+     * 用户原话：「关于横条的外观的相关设置，你要单独列一栏来设置，现在是放在
+     * 通用里面，这不好。还有黑名单、白名单也是这样。Ai 抠图也是。」
+     * 这里钉住三件事：新分栏存在、卡片真的在它里面、通用里不再有那几张卡片。 */
+    {
+        const paneOf = (name) => w.document.querySelector('.pane[data-pane="' + name + '"]');
+        const tabs = [...w.document.querySelectorAll('#tabs button')].map((b) => b.dataset.tab);
+        ok('侧栏有「外观 / 范围 / 抠图」三栏',
+            ['look', 'scope', 'matte'].every((t) => tabs.includes(t)), tabs.join('/'));
+        ok('  三个新分栏的容器都在、且默认收起',
+            ['look', 'scope', 'matte'].every((t) => paneOf(t) && paneOf(t).hidden));
+        ok('  通用里不再有「横条外观」卡片',
+            !paneOf('general').textContent.includes('横条外观'));
+        ok('  通用里不再有「应用范围」卡片',
+            !paneOf('general').textContent.includes('应用范围'));
+        ok('  通用里不再有「AI 抠图」卡片',
+            !paneOf('general').textContent.includes('AI 抠图'));
+        ok('  外观栏里有「横条外观」+ 预览',
+            paneOf('look').textContent.includes('横条外观')
+            && paneOf('look').textContent.includes('预览'));
+        ok('  范围栏里有黑白名单（应用范围）',
+            paneOf('scope').textContent.includes('应用范围'));
+        ok('  抠图栏里有 AI 抠图',
+            paneOf('matte').textContent.includes('AI 抠图'));
+        // 点 tab 能切过去（bindTabs 只认 data-pane，不写死分栏名）
+        w.document.querySelector('#tabs button[data-tab="look"]')
+            .dispatchEvent(new w.Event('click', { bubbles: true }));
+        await flush();
+        ok('  点「外观」真的切到外观页（通用同时收起）',
+            !paneOf('look').hidden && paneOf('general').hidden);
+        w.document.querySelector('#tabs button[data-tab="general"]')
+            .dispatchEvent(new w.Event('click', { bubbles: true }));
+        await flush();
+    }
+
+    /* ---- 2026-10-23 三个新设置项：控件在、落盘键名对 ----
+     * 它们分别控制「没取到文字就不弹」「几秒无操作收起」「鼠标移远就收起」。 */
+    {
+        ok('「没取到文字就不弹」开关在通用页', !!$('s-barNeedText'));
+        eq('  默认开（老配置里没有这个键 → 按 true 画）', $('s-barNeedText').checked, true);
+        env.calls.length = 0;
+        $('s-barNeedText').checked = false;
+        $('s-barNeedText').dispatchEvent(new w.Event('change', { bubbles: true }));
+        const c1 = env.lastCmd('set_setting');
+        ok('  关掉它写的是 barNeedText',
+            !!c1 && c1.args.key === 'barNeedText' && c1.args.value === false,
+            c1 && JSON.stringify(c1.args));
+
+        ok('「无操作自动收起」滑块在通用页', !!$('s-barIdle'));
+        eq('  默认 5 秒', $('s-barIdle').value, '5');
+        env.calls.length = 0;
+        $('s-barIdle').value = '12';
+        $('s-barIdle').dispatchEvent(new w.Event('input', { bubbles: true }));
+        eq('  拖动时数值标签跟着走', $('s-barIdleVal').textContent, '12 秒');
+        $('s-barIdle').dispatchEvent(new w.Event('change', { bubbles: true }));
+        const c2 = env.lastCmd('set_setting');
+        ok('  落盘键名 barIdleSec、值是数字',
+            !!c2 && c2.args.key === 'barIdleSec' && c2.args.value === 12,
+            c2 && JSON.stringify(c2.args));
+
+        ok('「鼠标移远就收起」滑块在通用页', !!$('s-barAway'));
+        eq('  默认 400 px', $('s-barAway').value, '400');
+        env.calls.length = 0;
+        $('s-barAway').value = '0';
+        $('s-barAway').dispatchEvent(new w.Event('input', { bubbles: true }));
+        eq('  0 要显示成「不收起」（写 0 px 会被当成"立刻收"）',
+            $('s-barAwayVal').textContent, '不收起');
+        $('s-barAway').dispatchEvent(new w.Event('change', { bubbles: true }));
+        const c3 = env.lastCmd('set_setting');
+        ok('  落盘键名 barAwayPx', !!c3 && c3.args.key === 'barAwayPx',
+            c3 && JSON.stringify(c3.args));
+        // 复位，后面那些用例还要按默认值算
+        env.pushConfig(baseConf());
+        await flush();
+    }
+
     // 横条真成员 = 排得进 barList 的引擎（不含「＋ 把 OCR 加进横条」那种 .add-row 入口行）。
     const barItems = () => [...$('barList').querySelectorAll('.item:not(.add-row)')];
     eq('横条真成员渲染出 7 行（不含 .add-row 入口行）', barItems().length, 7);

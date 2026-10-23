@@ -2660,6 +2660,8 @@ function renderAiList() {
 const SWITCHES = [
     ['s-triggerSelect', 'triggerSelect'],
     ['s-triggerCopy', 'triggerCopy'],
+    // 2026-10-23：没取到文字就不弹（误触乱弹的主要来源，默认开）
+    ['s-barNeedText', 'barNeedText'],
     ['s-anchorAtMouse', 'anchorAtMouse'],
     ['s-autoStart', 'autoStart'],
     ['s-autoElevate', 'autoElevate'],
@@ -2716,6 +2718,8 @@ const SWITCH_DEFAULT = {
     ocrCleanUnwrap: false,
     triggerSelect: true,
     triggerCopy: true,
+    // 2026-10-23：没取到文字就不弹（与 config.rs 的 serde 默认值一致）
+    barNeedText: true,
     anchorAtMouse: false,
     autoStart: false,
     autoElevate: true,
@@ -3005,6 +3009,9 @@ const SLIDERS = [
     ['s-alpha', 's-alphaVal', 'alpha', 100],
     ['s-barDimAlpha', 's-barDimAlphaVal', 'barDimAlpha', 45],
     ['s-delay', 's-delayVal', 'delayMs', 0],
+    // 2026-10-23：横条自己收起来的两条阈值（0 = 不收起）
+    ['s-barIdle', 's-barIdleVal', 'barIdleSec', 5],
+    ['s-barAway', 's-barAwayVal', 'barAwayPx', 400],
     ['s-barBlur', 's-barBlurVal', 'barBlur', 0],
     // 液态玻璃一组（单位见 SLIDER_LABEL：折射/厚度是‰，磨砂是 px）
     // 缺省值与 GLASS_PRESETS 的 standard 档一致（#133）
@@ -3024,6 +3031,10 @@ const PREVIEW_KEYS = new Set(['iconSize', 'barPadding', 'itemRadius', 'alpha', '
 /** 滑块的"数值标签"用不同方式显示：barBlur 的 0 是「关」，要写"关"不要写"0"。 */
 const SLIDER_LABEL = {
     barBlur: (v) => (v === 0 ? '关' : qsBlurPx(v) + ' px'),
+    /* 「无操作收起 / 鼠标移远收起」：0 是"不收起"，写成 0 秒 / 0 px 会让人
+     * 以为"立刻收"，必须显式说出来。 */
+    barIdleSec: (v) => (Number(v) === 0 ? '不收起' : v + ' 秒'),
+    barAwayPx: (v) => (Number(v) === 0 ? '不收起' : v + ' px'),
     barGlassFrost: (v) => (v === 0 ? '关' : v + ' px'),
     barGlassRefraction: (v) => v + ' ‰',
     barGlassBevel: (v) => v + ' ‰',
@@ -6618,6 +6629,14 @@ function webviewLabel() {
  *  但日志内容没跟着走）。现在**每条都写死自己的版本号**，
  *  发新版时**同时**加一条，对不上就是漏了。 */
 const CHANGELOG = [
+    {
+        ver: 'v1.5.0',
+        items: [
+            '<b>修：横条会「莫名其妙地冒出来」（这版的主修）</b> —— 你报的：「有时候横条会莫名其妙的出来，明明我只设置两种出来的方式」。查下来是三处兜底在乱弹：① 以前<b>只要按了 Ctrl+C 就弹</b>，于是 Ctrl+C 在终端里是「中断」、在对话框里是「复制一个空选区」、手滑碰一下……都会弹出一条装着<b>上一次剪贴板内容</b>的横条。现在会先等剪贴板<b>真的变了</b>（最多等 0.5 秒，落地即弹）才弹；② 拖选那条路以前<b>取不到文字也弹</b>（r89"任何情况都要弹"的兜底），于是拖窗口、拖滚动条、拖画布、拖文件都会被当成划选，弹一条空横条。现在<b>没拿到文字就不弹</b>，这条可以在「通用 → 触发 → 没取到文字就不弹」里关掉；③ 取词慢的时候（要试三条通道，几百毫秒），你在这中间点了别处或按了 Esc，它读完<b>照样会弹出来</b>。现在这种情况直接作废。',
+            '<b>新增：横条会自己收起来了</b> —— 你要的两条：<b>「鼠标移远就收起」</b>（指针离弹出位置超过 400px，说明这条你不要了，立刻收起）和<b>「无操作自动收起」</b>（弹出后 5 秒没有任何操作就消失）。两个数都能在「通用 → 触发」里用滑块调，<b>0 = 不收起</b>。指针正搁在横条上不动、或者「更多引擎」面板/右键菜单开着的时候<b>不算"没操作"</b>—— 你正指着要点的东西，不能给你收走。',
+            '<b>设置页重新分栏</b> —— 你的原话：「关于横条的外观的相关设置，你要单独列一栏来设置，现在是放在通用里面，这不好。还有黑名单、白名单也是这样。Ai 抠图也是。」现在拆成：<b>外观</b>（横条样式 / 玻璃 / 图标大小 / 内边距 / 不透明度 / 动画 + 实时预览）、<b>范围</b>（黑名单 / 白名单）、<b>抠图</b>（AI 抠图与模型下载）。<b>通用</b>只剩触发（含上面两个新滑块）、界面主题、系统。',
+        ],
+    },
     {
         ver: 'v1.4.4',
         items: [

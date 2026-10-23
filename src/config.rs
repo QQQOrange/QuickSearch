@@ -798,6 +798,35 @@ pub struct Config {
     /// 松手之后等多少毫秒才弹横条（0 = 立刻弹）。
     /// 调大一点可以避开「手还在拖就已经弹出来」的观感。
     pub delay_ms: u32,
+    /// 横条弹出后，多少秒没有任何操作就自己收起来（0 = 不收）。
+    ///
+    /// 用户 2026-10-23 原话：「还要给横条有一个时间逻辑，比如说横条出来了 5 秒，
+    /// 但 5 秒没有任何的操作，那么就消失，这个时间逻辑在设置当中可调」。
+    ///
+    /// 判定在前端（`ui/bar.js`）：横条弹出、且**没打开面板/菜单**时开始计时，
+    /// 指针移进横条、点击、按键、滚轮都会重置。只在横条那一排图标上生效 ——
+    /// 用户打开「更多引擎」面板正在翻目录，那显然不算"没有任何操作"。
+    #[serde(default = "default_bar_idle_sec")]
+    pub bar_idle_sec: u32,
+    /// 横条弹出后，鼠标离**弹出位置**超过多少像素就收起来（0 = 不收）。
+    ///
+    /// 用户原话：「如果横条出来之后，如果鼠标移动了很大的一个范围，那么就说明
+    /// 这个横条是不会需要的，那这个时候横条就要消失」。
+    ///
+    /// 判定在 Rust（`bar_away_guard`）：只有全局钩子/轮询才看得见横条外面的
+    /// 指针，页面里收不到那些事件。指针贴着横条时会把"基准点"跟着挪过去，
+    /// 所以"从远处移向横条"不会被误判成"走开了"。
+    #[serde(default = "default_bar_away_px")]
+    pub bar_away_px: i32,
+    /// 没取到任何文字时**不弹**横条（默认开）。
+    ///
+    /// 这是"误触乱弹"的主要来源：拖窗口 / 拖滚动条 / 拖画布都会触发一次
+    /// `mouseup` 取词，三条通道全失败时老版本照样弹一条**空横条**
+    /// （r89 为"任何情况都要弹"加的兜底）。现在默认收紧：没文字就不弹。
+    /// 真遇到自绘界面（游戏、部分 Electron / Qt 程序）划词取不到词的用户，
+    /// 可以在设置里把这个开关关掉，回到"无论如何都弹"。
+    #[serde(default = "default_true")]
+    pub bar_need_text: bool,
     /// 生效范围："off" = 全部软件；"blacklist" = 列出的软件里不弹；
     /// "whitelist" = 只在列出的软件里弹。
     pub filter_mode: String,
@@ -1129,6 +1158,9 @@ impl Default for Config {
             fav_panel_sizes: std::collections::BTreeMap::new(),
             auto_elevate: true,
             delay_ms: 0,
+            bar_idle_sec: default_bar_idle_sec(),
+            bar_away_px: default_bar_away_px(),
+            bar_need_text: true,
             filter_mode: "off".to_string(),
             filter_list: Vec::new(),
             ocr_enable: true,
@@ -1990,9 +2022,20 @@ fn default_dim_alpha() -> u32 {
 }
 
 /// 新增的布尔开关默认值（老配置里没有这个键时取 `true`）。
-/// 目前只有 `ocr_stay_default` / `img_enable` / `img_add_to_bar` 用它。
+/// 目前只有 `ocr_stay_default` / `img_enable` / `img_add_to_bar` / `bar_need_text` 用它。
 fn default_true() -> bool {
     true
+}
+
+/// 横条无操作自动收起的默认秒数（5 秒 —— 用户指定的那个数）。
+fn default_bar_idle_sec() -> u32 {
+    5
+}
+
+/// 鼠标离开多远自动收起的默认像素（400 —— 大约是 1080p 屏宽的 1/5，够区分
+/// "顺手挪一下"和"人已经去干别的了"）。
+fn default_bar_away_px() -> i32 {
+    400
 }
 
 /// 识图多选名单的默认值：两家**框选完直接出结果**的真上传引擎
@@ -2232,6 +2275,25 @@ pub(crate) fn sanitize(mut c: Config) -> Config {
         crate::win::log(&format!(
             "config: 最近使用名单里 {pruned_recent} 个引擎已不存在，已清理"
         ));
+    }
+    /* 横条自动收起的两条阈值（2026-10-23）：手改配置文件 / 老备份恢复进来的
+     * 值可能离谱（`bar_idle_sec: 99999` = 永远不收；`bar_away_px: 3` = 一动就没）。
+     * 界面上是滑块，但配置文件是明文可编辑的，读的时候还得夹一道。
+     *   · 0 一律保留 —— 那是"关掉这条"的合法值；
+     *   · 秒数上限 300（5 分钟），像素上限 4000（够大屏）。 */
+    if c.bar_idle_sec > 300 {
+        crate::win::log(&format!(
+            "config: 无操作收起 {} 秒太离谱，夹到 300 秒",
+            c.bar_idle_sec
+        ));
+        c.bar_idle_sec = 300;
+    }
+    if !(0..=4000).contains(&c.bar_away_px) {
+        crate::win::log(&format!(
+            "config: 鼠标远离阈值 {} px 不合法，夹到 400 px",
+            c.bar_away_px
+        ));
+        c.bar_away_px = default_bar_away_px();
     }
     c
 }
@@ -4553,6 +4615,39 @@ mod sanitize_tests {
             cfg.recent_engines,
             vec!["不存在的引擎".to_string(), "百度".to_string()],
             "不认识的名字也要留着（前端查不到会跳过，但后端不许删用户的使用记录）"
+        );
+    }
+
+    /// 2026-10-23：横条「自己收起来」两条阈值的读入归一。
+    ///
+    /// 配置文件是明文可编辑的，也可能是老版本/别的机器恢复过来的 ——
+    /// `bar_idle_sec: 99999`（永远不收）和 `bar_away_px: -20`（一动就收）都得夹回去；
+    /// 而 **0 是"关掉这条"的合法值**，不能被当成非法值改回默认。
+    #[test]
+    fn sanitize_clamps_bar_auto_hide_thresholds() {
+        let _serial = big_lock();
+        let c = Config::default();
+        assert_eq!(
+            (c.bar_idle_sec, c.bar_away_px, c.bar_need_text),
+            (5, 400, true),
+            "默认值：5 秒无操作收起 / 鼠标移远 400px 收起 / 没取到文字不弹"
+        );
+
+        let mut bad = Config::default();
+        bad.bar_idle_sec = 99_999;
+        bad.bar_away_px = -20;
+        let bad = sanitize(bad);
+        assert_eq!(bad.bar_idle_sec, 300, "离谱的秒数要夹到 300");
+        assert_eq!(bad.bar_away_px, 400, "负数要回到默认值");
+
+        let mut off = Config::default();
+        off.bar_idle_sec = 0;
+        off.bar_away_px = 0;
+        let off = sanitize(off);
+        assert_eq!(
+            (off.bar_idle_sec, off.bar_away_px),
+            (0, 0),
+            "0 = 不收起，是合法值，不能夹掉"
         );
     }
 }
