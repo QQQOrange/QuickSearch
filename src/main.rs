@@ -13320,29 +13320,120 @@ fn refresh_tray(a: &AppHandle) {
     }
 }
 
+/* ---------------- 托盘图标：双击打开设置 ---------------- */
+/* 用户 2026-10-23 原话：「添加一个逻辑，双击托盘上的图标，打开设置」。
+ *
+ * # 为什么不只等 `TrayIconEvent::DoubleClick`
+ *
+ *   tray-icon 0.25 给托盘消息窗注册的窗口类**没有 CS_DBLCLKS**
+ *   （WNDCLASSW 是 `..zeroed()` 出来的，style = 0）。而 WM_LBUTTONDBLCLK 是
+ *   系统按**窗口类样式**决定发不发的消息 —— 没这一位，原生双击事件在 Windows
+ *   上很可能一次都不会来。只写那一条分支的话，表现就是"双击毫无反应"，
+ *   而且没有任何日志（事件根本没到）。
+ *
+ *   所以两条路都留着：
+ *     · 原生 `DoubleClick` 来了就开（将来 tray-icon 补了样式也一样对）；
+ *     · 没来就按「两次左键抬起落在系统双击时限内」自己判一次
+ *       （时限取 GetDoubleClickTime，用户改过双击速度也跟得上）。
+ *
+ * # 单击不再打开设置
+ *
+ *   托盘就在时钟旁边，误点一下弹出一个设置窗太容易了（用户对"误触发"
+ *   一向敏感，本版前半段修的就是这个）。现在进设置只有两条**明确**的路：
+ *   **双击图标**，或右键菜单里的「设置…」。
+ *
+ *   ⚠ 早先加"左键单击＝设置"是为了留一条**不依赖右键菜单**的入口（主线程被
+ *     建窗死锁卡住时右键菜单弹不出来）。这条兜底现在由双击承担 —— 它同样
+ *     脱开事件栈、在后台线程建窗，和菜单那条路完全独立。
+ */
+static TRAY_LAST_UP: std::sync::Mutex<Option<std::time::Instant>> =
+    std::sync::Mutex::new(None);
+static TRAY_LAST_OPEN: std::sync::Mutex<Option<std::time::Instant>> =
+    std::sync::Mutex::new(None);
+
+/// 纯判定：上一次左键抬起在 `limit` 之内 → 这一次算双击。
+///
+/// 抽成纯函数只是为了**能单测**：真机上的托盘点击没法在测试里复现，
+/// 而这段的边界（第一次不算、超时不算）恰恰是最容易写错的地方。
+fn tray_double_click_at(
+    prev: Option<std::time::Instant>,
+    now: std::time::Instant,
+    limit: Duration,
+) -> bool {
+    matches!(prev, Some(t) if now.duration_since(t) <= limit)
+}
+
+/// 记一次左键抬起，返回「这一次构成双击吗」。
+fn tray_is_double_click() -> bool {
+    let now = std::time::Instant::now();
+    let limit = Duration::from_millis(win::double_click_ms() as u64);
+    let mut g = match TRAY_LAST_UP.lock() {
+        Ok(g) => g,
+        Err(e) => e.into_inner(),
+    };
+    let dbl = tray_double_click_at(*g, now, limit);
+    /* 留一行日志：双击这种手势最怕"没反应且查不到"。事件到底有没有到、
+     * 判成了单击还是双击，翻日志一眼就知道（只在点托盘时才会打，不刷屏）。 */
+    win::log(&format!(
+        "tray: 左键抬起（时限 {}ms）→ {}",
+        limit.as_millis(),
+        if dbl { "判为双击，开设置" } else { "单击，不动作" }
+    ));
+    /* 成对即消耗：连点三下应该是「一次双击 + 一次新的开始」，不能算成两次双击
+     * （否则连点几下会反复去建窗）。 */
+    *g = if dbl { None } else { Some(now) };
+    dbl
+}
+
+/// 打开设置窗口。同一个手势可能被两条路各触发一次（原生 DBLCLK + 自己判的），
+/// 500ms 内只放一次 —— 那点时间里建两次窗纯属给自己添乱。
+fn tray_open_settings() {
+    let now = std::time::Instant::now();
+    {
+        let mut g = match TRAY_LAST_OPEN.lock() {
+            Ok(g) => g,
+            Err(e) => e.into_inner(),
+        };
+        if matches!(*g, Some(t) if now.duration_since(t) < Duration::from_millis(500)) {
+            return;
+        }
+        *g = Some(now);
+    }
+    // 脱开事件回调栈建窗（同 open_settings 的理由：主线程里就地 build 会死锁）
+    let _ = std::thread::spawn(|| open_settings_win(None, None));
+}
+
 fn build_tray(a: &AppHandle) -> tauri::Result<()> {
     let menu = tray_menu(a)?;
     let icon = tauri::image::Image::from_bytes(TRAY_ICON)?;
 
     TrayIconBuilder::with_id("qs-tray")
         .icon(icon)
-        .tooltip("Quick Search —— 选中文字即可搜索（左键点图标＝打开设置）")
+        .tooltip("Quick Search —— 选中文字即可搜索（双击图标＝设置，右键＝菜单）")
         .menu(&menu)
         .show_menu_on_left_click(false)
-        // 左键点图标 = 打开设置窗口。
-        //   以前左键**什么都不做**（菜单只在右键弹），一旦右键菜单因为任何原因
-        //   弹不出来（比如主线程被建窗死锁卡住，见 open_settings 的注释），
-        //   用户就彻底进不去设置 —— 留一个可靠入口。
+        /* 双击图标 = 打开设置窗口（2026-10-23 用户要求）。
+         *
+         * 为什么要自己判双击、为什么不响应单击：见上面 TRAY_LAST_UP 那段注释。
+         * 一句话：这个窗口类没有 CS_DBLCLKS，原生的 DoubleClick 可能永远不来，
+         * 所以「两次左键抬起在双击时限内」这条自己兜；单击则故意什么都不做 ——
+         * 托盘挨着时钟，误点一下就弹出设置窗的体验很差。 */
         .on_tray_icon_event(|_tray, event| {
             use tauri::tray::{MouseButton, MouseButtonState, TrayIconEvent};
-            if let TrayIconEvent::Click {
-                button: MouseButton::Left,
-                button_state: MouseButtonState::Up,
-                ..
-            } = event
-            {
-                // 脱开事件回调栈建窗（同 open_settings 的理由）
-                let _ = std::thread::spawn(|| open_settings_win(None, None));
+            match event {
+                TrayIconEvent::DoubleClick {
+                    button: MouseButton::Left,
+                    ..
+                } => tray_open_settings(),
+                /* 每一次左键抬起都记一笔；**两次落在系统双击时限内**才当成双击。
+                 * 判定写成 match guard（clippy 的 collapsible_match 也是这个意思）：
+                 * 它只在"左键抬起"匹配上之后才求值，正好是一次点击一次判定。 */
+                TrayIconEvent::Click {
+                    button: MouseButton::Left,
+                    button_state: MouseButtonState::Up,
+                    ..
+                } if tray_is_double_click() => tray_open_settings(),
+                _ => {}
             }
         })
         .on_menu_event(|a, e| match e.id().as_ref() {
@@ -14275,6 +14366,34 @@ mod tests {
 
     fn empty_cfg() -> config::Config {
         config::Config::default()
+    }
+
+    /// 托盘「双击打开设置」的判定（2026-10-23 用户要求）。
+    ///
+    /// 为什么要单测这段：真机上的托盘点击没法在测试里复现，而这里的边界
+    /// （第一次点不算、隔太久不算、连点三下算"双击 + 新开始"）恰恰最容易写错，
+    /// 写错的症状是"双击没反应"或"连点几下弹好几次窗"，都得靠人肉点才会发现。
+    #[test]
+    fn tray_double_click_window() {
+        let limit = Duration::from_millis(500);
+        let t0 = std::time::Instant::now();
+        // 第一次：没有"上一次"，绝不算双击（否则单击就弹设置，正是要避免的）
+        assert!(!tray_double_click_at(None, t0, limit), "第一次点击不能算双击");
+        // 时限内第二次：算
+        assert!(tray_double_click_at(Some(t0), t0 + Duration::from_millis(120), limit));
+        // 正好卡在边界上也算（用 <=，和系统行为一致）
+        assert!(tray_double_click_at(Some(t0), t0 + limit, limit));
+        // 超过时限：两次独立的单击
+        assert!(
+            !tray_double_click_at(Some(t0), t0 + Duration::from_millis(501), limit),
+            "超过系统双击时限就该当两次单击"
+        );
+        // 用户把双击速度调慢（900ms）时也要认 —— 时限是从系统读的，不是写死的
+        assert!(tray_double_click_at(
+            Some(t0),
+            t0 + Duration::from_millis(800),
+            Duration::from_millis(900)
+        ));
     }
 
     /// **横条圆角与图标外框圆角必须同心**（用户报的"外框圆角和横条不一致"）。

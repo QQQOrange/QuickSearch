@@ -38,7 +38,8 @@ use windows::Win32::System::Registry::{
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
+    GetAsyncKeyState, GetDoubleClickTime, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
+    KEYEVENTF_KEYUP,
     KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_CONTROL, VK_C, VK_V, VK_MENU, VK_RBUTTON, VK_RETURN,
     VK_SHIFT,
     VK_LWIN, VK_RWIN, VK_TAB, VK_ESCAPE, VK_SPACE, VK_BACK, VK_DELETE, VK_INSERT, VK_HOME, VK_END,
@@ -526,6 +527,17 @@ pub fn mem_stats() -> (u64, u64, u32, u32, u32) {
             user,
         )
     }
+}
+
+/// 系统的「双击间隔」上限（毫秒）—— 用户在鼠标设置里可以把它调到 200~900ms。
+///
+/// 用途：托盘图标自己判双击（见 main.rs 的 `tray_is_double_click`）。
+/// 写死 300/500 都不合适：手快的人 200ms 就够了，手慢的人调到了 900ms，
+/// 写死就会变成"我明明双击了却没反应"。
+pub fn double_click_ms() -> u32 {
+    let v = unsafe { GetDoubleClickTime() };
+    // 极端配置兜一下：0 会让任何两次点击都判不成双击；5000 又太离谱。
+    v.clamp(200, 1000)
 }
 
 pub fn cursor_pos() -> POINT {
