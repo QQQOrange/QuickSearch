@@ -3512,3 +3512,47 @@ body.fav-item-dragging * { cursor: grabbing !important; }
     max-width: 100%; max-height: 260px; display: block;
 }
 .ai-cut .ap-meta { font-size: 11.5px; opacity: .7; margin-top: 6px; line-height: 1.55; }
+
+/* ------------------------------------------------------------------ */
+/* 宽窗口自适应（2026-10-23）                                          */
+/* ------------------------------------------------------------------ */
+/* 用户原话：「要是窗口放到最大之后，右边基本全是空的，这点要修」。
+ *
+ * 实测（Edge 无头 + CDP，1920 宽）：
+ *   卡片被拉到 1716px，而一行里「文字块 506 + 开关 40」只占 546px，
+ *   `.row { justify-content: space-between }` 把开关推到 x=1845 ——
+ *   **中间 1136px 全空**。窗口越宽越离谱（2560 宽时空 1776px）。
+ *
+ * 这不是"某一行没写好"，是"内容列没有上限"的必然结果。两条一起改：
+ *
+ *   ① 内容列有上限并居中。任何窗口尺寸下都是一个正常宽度的设置页，
+ *      不会越拉越散；居中之后左右留白对称，看着是"版面"，不是"没画完"。
+ *   ② 窗口够宽（≥1300）时，**多卡片的分栏排成两列**，把宽度真正用起来 ——
+ *      而不是靠拉长每一行的空白去填。
+ *      只有一个卡片的分栏（帮助 / 关于 / 范围 / 抠图 …）仍然整宽铺开，
+ *      否则会变成"半列内容 + 半列空白"，比原来更难看。 */
+main {
+    width: 100%;
+    max-width: 1240px;
+    margin-inline: auto;
+}
+
+@media (min-width: 1300px) {
+    main { max-width: 1480px; }
+    /* ⚠ 只覆盖"可见"的分栏：`.pane[hidden]` 那条 display:none 必须继续赢
+     *   （它的选择器权重比这里高，放在文件末尾也不会被盖掉）。 */
+    .pane:not([hidden]) {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        align-items: start;
+        gap: 14px;
+    }
+    /* 一个分栏只有一张卡片 → 让它占满两列（回到单列铺开的观感） */
+    .pane > .card:only-child { grid-column: 1 / -1; }
+    /* 但"整宽"只解决排版，不解决**读**：帮助页正文拉满会变成一行 105 个字
+     * （实测 1367px），眼睛来回扫很累。长段落按 ~62em 折行，
+     * 右边的空白是一页文档该有的留白，不是"没画完"。 */
+    .help-body > p,
+    .help-body > ul,
+    .help-body > ol { max-width: 62em; }
+}

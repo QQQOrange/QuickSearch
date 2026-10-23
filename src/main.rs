@@ -1367,6 +1367,24 @@ fn capture_selection(target_pid: u32) -> Option<String> {
 ///   · 这一轮**根本没写成功**（序号没动）就整段跳过还原：剪贴板一动没动，
 ///     去还原反而可能把别人刚写进去的东西抹掉。
 fn capture_selection_fast(target_pid: u32, budget_ms: u64) -> Option<String> {
+    /* ⚠ 先确认「前台还是它」再塞 Ctrl+C。
+     *
+     * 这条复核是在横条**已经弹出来之后**跑的（迟到几十~几百毫秒）。这段时间里
+     * 用户完全可能已经点到别的软件里去了 —— 那时我们再把 Ctrl+C 发出去，就会
+     * 把**另一个程序的选区**复制回来，然后当成这次划词的文字补进横条：用户点
+     * 引擎就会去搜一段他根本没选的文字，比"认错字"更难理解。
+     *
+     * 允许"前台是我们自己"（横条 / 面板抢到焦点时属正常），只挡第三方。 */
+    if target_pid != 0 {
+        let fg = win::window_pid(win::foreground_window());
+        let me = std::process::id();
+        if fg != target_pid && fg != me {
+            win::log(&format!(
+                "capture(exact): 前台已经换人（pid {fg}，目标 {target_pid}）—— 不发 Ctrl+C，放弃这次复核"
+            ));
+            return None;
+        }
+    }
     let _clip = lock_clip();
     let mut snap = clip::snapshot();
     let old = snap
@@ -1490,6 +1508,36 @@ fn capture_without_clipboard(drag: (i32, i32, i32, i32)) -> Option<(String, &'st
 /* r98：划词取到的是 OCR 文字时，再精确复核一次                        */
 /* ================================================================== */
 
+/// OCR 出来的这段文字，**值不值得再花一次剪贴板去精确复核**？
+///
+/// 这是"要不要复核"的唯一判据（`start_capture` 调它），把三条规则收在一处，
+/// 免得散在调用点上越改越乱：
+///   ① 像网址/路径、或浏览器里划了一大段几乎没认出来 —— 见 `exact_reread_why`；
+///   ② **浏览器 / Electron 里取词一律复核**（用户 2026-10-23 报的 bug）：
+///      这些程序我们跳过 UIA（Chromium 的 UIA 树唤不醒），只能读屏幕认字，
+///      而认字对中英混排小字很不稳 ——「马尾辫skill安装」被认成
+///      「《马尾辫 sk 泔安装、」，点谷歌搜出一串垃圾。这类程序里模拟 Ctrl+C
+///      就是"复制选区"，安全，而且拿到的是精确原文。
+///   ③ 文字结构上就像认歪了 —— 见 `ocr_looks_noisy`。
+///
+/// 返回值是**给日志看的原因**（None = 不必复核）。
+fn exact_reread_trigger(
+    text: &str,
+    drag: (i32, i32, i32, i32),
+    in_browser: bool,
+) -> Option<&'static str> {
+    if let Some(why) = exact_reread_why(text, drag, in_browser) {
+        return Some(why);
+    }
+    if in_browser {
+        return Some("浏览器里屏幕认字不可靠，一律用复制复核");
+    }
+    if ocr_looks_noisy(text) {
+        return Some("认出来的文字结构可疑（首尾落单标点 + 孤立短拉丁片段）");
+    }
+    None
+}
+
 /// 这段（OCR 出来的）文字**看起来可能是一条网址/路径**吗？
 ///
 /// 只用来决定「值不值得再花一次剪贴板去精确复核」，所以判据刻意放宽 ——
@@ -1503,6 +1551,63 @@ fn capture_without_clipboard(drag: (i32, i32, i32, i32)) -> Option<(String, &'st
 ///   ntt0S'.//QItnuD.com/xanaer-rrana0S/tWInKte-trav
 /// ```
 /// 两个都带 `//`，所以「有 `//` / `www.`」这一条就足够把它捞回来。
+/// OCR 出来的这段文字，**结构上就像"认歪了"**吗？
+///
+/// 用户实录（2026-10-23）：选中「马尾辫skill安装」，横条拿到的却是
+/// `《马尾辫 sk 泔安装、` —— 他点了谷歌，搜的是一串垃圾。
+///
+/// 这段噪声的特征很典型，两条同时具备才算：
+///   · **首尾落单的标点**：开头多出一个 `《`（旁边根本没有 `》`）、结尾多出一个 `、`。
+///     OCR 把旁边的边框 / 装饰读成了标点。
+///   · **孤零零的短拉丁片段**：`sk` 这种 1~3 个字母的碎块（skill 被认断的半截）。
+///
+/// 为什么必须"两条同时"：单独一条都会误伤正常文本 ——
+/// 「AI 工具」「US 插头」里有短拉丁片段，「「夸克」是浏览器、」结尾就有个 `、`。
+///
+/// 判歪了会怎样：**漏判**（还是拿认错的字去搜，等于没修）；判多了则白模拟一次
+/// Ctrl+C（会短暂动一下剪贴板再还原）。所以这里宁可严一点。
+fn ocr_looks_noisy(t: &str) -> bool {
+    /// 成对标点：左边那个出现了、右边那个却没有 → 落单。
+    const PAIRS: &[(char, char)] = &[
+        ('《', '》'), ('〈', '〉'), ('「', '」'), ('『', '』'), ('【', '】'),
+        ('（', '）'), ('(', ')'), ('〔', '〕'), ('[', ']'), ('“', '”'), ('‘', '’'),
+    ];
+    /// 不该出现在末尾的标点（选中一段话时不会连标点一起选进来）。
+    const TAIL_PUNCT: &[char] = &['、', '，', '；', '：', '·', ',', ';', ':'];
+
+    let s = t.trim();
+    if s.is_empty() {
+        return false;
+    }
+    let first = s.chars().next().unwrap_or(' ');
+    let last = s.chars().last().unwrap_or(' ');
+    let unpaired_open = PAIRS.iter().any(|&(o, c)| first == o && !s.contains(c));
+    let dangling_tail = TAIL_PUNCT.contains(&last);
+    if !unpaired_open && !dangling_tail {
+        return false;
+    }
+    // 再看有没有"孤立短拉丁片段"（1~3 个字母，两边都不是字母数字）
+    let chars: Vec<char> = s.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if !chars[i].is_ascii_alphabetic() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < chars.len() && chars[i].is_ascii_alphabetic() {
+            i += 1;
+        }
+        let len = i - start;
+        let left_ok = start == 0 || !chars[start - 1].is_ascii_alphanumeric();
+        let right_ok = i == chars.len() || !chars[i].is_ascii_alphanumeric();
+        if (1..=3).contains(&len) && left_ok && right_ok {
+            return true;
+        }
+    }
+    false
+}
+
 fn maybe_link_like(t: &str) -> bool {
     let s = t.trim();
     if s.is_empty() || s.chars().count() > 512 {
@@ -2443,7 +2548,10 @@ fn start_capture(target_pid: u32, drag: (i32, i32, i32, i32)) {
              * 那也是 OCR 这条路上的失败，同样要复核：用户日志里"选中的是网址，
              * 横条却是空的"就是这么来的（`show_bar: ""`）。 */
             if matches!(via, "OCR" | "") {
-                if let Some(why) = exact_reread_why(&text, drag, in_browser) {
+                /* 要不要复核、为什么复核，全在 `exact_reread_trigger` 里
+                 * （三条规则 + 理由都写在那儿；2026-10-23 扩的第 ② ③ 条
+                 *   就是用户报的「马尾辫skill安装 → 《马尾辫 sk 泔安装、」）。 */
+                if let Some(why) = exact_reread_trigger(&text, drag, in_browser) {
                     win::log(&format!("capture(exact): {why} —— 后台精确复核一次"));
                     spawn_exact_reread(gen, target_pid, text);
                 }
@@ -14600,6 +14708,55 @@ mod tests {
     }
 
     /// 复核的触发条件：认残了 / 认不出来 / 浏览器里整片没认出字，才动剪贴板。
+    #[test]
+    /// OCR 噪声识别（用户 2026-10-23 报的那串）。
+    ///
+    /// 用例里的第一行就是用户原样给的：选中「马尾辫skill安装」，横条拿到的是
+    /// `《马尾辫 sk 泔安装、`，他点谷歌搜了一串垃圾。这条必须判成"可疑"，
+    /// 否则那次修复等于没做。后面几条是**正常文本**，一条都不能误判 ——
+    /// 误判的代价是白给别人的程序塞一次 Ctrl+C（还会短暂动一下剪贴板）。
+    #[test]
+    fn ocr_noise_detection() {
+        // 用户实录
+        assert!(ocr_looks_noisy("《马尾辫 sk 泔安装、"), "用户报的那串噪声没识别出来");
+        // 同一段文字，认对了就不该可疑（没有落单标点、没有碎字母片段）
+        assert!(!ocr_looks_noisy("马尾辫skill安装"), "认对的原文被误判了");
+        assert!(!ocr_looks_noisy("马尾辫 skill 安装"));
+        // 正常文本：成对标点 + 结尾顿号，但**没有**孤立拉丁片段
+        assert!(!ocr_looks_noisy("「夸克」是浏览器、"));
+        assert!(!ocr_looks_noisy("工具、软件"));
+        // 正常文本：有短拉丁片段（AI），但首尾都干净
+        assert!(!ocr_looks_noisy("AI 工具"));
+        assert!(!ocr_looks_noisy("US 插头"));
+        // 落单标点 + 碎字母 → 可疑（另一条真实形状：右边括号被切掉）
+        assert!(ocr_looks_noisy("（未命名 sk"));
+        assert!(ocr_looks_noisy("开关 alt、"));
+        /* 刻意的边界：**只有**碎字母、首尾标点都正常时**不判**可疑。
+         * 光凭"有个短字母片段"就会误伤「Alt 键」「AI 工具」这类正常文本，
+         * 而误判的代价是白给别人的程序塞一次 Ctrl+C。 */
+        assert!(!ocr_looks_noisy("打开设置、alt"));
+        // 空 / 纯空白
+        assert!(!ocr_looks_noisy(""));
+        assert!(!ocr_looks_noisy("   "));
+    }
+
+    /// 「要不要复核」的合成判据：浏览器里一律复核，别处只在可疑时才复核。
+    #[test]
+    fn exact_reread_trigger_rules() {
+        let drag = (100, 100, 400, 130);
+        // 浏览器 + 一段干干净净的中文 → 仍然复核（认字不可靠是常态）
+        assert!(exact_reread_trigger("马尾辫skill安装", drag, true).is_some());
+        // 非浏览器 + 同样干净的中文 → 不复核（不往陌生程序里塞 Ctrl+C）
+        assert!(
+            exact_reread_trigger("马尾辫skill安装", drag, false).is_none(),
+            "正常文字不该在非浏览器里触发复核"
+        );
+        // 非浏览器 + 结构可疑 → 复核
+        assert!(exact_reread_trigger("《马尾辫 sk 泔安装、", drag, false).is_some());
+        // 非浏览器 + 像网址 → 老规则照样生效
+        assert!(exact_reread_trigger("nttos.'//altnuo.corr/x", drag, false).is_some());
+    }
+
     #[test]
     fn exact_reread_why_only_for_suspicious_selections() {
         let wide = (100, 100, 500, 130);
