@@ -4663,15 +4663,32 @@ fn export_items(app: AppHandle, items: Vec<String>) {
             win::log("export_items: cancelled");
             return;
         };
-        let msg = match export::write_plain(&p, &items, &config_view()) {
+        let msg = match export::write_plain(
+            &p,
+            &items,
+            &config_view(),
+            // v1.5.9：含个人令牌时用它加密；不含时这个值压根不会被用到
+            Some(&cfg_with(|c| c.backup_password.clone())),
+        ) {
             Ok(n) => {
+                let had_token = cfg_with(|c| !c.github_token.trim().is_empty())
+                    && items.iter().any(|i| i == "secrets");
                 win::log(&format!("export_items -> {} keys={n}", p.display()));
-                // 这一步必须说清楚"这是明文"：用户可能正要把文件发给别人
-                format!("配置已导出（明文，{n} 个设置项，可直接发给别人导入）")
+                /* 这一步必须说清楚"这是不是明文"：用户可能正要把文件发给别人。
+                 * 含令牌的那份是加密的，不能还喊"明文、可直接发给别人"。 */
+                if had_token {
+                    format!(
+                        "配置已导出（含个人访问令牌，已用备份密码加密，{n} 个设置项）\
+                         —— 对方要先在「备份」页填上同一个密码才能导入"
+                    )
+                } else {
+                    format!("配置已导出（明文，{n} 个设置项，可直接发给别人导入）")
+                }
             }
             Err(e) => {
                 win::log(&format!("export_items failed: {e}"));
-                "写入失败，换个位置试试".to_string()
+                // 这里的 e 是有话要说的（比如"含令牌必须设密码"），别吞掉
+                e
             }
         };
         let _ = APP.get().map(|a| a.emit_to("settings", "qs://toast", msg));
@@ -4709,7 +4726,13 @@ fn import_items(app: AppHandle) {
         let toast = |s: String| {
             let _ = APP.get().map(|a| a.emit_to("settings", "qs://toast", s));
         };
-        let (items, data) = match export::read_plain(&p, MAX_BACKUP_BYTES) {
+        /* v1.5.9：含个人令牌的导出是加密的，这里用本机备份密码去解 ——
+         * 与「备份」页同一个钥匙，用户不用记两套密码。 */
+        let (items, data) = match export::read_plain(
+            &p,
+            MAX_BACKUP_BYTES,
+            Some(&cfg_with(|c| c.backup_password.clone())),
+        ) {
             Ok(v) => v,
             Err(e) => {
                 win::log(&format!("import_items rejected: {e}"));
@@ -4722,6 +4745,14 @@ fn import_items(app: AppHandle) {
             .iter()
             .filter_map(|id| export::find_group(id).map(|g| g.name))
             .collect();
+        /* 令牌有没有被这份文件换掉 —— 必须在灌键**之前**记下来。
+         *
+         * 为什么要专门说一句：一份别人给的 `.qsconf` 只要勾了 secrets 组，
+         * 就能把本机令牌换成对方的。换了之后你所有 GitHub 请求都走对方账号，
+         * 对方能看到你查了哪些仓库。这不是阻止（用户可能就是想换），
+         * 但**绝不能一声不响**。 */
+        let token_before = cfg_with(|c| c.github_token.trim().to_string());
+        let mut token_note = String::new();
         {
             let mut cfg = match st().cfg.lock() {
                 Ok(c) => c,
@@ -4737,11 +4768,20 @@ fn import_items(app: AppHandle) {
             //   两条导入路用同一套解析，是"导入结果可预期"的前提 —— 自己再写
             //   一份的话，同一个键在备份恢复和明文导入里会读出两种结果。
             apply_view(&data, &mut cfg);
+            let after = cfg.github_token.trim().to_string();
+            if !after.is_empty() && after != token_before {
+                win::log("import_items: 个人访问令牌被文件里的值替换");
+                token_note = if token_before.is_empty() {
+                    "，并已填入文件里的个人访问令牌".to_string()
+                } else {
+                    "；个人访问令牌已被文件里的值替换".to_string()
+                };
+            }
             config::save(&cfg);
         }
         broadcast();
         win::log(&format!("import_items done: {n_keys} keys, groups={named:?}"));
-        toast(format!("已导入 {} 项（{} 个设置项）", named.len(), n_keys));
+        toast(format!("已导入 {} 项（{} 个设置项）{token_note}", named.len(), n_keys));
     });
 }
 
@@ -4870,6 +4910,37 @@ fn backup_payload() -> Result<String, String> {
     crypto::seal(&plain, &cfg_with(|c| c.backup_password.clone()))
 }
 
+/// 「备份」页顶部的安全状态：这份备份**换台电脑能不能解开**、里面有几个凭据。
+///
+/// # 为什么要把这件事单独做成一个查询
+///
+/// `seal` 的行为是"有密码用密码、没密码用 DPAPI"，但界面上长期写着
+/// 「留空 = 不加密」—— 那句话从 v1.4.0 起就是错的（留空是**加密了**，
+/// 只不过只有本机解得开）。用户照着那句误导去理解，就会以为
+/// "我没设密码，所以换机器也能读" —— 然后在换机那天发现整份备份作废。
+///
+/// 这个接口把真相摊开：`portable` 就是"能不能换机恢复"，`envelope` 是
+/// 加密方式（`password` = 密码信封，任何机器有密码就能解；`dpapi` = 只有
+/// 这台机器/这个 Windows 用户能解）。界面按它显示徽章，不再靠文案猜。
+#[tauri::command]
+fn backup_security_state() -> serde_json::Value {
+    let (has_pw, has_tok, secrets) = cfg_with(|c| {
+        (
+            !c.backup_password.trim().is_empty(),
+            !c.github_token.trim().is_empty(),
+            config::secret_count(c),
+        )
+    });
+    serde_json::json!({
+        "hasPassword": has_pw,
+        "envelope": if has_pw { "password" } else { "dpapi" },
+        // 有密码 = 密码信封 = 任何机器只要有同一个密码就能解
+        "portable": has_pw,
+        "hasToken": has_tok,
+        "secretCount": secrets,
+    })
+}
+
 /// 覆盖配置目录里的一份安全副本。
 /// 恢复云端之前先留一手：万一云端那份是错的，用户还能自己捞回来。
 fn stash_local_config() {
@@ -4942,14 +5013,67 @@ fn detect_backup_format(v: &Value) -> Option<BackupFormat> {
     None
 }
 
-fn restore_from_text(text: &str) -> Result<(), String> {
+/// 解开一份加密内容；失败时把"下一步该做什么"说清楚。
+///
+/// # 为什么不能直接把 `unseal` 的错误抛给用户
+///
+/// 跨设备恢复失败的原因其实只有两种，但用户看到的都是同一句"解密失败"：
+///
+/// ① **DPAPI 信封**（`qsEnc:2`）—— 做备份时那台机器还没设备份密码，于是用了
+///    Windows 账户加密。这种信封**只在做它的那台机器、那个 Windows 用户下**
+///    能解开，换机必然失败。这不是文件坏了，是设计如此，而且完全可预防
+///    （先设备份密码）。
+/// ② **密码不对 / 本机没填** —— 备份是用另一个密码加密的，把本机密码改成
+///    当时那个就行。
+///
+/// 两种都有明确动作，所以这里分情况给指引，而不是让用户对着"DPAPI 失败"
+/// 去猜是不是文件损坏了。
+fn unseal_hint(text: &str, pw: &str) -> Result<String, String> {
+    match crypto::unseal(text, pw) {
+        Ok(t) => Ok(t),
+        Err(e) => {
+            if crypto::looks_dpapi(text) {
+                Err(format!(
+                    "这份备份是用 Windows 账户加密的（做它的时候还没设备份密码），\
+                     只能在做出它的那台电脑上解开，换机器恢复不了。\
+                     以后先在「备份 → 云端备份加密」设一个备份密码再备份，换机就能恢复。\
+                     （{e}）"
+                ))
+            } else if crypto::looks_encrypted(text) && pw.trim().is_empty() {
+                Err(format!(
+                    "这份备份设了密码，但本机还没填 —— 去「备份 → 云端备份加密」\
+                     把当时那个密码填上再恢复。（{e}）"
+                ))
+            } else if crypto::looks_encrypted(text) {
+                Err(format!(
+                    "密码不对：这份备份是用另一个备份密码加密的。\
+                     把本机密码改成当时那个再试。（{e}）"
+                ))
+            } else {
+                Err(e)
+            }
+        }
+    }
+}
+
+/// 从一份备份文本恢复整机配置。返回一句"凭据怎么样了"的补充说明（可能为空）。
+///
+/// 返回 `String` 而不是 `()`：恢复是整份覆盖，用户最该被明确告知的是
+/// **个人令牌动没动**。调用方把这句话拼进自己的 toast。
+fn restore_from_text(text: &str) -> Result<String, String> {
+    let token_before = cfg_with(|c| c.github_token.trim().to_string());
+    let mut kept_token = false;
+    let token_now: String;
     /* 加密备份先解开。
      *
      * v1.4.1：`decrypt` → `unseal`。v1.4.0 起"没设备份密码"的本地备份/导出
      * 走的是 **DPAPI 信封**（`qsEnc:2`），`decrypt` 只认密码信封，会直接报
      * 「不认识的加密格式」—— 那等于把没设密码的用户挡在自己的备份外面。
-     * `unseal` 按信封自己的版本号选钥匙，两种都认；明文原样放行。 */
-    let text = crypto::unseal(text, &cfg_with(|c| c.backup_password.clone()))?;
+     * `unseal` 按信封自己的版本号选钥匙，两种都认；明文原样放行。
+     *
+     * v1.5.9：解不开时不再把底层错误原样抛给用户。跨设备恢复失败最常见的
+     * 原因就两种（DPAPI / 密码不同），两种都有明确的下一步，见 `unseal_hint`。 */
+    let text = unseal_hint(text, &cfg_with(|c| c.backup_password.clone()))?;
     let v: Value =
         serde_json::from_str(&text).map_err(|e| format!("备份内容不是有效的 JSON：{e}"))?;
     /* 最低限度的合理性检查：宁可拒绝，也不能拿一个不相干的 json 把用户配置冲掉。
@@ -4978,7 +5102,20 @@ fn restore_from_text(text: &str) -> Result<(), String> {
              *       （详见 config::repair_dead_custom_engines 的注释）。
              *   恢复本来就有"整份覆盖"的破坏性，归一正是为了让它落成一份能用的配置。 */
             BackupFormat::View => {
+                /* v1.5.9：`apply_view` 对 githubToken 本来就是"空值不覆盖"，
+                 * 这里单独把"确实发生了保留"记下来 —— 只为下面那句说明能准确：
+                 * 用户需要知道"我的令牌没被这份备份清掉"。 */
+                let incoming_tok = v
+                    .get("githubToken")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
                 apply_view(&v, &mut cfg);
+                if incoming_tok.is_empty() && !token_before.is_empty() {
+                    kept_token = true;
+                    win::log("restore: 备份里没有个人访问令牌，本机的不动（别让同步把令牌冲掉）");
+                }
                 *cfg = config::sanitize(std::mem::take(&mut *cfg));
             }
             /* 配置格式的备份本身就是一份完整的 `Config`，直接整份替换。
@@ -5003,13 +5140,63 @@ fn restore_from_text(text: &str) -> Result<(), String> {
                     win::log("restore: 备份里没有密码，保留本机现有的备份密码（避免旧备份读不了）");
                     incoming.backup_password = cfg.backup_password.clone();
                 }
+                /* v1.5.9：同一个坑，个人令牌也要保。
+                 * View 那条路靠 `apply_view` 的"空值不覆盖"已经天然满足，
+                 * 这里是整份赋值，不补一句就会把令牌冲成空。 */
+                if keep_local_secret(&cfg.github_token, &mut incoming.github_token) {
+                    win::log("restore: 备份里没有个人访问令牌，保留本机的（别让同步把令牌冲掉）");
+                    kept_token = true;
+                }
                 *cfg = config::sanitize(incoming);
             }
         }
+        /* 这份备份到底带没带令牌 —— 决定下面那句说明怎么写。
+         * 注意看的是**恢复之后**的值与本机原值的差别，不是"文件里有没有这个键"：
+         * View 路径下 `apply_view` 已经把两种情况（键缺失 / 值为空）统一成"不动"。 */
+        token_now = cfg.github_token.trim().to_string();
         config::save(&cfg);
     }
     broadcast();
-    Ok(())
+    Ok(restore_note(&token_before, &token_now, kept_token))
+}
+
+/// 恢复/同步时，凭据类字段「文件里是空的、本机有值」就保留本机。
+///
+/// # 为什么必须有这条
+///
+/// 同步是**整份覆盖**。另一台机器没填令牌时，它备份出来的那一份里
+/// `githubToken` 就是空串；这边按"云端较新"一拉，令牌就被清空了。
+/// 用户根本没做错什么 —— 他只是另一台机器没填。同理，一份很老的备份
+/// 里也不会有这个键。
+///
+/// 返回是否真的保留了本机的值（调用方据此写日志 / 说明）。
+fn keep_local_secret(local: &str, incoming: &mut String) -> bool {
+    if incoming.trim().is_empty() && !local.trim().is_empty() {
+        *incoming = local.to_string();
+        return true;
+    }
+    false
+}
+
+/// 恢复完成后给用户的一句话：**个人令牌到底怎么样了**。
+///
+/// 这一句不是装饰。恢复是整份覆盖，用户最该被提醒的恰恰是"我的凭据动没动"：
+///   · 没变 → 明说"令牌没动"，省得他去重新填一遍；
+///   · 变了 → 明说"已换成备份里的"，否则他会以为身份还是自己的。
+fn restore_note(before: &str, after: &str, kept: bool) -> String {
+    if before.is_empty() && after.is_empty() {
+        return String::new();
+    }
+    if after.is_empty() {
+        return "；个人访问令牌为空（备份里没有），需要的话请重新填".to_string();
+    }
+    if kept {
+        return "；本机的个人访问令牌已保留（备份里没有，没被清掉）".to_string();
+    }
+    if before != after {
+        return "；个人访问令牌已随备份恢复".to_string();
+    }
+    String::new()
 }
 
 /// 恢复之前把**当前**配置留一份：`config.before-restore(时间).QuickSearch`。
@@ -5085,9 +5272,10 @@ fn restore_backup_file(name: String) -> Result<String, String> {
     let text = std::fs::read_to_string(&p).map_err(|e| format!("文件读不出来：{e}"))?;
     // 先留一手，再覆盖
     stash_before_restore(&format!("恢复 {name}"));
-    restore_from_text(&text)?;
+    let note = restore_from_text(&text)?;
     win::log(&format!("restore_backup_file: {name} ok"));
-    Ok(name)
+    // 返回"凭据怎么样了"的补充说明（没说的时候是空串），由前端拼在 toast 后面
+    Ok(note)
 }
 
 /// 「上次**成功**备份到云端」是几点（unix 秒）。0 = 没记录。
@@ -5331,7 +5519,7 @@ fn webdav_sync_on_start_inner() {
         (Some((name, rt)), Some(lt)) if rt > lt + 2 => {
             stash_local_config();
             match webdav::download_named(&o, &name).and_then(|t| restore_from_text(&t)) {
-                Ok(_) => wd_toast(format!("启动同步：云端「{name}」较新，已恢复到本机")),
+                Ok(note) => wd_toast(format!("启动同步：云端「{name}」较新，已恢复到本机{note}")),
                 Err(e) => wd_toast(format!("启动同步失败：{e}")),
             }
         }
@@ -5648,7 +5836,7 @@ fn webdav_restore_named(name: String) {
         }
         stash_local_config();
         match webdav::download_named(&o, &name).and_then(|t| restore_from_text(&t)) {
-            Ok(_) => wd_toast(format!("已从云端恢复「{name}」")),
+            Ok(note) => wd_toast(format!("已从云端恢复「{name}」{note}")),
             Err(e) => wd_toast(format!("恢复失败：{e}")),
         }
     });
@@ -6158,9 +6346,9 @@ fn import_config(app: AppHandle) {
         // 先留一手：这份备份要整份覆盖当前配置
         stash_before_restore(&format!("导入 {}", p.display()));
         match restore_from_text(&text) {
-            Ok(_) => {
+            Ok(note) => {
                 win::log("import_config done");
-                toast("配置已载入");
+                toast(&format!("配置已载入{note}"));
             }
             Err(e) => {
                 win::log(&format!("import_config failed: {e}"));
@@ -14422,6 +14610,7 @@ fn main() {
             import_config,
             webdav_test,
             webdav_upload,
+            backup_security_state,
             webdav_preview_url,
             webdav_list,
             webdav_delete,
@@ -17089,6 +17278,90 @@ mod tests {
         let now3 = st().cfg.lock().unwrap_or_else(|e| e.into_inner()).clone();
         assert_eq!(now3.delay_ms, 888);
         assert_eq!(now3.backup_password, "my-pw", "不能把本机密码降级成空");
+    }
+
+    /// v1.5.9：恢复 / 同步**不许**把本机的个人令牌清空。
+    ///
+    /// # 这条防的是什么（真实会发生的场景）
+    ///
+    /// A 机填了令牌，B 机没填。B 改了图标、备份上云 → A 机启动同步按
+    /// 「云端较新」整份拉下来。整份覆盖语义下，B 那份里 `githubToken` 是
+    /// **空串**，A 的令牌就被冲没了。之后 A 所有 GitHub 请求变成匿名
+    /// （每小时 60 次），用户完全不知道发生了什么 —— 只会觉得"更新检查
+    /// 怎么又限流了"。
+    ///
+    /// 两种备份格式都要挡住，而且**挡法不一样**：
+    ///   · View 格式靠 `apply_view` 里"空值不覆盖"的既有口径；
+    ///   · Config 格式是**整份赋值**，没有任何保护，必须显式补
+    ///     （`keep_local_secret`）。
+    ///
+    /// 反过来也得成立：备份里**有**令牌时，要能把它恢复进来 —— 否则
+    /// "换台电脑不用重填"这条就成了空话。
+    #[test]
+    fn restore_keeps_local_token_when_backup_has_none() {
+        let _serial = disk_lock();
+        let _env_lock = config::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _state_lock = STATE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _appdata = AppDataTemp::new();
+
+        // ① 配置格式（整份赋值那条路，以前一个字都没防）
+        {
+            let mut incoming = config::Config::default();
+            incoming.delay_ms = 555;
+            assert!(incoming.github_token.is_empty());
+            let text = serde_json::to_string(&incoming).unwrap();
+
+            let mut current = config::Config::default();
+            current.github_token = "ghp_keep_me".into();
+            let _g = install_state_cfg(current);
+            let note = restore_from_text(&text).expect("配置格式备份必须能恢复");
+            assert_eq!(
+                cfg_with(|c| c.github_token.clone()),
+                "ghp_keep_me",
+                "备份里没有令牌时，本机的不能被清空"
+            );
+            assert!(
+                note.contains("保留"),
+                "要明确告诉用户令牌保住了，别让他以为丢了：{note}"
+            );
+        }
+
+        // ② 视图格式（老备份 / 云端那份），值为空串
+        {
+            let view = json!({ "barList": ["@ocr"], "githubToken": "" });
+            let text = serde_json::to_string(&view).unwrap();
+            let mut current = config::Config::default();
+            current.github_token = "ghp_keep_me2".into();
+            let _g = install_state_cfg(current);
+            let note = restore_from_text(&text).expect("视图格式备份必须能恢复");
+            assert_eq!(cfg_with(|c| c.github_token.clone()), "ghp_keep_me2");
+            assert!(note.contains("保留"), "{note}");
+        }
+
+        // ③ 备份里**有**令牌 → 要真的恢复进来（换机不用重填）
+        {
+            let view = json!({ "barList": ["@ocr"], "githubToken": "ghp_from_backup" });
+            let text = serde_json::to_string(&view).unwrap();
+            let mut current = config::Config::default();
+            current.github_token = "ghp_old".into();
+            let _g = install_state_cfg(current);
+            let note = restore_from_text(&text).expect("视图格式备份必须能恢复");
+            assert_eq!(
+                cfg_with(|c| c.github_token.clone()),
+                "ghp_from_backup",
+                "备份里有令牌时应当换过来"
+            );
+            assert!(note.contains("随备份恢复"), "要说明令牌变了：{note}");
+        }
+
+        // ④ 两边都没有 → 不啰嗦（toast 别为一个空值加一句废话）
+        {
+            let view = json!({ "barList": ["@ocr"] });
+            let text = serde_json::to_string(&view).unwrap();
+            let _g = install_state_cfg(config::Config::default());
+            let note = restore_from_text(&text).expect("必须能恢复");
+            assert!(note.is_empty(), "没有凭据可谈时不该有附加说明：{note}");
+        }
     }
 
     #[test]

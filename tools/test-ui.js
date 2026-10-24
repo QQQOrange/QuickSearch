@@ -73,6 +73,14 @@ function makeEnv(htmlFile, conf) {
         if (ok !== undefined) VERIFY_OK = ok;
         VERIFY_FAIL = fail || '';
     };
+    /* `backup_security_state` 的桩（v1.5.9）：备份到底能不能换机恢复。
+     * 默认给"没设备份密码"（DPAPI）—— 那正是最容易让用户误判的状态，
+     * 因为界面上它长得就像"我没加密，应该到处都能读"。 */
+    let SEC_STATE = {
+        hasPassword: false, envelope: 'dpapi', portable: false,
+        hasToken: false, secretCount: 0,
+    };
+    const setSecState = (s) => { SEC_STATE = s; };
 
     /* ⚠ 桩必须装进 beforeParse：region.html 这类页面把脚本**内联**写在 HTML 里，
      * jsdom 会在构造函数的那一刻就执行它，等我们再拿到 dom.window 才补 __TAURI__
@@ -195,6 +203,7 @@ function makeEnv(htmlFile, conf) {
                     ]);
                 }
                 if (cmd === 'update_pending') return Promise.resolve(PENDING);
+                if (cmd === 'backup_security_state') return Promise.resolve(SEC_STATE);
                 /* v1.5.8：「验证」按钮。⚠ 必须**先于**那条 `return null` 兜底，
                  * 否则 verify 回 null → 前端读 info.login 报错。 */
                 if (cmd === 'verify_github_token') {
@@ -257,6 +266,8 @@ function makeEnv(htmlFile, conf) {
         setPending,
         /** 下一次 `verify_github_token` 返回什么 / 怎么失败（v1.5.8） */
         setVerify,
+        /** `backup_security_state` 返回什么（v1.5.9，备份可移植性状态条） */
+        setSecState,
         /** 换一份配置并触发一次真实的 qs://config 事件（走真实的重渲染路径） */
         pushConfig(next) {
             CONF = next;
@@ -2669,6 +2680,69 @@ async function testRegion() {
 /*  五、备份页：仅保留最近 10 份 / 云端备份管理（轮 20 新增）            */
 /* ================================================================== */
 
+/* v1.5.9：备份可移植性状态条
+ *
+ * # 为什么值得专门测
+ *
+ * 这块在**纠正一句长期存在的错误文案**（「留空 = 不加密」）。一旦有人把那句话
+ * 加回去、或者状态条画反了（把 DPAPI 说成"可跨机"），用户就会在换电脑那天
+ * 才发现整份备份作废 —— 那时候已经晚了，谁也救不回来。
+ *
+ * 所以这里钉三件事：DPAPI 必须报"仅本机可解"、有密码必须报"可跨设备"、
+ * 那句错话不许回来。
+ */
+async function testBackupSecurity() {
+    console.log('');
+    console.log('=== 备份可移植性状态条（v1.5.9）===');
+    const env = makeEnv('ui/settings.html', baseConf());
+    runScripts(env, ['ui/shared.js', 'ui/settings.js']);
+    await flush();
+    const { w } = env;
+    const $ = (id) => w.document.getElementById(id);
+    // 切到备份页会触发 refreshBackupInfo → refreshBackupSec
+    const tabBtn = w.document.querySelector('#tabs button[data-tab="backup"]');
+    ok('备份 tab 存在（下面靠它触发刷新）', !!tabBtn);
+    const openBackup = async () => {
+        tabBtn.dispatchEvent(new w.Event('click', { bubbles: true }));
+        await flush();
+        await flush();
+    };
+
+    // ---- ① 没设备份密码 = DPAPI：必须说清"换机恢复不了" ----
+    env.setSecState({
+        hasPassword: false, envelope: 'dpapi', portable: false,
+        hasToken: false, secretCount: 2,
+    });
+    await openBackup();
+    const sec = $('bkSec');
+    ok('状态条显示出来了', !!sec && !sec.hidden);
+    ok('  标成「警告」样式', sec && /warn/.test(sec.className || ''), sec && sec.className);
+    ok('  文案说清只有本机能解',
+        /仅本机可解/.test((sec && sec.textContent) || ''), sec && sec.textContent);
+    ok('  文案给出下一步（设备份密码）', /备份密码/.test((sec && sec.textContent) || ''));
+    ok('  带上凭据数量', /2 项凭据/.test((sec && sec.textContent) || ''), sec && sec.textContent);
+
+    // ---- ② 设了密码：可跨设备 ----
+    env.setSecState({
+        hasPassword: true, envelope: 'password', portable: true,
+        hasToken: true, secretCount: 3,
+    });
+    await openBackup();
+    ok('设了密码：标成「正常」样式', /ok/.test($('bkSec').className || ''), $('bkSec').className);
+    ok('  文案说清可跨设备恢复', /可跨设备恢复/.test($('bkSec').textContent || ''));
+    ok('  提到令牌但**不显示令牌本身**',
+        /含 GitHub 个人访问令牌/.test($('bkSec').textContent || '')
+        && !/ghp_|github_pat_/.test($('bkSec').textContent || ''),
+        $('bkSec').textContent);
+
+    // ---- ③ 那句错话不许回退 ----
+    const card = $('bkSec').closest('.card');
+    ok('「留空 = 不加密」这句错话已删掉',
+        !/留空\s*=\s*不加密/.test((card && card.textContent) || ''));
+    ok('  改成说清实际后果（仅本机 / 换机恢复不了）',
+        /仅本机可解|换机器恢复不了/.test((card && card.textContent) || ''));
+}
+
 async function testBackupPage() {
     console.log('');
     console.log('=== 备份页：仅保留最近 10 份 / 云端备份管理 ===');
@@ -3232,6 +3306,7 @@ async function testUpdateToken() {
         await testRegression();
         await testRegion();
         await testBackupPage();
+        await testBackupSecurity();
         await testFavTools();
         await testCatJump();
     } catch (e) {

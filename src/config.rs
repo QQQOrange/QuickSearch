@@ -2462,6 +2462,49 @@ pub fn normalize_recent(c: &mut Config) -> usize {
     c.recent_engines = out;
     before - c.recent_engines.len()
 }
+/// 一份配置里"算凭据"的字段此刻填了几项。
+///
+/// # 用途
+///
+/// 「备份」页要回答用户一个很实际的问题：**这份备份把哪些东西一起带走了**。
+/// 凭据是最该被看见的那类（它们决定"这份备份泄露了我多少"），所以单独数出来。
+///
+/// # 为什么清单是写死的
+///
+/// 没有遍历"所有 String 字段"：那样会把 `hotkey`、语言、代理地址之类
+/// 全数进来，数字看着大、实际没意义。凭据是会新增的（github_token 就是
+/// v1.5.7 才有的），每次新增都该有人明确判断"它算不算凭据"——
+/// 这个函数就是那个判断的落点。
+///
+/// map 那两组按**实际填了值的条目**数：空 map 和"填了一半"不该同分。
+/// # 为什么百度那套要去重
+///
+/// 百度的 Key 有**两种存法**：老字段 `ocr_key` / `ocr_secret`（v1.3 之前），
+/// 和新 map `ocr_keys` / `ocr_secrets`。老用户升级上来时老字段还在（读的时候
+/// 会回退过去，见 main.rs 的 `ocr_creds`）。两边都数就会把"1 个百度 Key"
+/// 报成 2 项 —— 用户看到数字对不上自己的记忆，反而会怀疑备份漏了东西。
+pub fn secret_count(c: &Config) -> usize {
+    let mut n = 0;
+    for s in [&c.backup_password, &c.webdav_pass, &c.github_token] {
+        if !s.trim().is_empty() {
+            n += 1;
+        }
+    }
+    // 百度在 map 里有条目就只认 map，老字段不重复计
+    let baidu_in_map =
+        c.ocr_keys.contains_key("baidu") || c.ocr_secrets.contains_key("baidu");
+    if !baidu_in_map {
+        for s in [&c.ocr_key, &c.ocr_secret] {
+            if !s.trim().is_empty() {
+                n += 1;
+            }
+        }
+    }
+    n += c.ocr_keys.values().filter(|v| !v.trim().is_empty()).count();
+    n += c.ocr_secrets.values().filter(|v| !v.trim().is_empty()).count();
+    n
+}
+
 /// 一份备份"值不值得用来恢复"的打分。**分数越高越完整**。
 ///
 /// # 为什么需要打分（r92：这是"更新后所有设置归零"的最后一道防线）
@@ -3470,6 +3513,50 @@ mod tests {
      * `save()`（写**全局** config_path()）→ 真实配置被测试数据覆盖。
      * 这条测试把它钉死。
      * ══════════════════════════════════════════════════════════════════ */
+    /* ── v1.5.9：凭据计数 ──────────────────────────────────────────────
+     *
+     * 这个数字会出现在「备份」页（"当前配置里有 N 项凭据会跟着备份走"）。
+     * 数错了不会崩，但会让人怀疑自己的 Key 没被备份 —— 所以口径要钉住：
+     * **只数填了值的**，空白不算；百度那套老字段与 map 不重复计。 */
+    #[test]
+    fn 凭据只数填了值的项() {
+        let mut c = Config::default();
+        assert_eq!(secret_count(&c), 0, "默认配置一项都没有");
+
+        c.github_token = "ghp_x".into();
+        assert_eq!(secret_count(&c), 1, "令牌算一项");
+
+        c.ocr_key = "AKID".into();
+        c.webdav_pass = "app-pw".into();
+        assert_eq!(secret_count(&c), 3);
+
+        // 纯空白不算填了 —— sanitize 之后仍可能是空白，别把它数进去
+        c.github_token = "   ".into();
+        assert_eq!(secret_count(&c), 2);
+
+        // 多引擎那两组按**条目**数，空条目跳过
+        c.ocr_keys.insert("baidu".into(), "k1".into());
+        c.ocr_keys.insert("ali".into(), "  ".into());
+        c.ocr_secrets.insert("baidu".into(), "s1".into());
+        // 此时：webdav_pass(1) + k1(1) + s1(1) = 3
+        // ocr_key 是百度老字段，map 里已有 baidu → 不重复计
+        assert_eq!(secret_count(&c), 3, "webdav_pass + baidu 的 k1/s1，老字段不重复计");
+    }
+
+    /// 百度老字段与 map 不能各算一次（同一份 Key 的两种存法）。
+    #[test]
+    fn 百度老字段与map不重复计() {
+        let mut c = Config::default();
+        c.ocr_key = "old-key".into();
+        c.ocr_secret = "old-secret".into();
+        assert_eq!(secret_count(&c), 2, "只有老字段时按两项算");
+
+        // 迁移到 map 之后，老字段还在（读取会回退），但只能算一次
+        c.ocr_keys.insert("baidu".into(), "old-key".into());
+        c.ocr_secrets.insert("baidu".into(), "old-secret".into());
+        assert_eq!(secret_count(&c), 2, "map 里有 baidu 时老字段不再计");
+    }
+
     #[test]
     fn load_from_never_writes_the_global_config_path() {
         let _serial = big_lock();

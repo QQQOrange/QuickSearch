@@ -781,11 +781,13 @@
     <section class="card">
         <h2>数据 <small>导出明文配置、导入恢复</small></h2>
         <div class="hint">
-            这里出的是<b>明文</b>配置文件：导出的文件别人可以直接导入恢复，不需要密码。
-            <b>只想留一份加密的完整备份</b>请去左边「备份」那一栏 —— 那边单独支持加密，两件事互不相干。
+            这里默认出的是<b>明文</b>配置文件：别人拿到就能直接导入，不需要密码。
+            唯一的例外是勾了<b>「个人访问令牌」</b>—— 那份会改用你的<b>备份密码加密</b>
+            （令牌泄露等于把账号访问权交出去），所以接收方要先有同一个密码才能导入。
+            <b>想要一份包含全部数据的完整备份</b>，请去左边「备份」那一栏。
         </div>
         <div class="row col">
-            <div class="rt"><b>导出哪些数据</b><small>默认<b>只勾非隐私项</b>：API Key、WebDAV 密码、备份密码、收藏内容这些涉及隐私的一律不勾 —— 要一起导出请自己打勾</small></div>
+            <div class="rt"><b>导出哪些数据</b><small>默认<b>只勾非隐私项</b>：API Key、个人访问令牌、WebDAV 密码、备份密码、收藏内容这些涉及隐私的一律不勾 —— 要一起导出请自己打勾</small></div>
             <div class="export-box" id="w-exportBox">
                 <!-- 勾选项由 JS 生成（见 renderExportBox）：
                      分组来自后端 CONST 表，界面上不另写一份分组定义 -->
@@ -829,15 +831,24 @@
     <!-- ============================ 备份 ============================ -->
     <div class="pane" data-pane="backup" hidden>
     <section class="card">
-        <h2>云端备份加密 <small>备份里有 Key / 密码 / 收藏内容，建议加密</small></h2>
+        <h2>备份加密与跨设备恢复 <small>备份里有 Key / 密码 / 令牌 / 收藏内容</small></h2>
         <div class="hint">
-            设了密码，所有备份（云端上传、本机导出）都是 AES-256-GCM + Argon2id 加密的；
-            <b>密码丢了就解不开</b>。留空 = 不加密。
+            所有备份（云端上传、本机导出）<b>都会加密</b>，用的是 AES-256-GCM + Argon2id。
+            区别只在用哪把钥匙 —— 这决定了它<b>能不能换台电脑恢复</b>：
         </div>
+        <ul class="bk-enc-list">
+            <li><b>设了备份密码</b>：用密码加密。<b>任何一台电脑</b>填上同一个密码就能恢复
+                —— 换机、重装系统都靠它。<b>密码丢了就解不开，也没有后门。</b></li>
+            <li><b>没设</b>：用 Windows 账户加密（DPAPI）。数据不会明文落盘，但
+                <b>只有这台电脑、这个 Windows 用户</b>能解开，<b>换机器恢复不了</b>。</li>
+        </ul>
+        <!-- 状态条：由 backup_security_state 渲染。为什么单独一条 —— 用户对着
+             「留空」两个字永远猜不出实际用的是哪种钥匙，必须直接告诉他结果。 -->
+        <div class="bk-sec" id="bkSec" hidden></div>
         <div class="row col">
             <div class="rt"><b>备份密码</b><small>只存在本机 config.json 里，和 WebDAV 密码同等对待</small></div>
             <input class="txt" id="w-backupPass" type="password" spellcheck="false"
-                   placeholder="留空 = 不加密">
+                   placeholder="留空 = 用 Windows 账户加密（仅本机可解，换机恢复不了）">
         </div>
     </section>
 
@@ -848,10 +859,13 @@
             <p class="bk-covers">
                 全部设置外观 · 横条上的引擎与<b>排序</b> · 自定义引擎及其地址 ·
                 你换过的<b>自定义图标</b> · 收藏夹整棵树（目录 / 文本 / 图片 / 备注）·
-                文字识别 API Key 与 Secret · WebDAV 服务器地址 / 账号 / 密码 ·
+                文字识别 API Key 与 Secret · <b>GitHub 个人访问令牌</b> ·
+                WebDAV 服务器地址 / 账号 / 密码 ·
                 收藏夹快捷键 · 收藏夹面板尺寸。
                 内置引擎图标随软件本体走，无需备份。<br>
-                <small>窗口大小属于逐机器偏好（换到小屏电脑可能比屏幕还大），不随备份走，
+                <small>凭据跟你填在设置里的完全是同一份，恢复后不用重填 —— 前提是
+                这份备份用了<b>备份密码</b>（见上一张卡），否则换台电脑解不开。
+                窗口大小属于逐机器偏好（换到小屏电脑可能比屏幕还大），不随备份走，
                 恢复后按新机器的情况自动给默认值。</small>
             </p>
             <div class="acts">

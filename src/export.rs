@@ -80,6 +80,23 @@ pub static GROUPS: &[Group] = &[
         private: true,
         default_checked: false,
     },
+    /* v1.5.9：个人访问令牌单列一组。
+     *
+     * 以前它**不在任何组里** —— 于是勾选界面上根本看不见它，`allow_keys`
+     * 也会把它裁掉，"把令牌一起带走"这条路等于不存在。用户 2026-10-24
+     * 要求「确保个人密钥也能被纳入同步和备份范围」，这里补上。
+     *
+     * ⚠ 它和 apiKeys 不是一回事：OCR Key 泄露 = 烧别人的识别额度；
+     *   GitHub 令牌泄露 = 别人能以**你的身份**读你的私有仓库、改你的东西。
+     *   所以含它的导出**不允许明文落盘**（见 `contains_secret` / `write_plain`）。 */
+    Group {
+        id: "secrets",
+        name: "个人访问令牌",
+        desc: "GitHub 个人访问令牌（PAT）。拿到它的人能以你的身份访问仓库，比 API Key 更危险",
+        keys: &["githubToken"],
+        private: true,
+        default_checked: false,
+    },
     Group {
         id: "engineConfig",
         name: "引擎配置",
@@ -265,7 +282,29 @@ pub fn build(view: &Value, items: &[String]) -> (Value, Value) {
     )
 }
 
-/// 把挑中的组写成一份**明文** `.qsconf`。返回写进去的设置项个数。
+/// 这份导出里有没有**绝不能用明文写出**的键。
+///
+/// 判据故意是"数据里真有非空令牌"，而不是"勾了 secrets 组"：
+/// 勾了组但本机压根没填令牌时，加密一份空内容只会让接收方多一次输密码。
+/// 反过来，只要令牌非空，不管用户勾的是哪一组，都不许明文落盘。
+pub fn contains_secret(data: &Value) -> bool {
+    data.get("githubToken")
+        .and_then(|x| x.as_str())
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false)
+}
+
+/// 把挑中的组写成一份 `.qsconf`。返回写进去的设置项个数。
+///
+/// `password` 只在**含个人令牌**时才会被用到：
+///   · 有令牌 + 给了密码 → 写出加密信封（`qsEnc:1`，可跨机，接收方要同一个密码）；
+///   · 有令牌 + 没密码   → **拒绝**，绝不降级成明文；
+///   · 没令牌            → 照旧明文（用户 r54 的原话："导出的配置数据不加密，
+///                          可直接被他人导入恢复"）。
+///
+/// 为什么令牌要特例：`.qsconf` 的设计是"发给同事就能用"，而一份带 PAT 的
+/// 明文文件发出去，等于把仓库访问权一起发了 —— 收件的人甚至不需要有恶意，
+/// 转发几手就泄了。
 ///
 /// 这是 `export_items` 命令真正干活的那一半（命令自己只负责弹对话框）——
 /// 拆出来的理由写在 main.rs 那个函数的注释里：纯逻辑才能被单测覆盖，
@@ -275,26 +314,46 @@ pub fn write_plain(
     path: &std::path::Path,
     items: &[String],
     view: &Value,
+    password: Option<&str>,
 ) -> Result<usize, String> {
     let (meta, data) = build(view, items);
     let n_keys = data.as_object().map(|o| o.len()).unwrap_or(0);
+    let secret = contains_secret(&data);
     let mut file = meta;
     if let Value::Object(o) = &mut file {
         o.insert("data".into(), data);
     }
     let text = serde_json::to_string_pretty(&file)
         .map_err(|e| format!("序列化失败：{e}"))?;
-    std::fs::write(path, text).map_err(|e| format!("写入失败：{e}"))?;
+    let out = if secret {
+        let pw = password.unwrap_or("").trim();
+        if pw.is_empty() {
+            return Err(
+                "这次导出里有个人访问令牌，不能明文写出 —— 请先在「备份」页设置备份密码，再导出"
+                    .into(),
+            );
+        }
+        crypto::encrypt(&text, pw)?
+    } else {
+        text
+    };
+    std::fs::write(path, out).map_err(|e| format!("写入失败：{e}"))?;
     Ok(n_keys)
 }
 
-/// 读一份明文导出，返回勾了哪些组 + 数据。三道闸都在 `parse` 里。
+/// 读一份导出，返回勾了哪些组 + 数据。三道闸都在 `parse` 里。
 ///
 /// `max_bytes` 与备份那条路一致（32MB）：**读之前**就看大小 —— 拿一个 2GB 的
 /// 文件去 `read_to_string` 能把内存吃光，先 `metadata` 一下几乎不要钱。
+///
+/// `password` 用来解**含个人令牌**的那种导出（v1.5.9）。明文导出用不到它，
+/// 传 `None` 即可；遇到加密内容又没给密码时会给出"去备份页填密码"的指引，
+/// 而不是让 `parse` 报一句"这是加密备份"（那句话对这份文件是误导：
+/// 它确实是一条明文导出，只是带了个信封）。
 pub fn read_plain(
     path: &std::path::Path,
     max_bytes: u64,
+    password: Option<&str>,
 ) -> Result<(Vec<String>, Value), String> {
     match std::fs::metadata(path) {
         Ok(m) if m.len() > max_bytes => {
@@ -304,22 +363,36 @@ pub fn read_plain(
     }
     let text = std::fs::read_to_string(path)
         .map_err(|e| format!("文件读不出来：{e}"))?;
+    let text = if crypto::looks_encrypted(&text) {
+        let pw = password.unwrap_or("").trim();
+        if pw.is_empty() {
+            return Err(
+                "这份导出是加密的（含个人访问令牌），请先在「备份」页填上和导出时相同的备份密码"
+                    .into(),
+            );
+        }
+        crypto::unseal(&text, pw)?
+    } else {
+        text
+    };
     parse(&text)
 }
 
-/// 读一份明文导出，返回其中**勾过哪些组**与数据。
+/// 读一份**已解开**的导出内容，返回其中**勾过哪些组**与数据。
 ///
 /// 三道闸，全部是"宁可拒绝也别冲掉用户配置"：
 ///
-/// 1. **加密备份直接拒**（用户原话：导入仅支持明文，不支持加密备份）。
-///    不尝试解密、不提示"要不要输密码" —— 那条路在「备份」页，这里只负责明文。
+/// 1. **加密内容直接拒**。v1.5.9 起"含个人令牌的导出"是加密的，但那一步
+///    解密在 `read_plain` 里（它知道备份密码），走到这里时应当已经是明文。
+///    留这道闸是为了：谁绕过 `read_plain` 直接把密文喂进来，也不会被
+///    `serde_json` 解成一份"看起来合法、其实全是默认值"的东西。
 /// 2. `kind` 必须是 `qs-config`。整份备份（裸 config_view 形状）没有这个字段，
 ///    照样拒：全量恢复是备份页的事，明文导入不该悄悄变成全量覆盖。
 /// 3. `items` 必须是字符串数组。别的类型（对象 / 数字）说明文件被改过，
 ///    宁可拒绝也不要猜。
 pub fn parse(text: &str) -> Result<(Vec<String>, Value), String> {
     if crypto::looks_encrypted(text) {
-        return Err("这是加密备份，明文导入用不了 —— 请到「备份」页恢复，或让导出方导出明文".into());
+        return Err("这份内容还是加密的 —— 请通过正常入口导入（会自动用备份密码解开）".into());
     }
     let v: Value =
         serde_json::from_str(text).map_err(|e| format!("文件内容不是有效的 JSON：{e}"))?;
@@ -451,10 +524,12 @@ mod tests {
     }
 
     #[test]
-    fn 加密备份被明文导入拒绝() {
+    fn 密文不许直接喂进parse() {
+        // 解密是 read_plain 的活（它知道备份密码）。谁绕过它把密文直接塞进来，
+        // 这里必须顶住 —— 否则 serde 会把信封解成一份"键全丢"的空导出。
         let enc = crypto::encrypt(r#"{"kind":"qs-config"}"#, "pw").unwrap();
         let e = parse(&enc).unwrap_err();
-        assert!(e.contains("加密备份"), "报错要说清是加密备份：{e}");
+        assert!(e.contains("还是加密的"), "报错要说清内容仍是密文：{e}");
     }
 
     #[test]
@@ -515,7 +590,7 @@ mod tests {
     fn 落盘再读回来键不丢() {
         let p = tmp_file("roundtrip");
         let view = sample_view();
-        let n = write_plain(&p, &["engineConfig".to_string()], &view).unwrap();
+        let n = write_plain(&p, &["engineConfig".to_string()], &view, None).unwrap();
         assert!(n > 0, "至少写进去一个键");
         // 文件必须是**明文**：人 / JSON 解析器都读得出来（用户原话：不加密）
         let text = std::fs::read_to_string(&p).unwrap();
@@ -523,7 +598,7 @@ mod tests {
         assert_eq!(j["kind"], json!(EXPORT_KIND));
         assert_eq!(j["items"], json!(["engineConfig"]));
 
-        let (items, data) = read_plain(&p, 32 * 1024 * 1024).unwrap();
+        let (items, data) = read_plain(&p, 32 * 1024 * 1024, None).unwrap();
         assert_eq!(items, vec!["engineConfig".to_string()]);
         assert_eq!(data.get("barList").unwrap(), &json!(["@ocr", "baidu"]));
         assert!(data.get("ocrKey").is_none(), "凭据没勾，文件里不该有");
@@ -534,7 +609,7 @@ mod tests {
     fn 落盘的文件不是密文() {
         // 备份那条路设了密码就是 AES-GCM 密文；明文这条路**一个字都不碰加密**
         let p = tmp_file("plain");
-        write_plain(&p, &["appSettings".to_string()], &sample_view()).unwrap();
+        write_plain(&p, &["appSettings".to_string()], &sample_view(), None).unwrap();
         let raw = std::fs::read(&p).unwrap();
         assert!(!crypto::looks_encrypted(
             &String::from_utf8_lossy(&raw)
@@ -543,14 +618,101 @@ mod tests {
     }
 
     #[test]
-    fn 落盘的加密备份读不进来() {
-        // 拿一份**真的**加密备份文件去 read_plain，应当被拒并指路「备份」页
+    fn 整份加密备份走不了明文导入() {
+        // 拿一份**真的**加密备份文件去 read_plain：两种情形都要被挡住，
+        // 而且给出的理由要是"该怎么做"，不是一句"解密失败"。
         let p = tmp_file("encrypted");
         let text = crypto::encrypt(&serde_json::to_string(&sample_view()).unwrap(), "pw").unwrap();
         std::fs::write(&p, text).unwrap();
-        let e = read_plain(&p, 32 * 1024 * 1024).unwrap_err();
-        assert!(e.contains("加密备份"), "报错要说清是加密备份：{e}");
-        assert!(e.contains("备份"), "报错要指路备份页：{e}");
+
+        // ① 没密码：告诉用户去备份页填密码（而不是让他以为文件坏了）
+        let e = read_plain(&p, 32 * 1024 * 1024, None).unwrap_err();
+        assert!(e.contains("备份密码"), "报错要指路备份密码：{e}");
+
+        // ② 给了密码、也解得开，但它是**整份配置**不是明文导出 → 仍要拒，
+        //    否则用户一次误点就把整机配置全量覆盖了（那是备份页的动作）
+        let e2 = read_plain(&p, 32 * 1024 * 1024, Some("pw")).unwrap_err();
+        assert!(e2.contains("不是明文导出"), "报错要说明这不是明文导出：{e2}");
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /* ---- v1.5.9：个人访问令牌的导出边界 ----
+     *
+     * 用户要求「确保个人密钥也能被纳入同步和备份范围」。纳入 ≠ 明文外发：
+     * 令牌能给的东西（以你的身份读私有仓库）比 OCR Key 危险得多，所以
+     * 含令牌的导出必须加密，没密码宁可拒绝。这一组就是钉住这条边界。 */
+
+    fn view_with_token() -> Value {
+        json!({
+            "barList": ["@ocr"],
+            "githubToken": "ghp_realtoken_123",
+        })
+    }
+
+    #[test]
+    fn 令牌能被子集导出带走() {
+        // 以前 githubToken 不在任何组里 → 勾了也导不出来
+        let (_, data) = build(&view_with_token(), &["secrets".to_string()]);
+        assert_eq!(data.get("githubToken").unwrap(), &json!("ghp_realtoken_123"));
+        assert!(data.get("barList").is_none(), "别的组没勾，不该带上");
+    }
+
+    #[test]
+    fn 别的组勾了也带不走令牌() {
+        // 防"顺手导出"：只勾引擎配置时，令牌绝不能跟着走
+        let (_, data) = build(&view_with_token(), &["engineConfig".to_string()]);
+        assert!(data.get("githubToken").is_none(), "令牌只属于 secrets 组");
+        assert!(data.get("barList").is_some());
+    }
+
+    #[test]
+    fn 含令牌的导出没有密码就拒绝落盘() {
+        let p = tmp_file("secret-nopw");
+        let e = write_plain(&p, &["secrets".to_string()], &view_with_token(), None).unwrap_err();
+        assert!(e.contains("个人访问令牌"), "报错要指名是令牌：{e}");
+        assert!(e.contains("备份密码"), "要告诉用户出路是设备份密码：{e}");
+        assert!(!p.exists(), "拒绝的时候不该留下任何文件");
+    }
+
+    #[test]
+    fn 含令牌的导出加了密也能原样读回来() {
+        let p = tmp_file("secret-pw");
+        write_plain(
+            &p,
+            &["secrets".to_string(), "engineConfig".to_string()],
+            &view_with_token(),
+            Some("跨机口令"),
+        )
+        .unwrap();
+        // 落盘的必须是信封，不能一眼看到令牌
+        let raw = std::fs::read_to_string(&p).unwrap();
+        assert!(crypto::looks_encrypted(&raw), "含令牌的导出必须是密文");
+        assert!(!raw.contains("ghp_realtoken_123"), "明文里不许出现令牌");
+
+        let (items, data) = read_plain(&p, 32 * 1024 * 1024, Some("跨机口令")).unwrap();
+        assert_eq!(items, vec!["secrets".to_string(), "engineConfig".to_string()]);
+        assert_eq!(data.get("githubToken").unwrap(), &json!("ghp_realtoken_123"));
+        assert!(data.get("barList").is_some(), "同一份文件里的非密钥项也要回来");
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn 令牌为空时仍是普通明文导出() {
+        // 勾了 secrets 但本机没填令牌：没必要加密，别逼用户多输一次密码
+        let p = tmp_file("secret-empty");
+        let v = json!({"barList": ["@ocr"], "githubToken": ""});
+        write_plain(&p, &["secrets".to_string(), "engineConfig".to_string()], &v, None).unwrap();
+        let raw = std::fs::read_to_string(&p).unwrap();
+        assert!(!crypto::looks_encrypted(&raw), "空令牌不该触发加密");
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn 错密码解不开含令牌的导出() {
+        let p = tmp_file("secret-wrongpw");
+        write_plain(&p, &["secrets".to_string()], &view_with_token(), Some("对的")).unwrap();
+        let e = read_plain(&p, 32 * 1024 * 1024, Some("错的")).unwrap_err();
+        assert!(!e.is_empty());
         let _ = std::fs::remove_file(&p);
     }
 
@@ -562,7 +724,7 @@ mod tests {
         //   "太大"，那就没测到体积那道闸了。
         let p = tmp_file("toobig");
         std::fs::write(&p, "x").unwrap();
-        let e = read_plain(&p, 0).unwrap_err();
+        let e = read_plain(&p, 0, None).unwrap_err();
         assert!(e.contains("32MB"), "报错要说明是体积问题：{e}");
         let _ = std::fs::remove_file(&p);
     }
@@ -574,9 +736,9 @@ mod tests {
         //  灌回去只碰这几项，剩下的键自然原样不动。）
         let p = tmp_file("merge");
         let view = json!({"barList": ["@ocr"], "theme": "dark"});
-        let n = write_plain(&p, &["engineConfig".to_string()], &view).unwrap();
+        let n = write_plain(&p, &["engineConfig".to_string()], &view, None).unwrap();
         assert_eq!(n, 1, "barList 一个键");
-        let (_, data) = read_plain(&p, 32 * 1024 * 1024).unwrap();
+        let (_, data) = read_plain(&p, 32 * 1024 * 1024, None).unwrap();
         assert_eq!(data.as_object().unwrap().len(), 1, "只该带 barList");
         assert!(data.get("theme").is_none(), "application settings 没勾 → 不带 theme");
         let _ = std::fs::remove_file(&p);

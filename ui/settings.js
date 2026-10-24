@@ -3603,7 +3603,66 @@ $('btnReset').addEventListener('click', async () => {
  * 都落在 backup_info 返回的目录里：默认是数据目录，也可以改到任何位置。
  * 这里把「当前目录 + 里面现有的备份文件」列出来，改完立刻刷新。 */
 let bkInfoTimer = 0;
+/* ==========================================================================
+ *  v1.5.9：备份的可移植性状态
+ *
+ *  这一块解决的是**一句话的误导**。界面上长期写着「留空 = 不加密」，
+ *  但 v1.4.0 起留空是走 DPAPI 的 —— 数据确实加密了，只是只有这台机器能解。
+ *  用户照着那句话理解，会在换电脑那天才发现整份备份作废。
+ *
+ *  所以这里不问"用户填了什么"，只显示**事实**：现在这份备份换台机器能不能解开。
+ * ========================================================================== */
+async function refreshBackupSec() {
+    const box = $('bkSec');
+    if (!box) return;
+    let st;
+    try {
+        st = await invoke('backup_security_state');
+    } catch (_) {
+        // 后端没起来 / 命令没注册：整条藏起来，别显示一句可能是错的结论
+        box.hidden = true;
+        return;
+    }
+    if (!st || typeof st !== 'object') return;
+    const portable = !!st.portable;
+    const n = Number(st.secretCount) || 0;
+    box.className = 'bk-sec ' + (portable ? 'ok' : 'warn');
+    box.hidden = false;
+    box.textContent = '';
+
+    const head = document.createElement('div');
+    head.className = 'bk-sec-head';
+    head.textContent = portable
+        ? '✓ 可跨设备恢复 —— 这份备份用备份密码加密'
+        : '⚠ 仅本机可解 —— 没设备份密码，现在用的是 Windows 账户加密';
+    box.appendChild(head);
+
+    const sub = document.createElement('div');
+    sub.className = 'bk-sec-sub';
+    const parts = [
+        portable
+            ? '换电脑：装上软件 → 在「备份」页填上同一个密码 → 从云端恢复，凭据会一起回来'
+            : '换电脑后这份备份解不开。想跨设备用：在上面填一个备份密码，再重新备份一次',
+        n ? `当前配置里有 ${n} 项凭据会跟着备份走` : '当前配置里还没有填任何凭据',
+    ];
+    /* 令牌单独提一句，但**不显示它的值** —— 这条状态条不需要、也不该出现凭据。 */
+    if (st.hasToken) parts.push('含 GitHub 个人访问令牌');
+    sub.textContent = parts.join(' · ');
+    box.appendChild(sub);
+}
+
+/* 密码框一改，结论就该跟着变。等 400ms 是因为 set_setting 是异步落盘的
+ * （TEXTS 里那套通用自动保存），马上问后端问到的还是旧状态。 */
+{
+    const pwEl = $('w-backupPass');
+    if (pwEl && !pwEl.dataset.secbound) {
+        pwEl.dataset.secbound = '1';
+        pwEl.addEventListener('change', () => setTimeout(refreshBackupSec, 400));
+    }
+}
+
 async function refreshBackupInfo() {
+    refreshBackupSec();
     let info;
     try {
         info = await invoke('backup_info');
@@ -3675,8 +3734,10 @@ async function refreshBackupInfo() {
             if (!confirm('用这份备份覆盖当前配置？\n\n' + nm
                 + '\n\n当前配置会先自动留一份（恢复前快照），挑错了还能退回来。')) return;
             try {
-                await invoke('restore_backup_file', { name: nm });
-                toast('已恢复：' + nm);
+                /* 后端返回的是"凭据怎么样了"的补充说明（可能为空）：
+                 * 恢复是整份覆盖，用户最该知道令牌动没动。 */
+                const note = await invoke('restore_backup_file', { name: nm });
+                toast('已恢复：' + nm + (note ? String(note) : ''));
             } catch (e) {
                 toast('恢复失败：' + ((e && e.message) || e));
             }
@@ -6660,6 +6721,16 @@ function webviewLabel() {
  *  但日志内容没跟着走）。现在**每条都写死自己的版本号**，
  *  发新版时**同时**加一条，对不上就是漏了。 */
 const CHANGELOG = [
+    {
+        ver: 'v1.5.9',
+        items: [
+            '<b>个人访问令牌现在也能导出了</b> —— 以前它不属于任何一个导出分组，勾选界面上根本看不见它，等于"备份里带着、导出时带不走"。现在单列成「个人访问令牌」一项，默认不勾，要带走自己打勾。',
+            '<b>带令牌的导出会被自动加密</b> —— 令牌给别人就等于把账号访问权给出去了，所以那份文件不再明文落盘，改用你的<b>备份密码</b>加密；接收方要在「备份」页填上同一个密码才能导入。没设过备份密码时会直接提示你先设一个，<b>绝不会</b>偷偷写成明文。',
+            '<b>备份页终于说清了"能不能换台电脑恢复"</b> —— 那里以前写着"留空 = 不加密"，这句话从加密改造之后就一直是错的：留空其实是<b>用 Windows 账户加密</b>，数据照样是密文，但<b>只有这台电脑、这个 Windows 用户</b>能解开。现在直接显示结论：<b>✓ 可跨设备恢复</b> 还是 <b>⚠ 仅本机可解</b>，顺带告诉你当前有几个凭据会跟着备份走。换电脑前看一眼就知道该不该补个密码。',
+            '<b>同步/恢复不会再把你的令牌冲成空</b> —— 另一台电脑没填令牌时，它那份备份里令牌是空的；这边一按"云端较新"同步，你的令牌就被清掉了，之后所有 GitHub 请求变成匿名（每小时只有 60 次），你还以为是自己点错了。现在"备份里没有、本机有"就保留本机，并在提示里说明「本机的个人访问令牌已保留」。备份里真有令牌时照样会恢复进来，换机不用重填。',
+            '<b>换机恢复失败时会告诉你怎么做</b> —— 以前只有一句"DPAPI 解密失败"。现在分得清：这份备份是用做它那台电脑的 Windows 账户加密的（当时没设备份密码），换机解不开 —— 并告诉你怎么预防；密码不对时也会区分"本机还没填密码"和"填了但不对"。',
+        ],
+    },
     {
         ver: 'v1.5.8',
         items: [

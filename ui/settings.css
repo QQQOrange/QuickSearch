@@ -1492,6 +1492,47 @@ body.idx-on .to-top { bottom: 56px; }
 
 /* 本地备份目录：路径 + 标签 + 现有备份清单。样式刻意和云端备份列表
    （.wd-list）保持同一直系，两块放在同一个 Tab 里看着是一套东西。 */
+/* 「备份加密与跨设备恢复」那张卡：两条钥匙说明 + 一条结果状态条。
+ *
+ * 状态条存在的理由：用户对着「留空」两个字永远猜不出实际用的是哪种钥匙。
+ * 所以后端把事实（portable / envelope）算出来，这里只负责把它画得一眼能看懂。 */
+.bk-enc-list {
+    margin: 8px 0 0;
+    padding-left: 18px;
+    font-size: 12px;
+    line-height: 1.75;
+    color: var(--fg-dim);
+}
+.bk-enc-list b { color: var(--fg); font-weight: 600; }
+
+.bk-sec {
+    margin-top: 10px;
+    padding: 9px 12px;
+    border-radius: 9px;
+    border: 1px solid var(--line);
+    background: color-mix(in srgb, var(--fg) 3%, transparent);
+    font-size: 12px;
+    line-height: 1.6;
+}
+.bk-sec[hidden] { display: none; }
+.bk-sec-head { font-weight: 600; }
+.bk-sec-sub {
+    margin-top: 3px;
+    font-size: 11.5px;
+    color: var(--fg-dim);
+    user-select: text;
+}
+.bk-sec.ok {
+    border-color: color-mix(in srgb, var(--accent) 34%, var(--line));
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+.bk-sec.ok .bk-sec-head { color: var(--accent); }
+.bk-sec.warn {
+    border-color: color-mix(in srgb, var(--danger) 34%, var(--line));
+    background: color-mix(in srgb, var(--danger) 7%, transparent);
+}
+.bk-sec.warn .bk-sec-head { color: var(--danger); }
+
 .bk-path {
     display: flex;
     align-items: center;

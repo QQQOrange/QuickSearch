@@ -14,6 +14,8 @@
  *     ⑤ 隐私       → 日志里绝不出现令牌原文
  *     ⑥ 验证按钮   → 有效令牌回报账号/额度、坏令牌说"无效"、**验证不落盘**
  *                    （v1.5.8 的「验证」按钮，打的是 /user 那个口子）
+ *     ⑦ 备份可移植 → 没设备份密码报"仅本机可解"、设了报"可跨设备"，
+ *                    顺带确认凭据计数把令牌算进去了（v1.5.9；测完原样还原）
  *
  * 用法: node tools/r157-github-token-probe.js
  * 前提: cargo build --release
@@ -376,6 +378,56 @@ const logSize = () => { try { return fs.statSync(LOG).size; } catch (e) { return
     check('  粘贴时带的空白/换行会被洗掉（和真正发请求同一套洗法）',
         !!v3j && v3j.login === 'probe-user', String(v3).slice(0, 160));
     check('  日志里同样不出现令牌原文', readLogFrom(off6).indexOf(TOKEN) < 0);
+
+    /* ---------- ⑦ 备份可移植性（v1.5.9）----------
+     *
+     * 这一组回答一个很实际的问题：**这份备份换台电脑能不能解开**。
+     * 界面以前写着"留空 = 不加密"，那是错的 —— 留空走 DPAPI，
+     * 数据照样加密，但只有本机能解。后端必须能如实报出来。
+     *
+     * ⚠ 设备份密码会真的改动这台机器的主文件加密方式，所以这里
+     *   **先读出原值、测完立刻还原**。探针绝不给用户留副作用。 */
+    const cfgRaw = await call('get_config');
+    let pwBefore = '';
+    try { pwBefore = JSON.parse(cfgRaw).backupPassword || ''; } catch (e) { }
+
+    await setTok(TOKEN);
+    await sleep(300);
+    const sec0 = await call('backup_security_state');
+    let s0 = null;
+    try { s0 = JSON.parse(sec0); } catch (e) { }
+    check('有令牌时凭据计数把它算进去', !!s0 && s0.secretCount >= 1, sec0);
+    check('  hasToken 如实反映"配置里有令牌"', !!s0 && s0.hasToken === true, sec0);
+
+    /* 先把它摆到"没密码"这个最容易误判的状态，再摆回来。
+     * 用临时值而不是直接清空：万一原值就是空，清空也是空，没差；
+     * 原值非空时下面会还原成原值。 */
+    await call('set_setting', '{ key: \'backupPassword\', value: \'\' }');
+    await sleep(300);
+    const sec1 = await call('backup_security_state');
+    let s1 = null;
+    try { s1 = JSON.parse(sec1); } catch (e) { }
+    check('没设备份密码：如实报"仅本机可解"（portable=false）',
+        !!s1 && s1.portable === false && s1.envelope === 'dpapi', sec1);
+
+    await call('set_setting', '{ key: \'backupPassword\', value: \'probe-temp-pw\' }');
+    await sleep(300);
+    const sec2 = await call('backup_security_state');
+    let s2 = null;
+    try { s2 = JSON.parse(sec2); } catch (e) { }
+    check('设了备份密码：改报"可跨设备恢复"（portable=true）',
+        !!s2 && s2.portable === true && s2.envelope === 'password', sec2);
+    check('  日志里不会出现备份密码原文',
+        readLogFrom(0).indexOf('probe-temp-pw') < 0);
+
+    // 还原：密码回到探针开跑前的那个值
+    await call('set_setting', `{ key: 'backupPassword', value: ${JSON.stringify(pwBefore)} }`);
+    await sleep(300);
+    const sec3 = await call('backup_security_state');
+    let s3 = null;
+    try { s3 = JSON.parse(sec3); } catch (e) { }
+    check('收尾：备份密码已还原成探针开跑前的状态',
+        !!s3 && s3.portable === (pwBefore.trim().length > 0), sec3 + ' / before=' + JSON.stringify(pwBefore));
 
     // 收尾：把探针写进去的配置清干净（自动更新**要还原成 true**，
     // 否则下一轮启动时不会自动检查，第 ⓪ 组就白测了）
