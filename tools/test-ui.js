@@ -58,6 +58,10 @@ function makeEnv(htmlFile, conf) {
     // 想让某条命令"失败"就把它加进来 —— 用来验证出错时前端会不会自己退场
     const rejectCmds = new Set();
     let CONF = conf;
+    /* `update_pending` 的桩（v1.5.7）：模拟"启动时那次自动检查把结果存下来了"。
+     * 测两种情况：has=false（常态）/ has=true + canAuto=false（查到了但没令牌）。 */
+    let PENDING = { has: false };
+    const setPending = (p) => { PENDING = p; };
 
     /* ⚠ 桩必须装进 beforeParse：region.html 这类页面把脚本**内联**写在 HTML 里，
      * jsdom 会在构造函数的那一刻就执行它，等我们再拿到 dom.window 才补 __TAURI__
@@ -179,6 +183,7 @@ function makeEnv(htmlFile, conf) {
                         }),
                     ]);
                 }
+                if (cmd === 'update_pending') return Promise.resolve(PENDING);
                 // 一键安装 / 教程：真机会去开系统设置页和浏览器，测试里只记调用
                 if (cmd === 'ocr_open_language_settings') return Promise.resolve(null);
                 if (cmd === 'ocr_open_lang_help') return Promise.resolve(null);
@@ -231,6 +236,8 @@ function makeEnv(htmlFile, conf) {
 
     return {
         dom, w, calls, listeners, rejectCmds,
+        /** 下一次 `update_pending` 返回什么（模拟"启动时自动检查存下的结果"） */
+        setPending,
         /** 换一份配置并触发一次真实的 qs://config 事件（走真实的重渲染路径） */
         pushConfig(next) {
             CONF = next;
@@ -313,6 +320,8 @@ function baseConf(over) {
          * （表现成"整套 151/154、后面根本没跑"）。 */
         aiMattingEnable: true,
         webdavOnStart: false, webdavOnExit: false,
+        // v1.5.7：GitHub 个人访问令牌（空 = 匿名请求）
+        githubToken: '',
     }, over || {});
 }
 
@@ -2931,9 +2940,185 @@ async function testCatJump() {
 }
 
 /* ================================================================== */
+/*  v1.5.7：GitHub 个人访问令牌                                         */
+/* ================================================================== */
+async function testUpdateToken() {
+    console.log('=== 更新：GitHub 个人访问令牌（v1.5.7）===');
+    const env = makeEnv('ui/settings.html', baseConf({ githubToken: 'ghp_x' }));
+    runScripts(env, ['ui/shared.js', 'ui/settings.js']);
+    await flush();
+    const { w } = env;
+    const $ = (id) => w.document.getElementById(id);
+    const click = (el) => el.dispatchEvent(new w.MouseEvent('click', { bubbles: true, cancelable: true }));
+
+    // ---- 控件本身 ----
+    const tok = $('s-githubToken');
+    ok('更新卡里有令牌输入框', !!tok);
+    ok('  是密码框（不明文回显）', tok && tok.type === 'password');
+    ok('  回显了配置里已保存的值', tok && tok.value === 'ghp_x');
+    ok('  placeholder 说清了"留空 = 匿名 60 次/小时"',
+        tok && /60 次/.test(tok.getAttribute('placeholder') || ''));
+
+    const help = $('btnGithubTokenHelp');
+    ok('标签旁有问号按钮', !!help);
+    ok('  用原生 button（Tab 可聚焦、Enter/Space 可触发）',
+        help && help.tagName === 'BUTTON' && !help.disabled);
+    ok('  有 aria-label（读屏能念出用途）',
+        help && /GitHub 个人访问令牌/.test(help.getAttribute('aria-label') || ''));
+    ok('  有提示气泡文案',
+        help && /什么是 GitHub 个人访问令牌/.test(help.getAttribute('data-tip') || ''));
+
+    // 点问号 → 用系统浏览器打开官方中文文档（不是 webview 内跳转）
+    env.calls.length = 0;
+    click(help);
+    await flush();
+    const docCmd = env.lastCmd('open_links');
+    const docUrl = docCmd && (docCmd.args.links || [])[0];
+    ok('  点问号打开的是 GitHub 官方中文帮助文档',
+        docUrl === 'https://docs.github.com/zh/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens',
+        String(docUrl));
+
+    // ---- 没令牌：只提示 + 用浏览器下载（用户 2026-10-24 的口径）----
+    /* `canAuto` = 后端按**当前配置**现算的"能不能自动下载"。
+     * ⚠ `authed`（那次检查用没用上令牌）故意一起给，用来证明界面**不看它**。 */
+    const payload = (canAuto, authed = canAuto) => ({
+        payload: {
+            version: '9.9.9', newer: true, current: '1.0.0', notes: '说明',
+            size: 1024 * 1024, page: 'https://github.com/x/releases/tag/v9.9.9',
+            url: 'https://github.com/x/releases/download/v9.9.9/QuickSearch.exe',
+            canAuto, authed, manual: true,
+        },
+    });
+    env.listeners.get('qs://update')(payload(false));
+    await flush();
+    ok('没令牌：主按钮变成「用浏览器下载」',
+        $('btnUpdateInstall').textContent === '用浏览器下载',
+        $('btnUpdateInstall').textContent);
+    ok('  提示里写明"没填 GitHub 令牌"',
+        /没填 GitHub 令牌/.test($('updHint').textContent || ''));
+    ok('  完整下载网址显示出来了',
+        $('updDownloadLink').textContent === 'https://github.com/x/releases/download/v9.9.9/QuickSearch.exe'
+        && !$('updLinkRow').hidden,
+        $('updDownloadLink').textContent);
+
+    // 点主按钮 → 打开下载链接，且**不**调用 update_install（不自动下载）
+    env.calls.length = 0;
+    click($('btnUpdateInstall'));
+    await flush();
+    ok('  点它打开的是下载链接',
+        !!(env.lastCmd('open_links') || {}).args,
+        env.calls.map((c) => c.cmd).join(','));
+    ok('  绝不调用 update_install（没令牌不自动下载）',
+        env.cmd('update_install').length === 0,
+        env.calls.map((c) => c.cmd).join(','));
+    /* 关键一条：检查**确实用上了**令牌，但现在没令牌 —— 界面必须听 `canAuto`，
+     * 不能听 `authed`。这正是"启动时那次自动检查结果还躺在缓存里"的形态。 */
+    env.listeners.get('qs://update')(payload(false, true));
+    await flush();
+    ok('  哪怕检查时用过令牌，现在没令牌也不给下载',
+        $('btnUpdateInstall').textContent === '用浏览器下载',
+        $('btnUpdateInstall').textContent);
+
+    // 网址那一行本身也能点
+    env.calls.length = 0;
+    click($('updDownloadLink'));
+    await flush();
+    ok('  下载网址那一行也能点开', env.cmd('open_links').length === 1);
+
+    // ---- 有令牌：恢复「下载并安装」----
+    env.listeners.get('qs://update')(payload(true));
+    await flush();
+    ok('有令牌：主按钮回到「下载并安装」',
+        $('btnUpdateInstall').textContent === '下载并安装',
+        $('btnUpdateInstall').textContent);
+    ok('  提示变成"可以下载"', /可以下载/.test($('updHint').textContent || ''));
+
+    env.calls.length = 0;
+    click($('btnUpdateInstall'));
+    await flush();
+    ok('  点它走程序内下载（update_install）', env.cmd('update_install').length === 1);
+
+    /* ---- 第二种检测路径：启动时自动检查（页面当时没开，结果缓存在后端）----
+     * `update_pending` 只是把那份缓存读回来，不联网、不算第三次检测；
+     * 它里面的 canAuto 同样是现算的。 */
+    env.setPending({
+        has: true, version: '9.9.9', notes: '说明', size: 1024 * 1024,
+        page: 'https://github.com/x/releases/tag/v9.9.9',
+        url: 'https://github.com/x/releases/download/v9.9.9/QuickSearch.exe',
+        canAuto: false,
+    });
+    w.updInit();
+    await flush();
+    ok('启动时自动检查到的（没令牌）：按钮也是「用浏览器下载」',
+        $('btnUpdateInstall').textContent === '用浏览器下载',
+        $('btnUpdateInstall').textContent);
+    ok('  网址照样摆出来', !$('updLinkRow').hidden);
+    env.calls.length = 0;
+    click($('btnUpdateInstall'));
+    await flush();
+    ok('  点下去还是只开浏览器，不自动下载',
+        env.cmd('update_install').length === 0 && env.cmd('open_links').length === 1,
+        env.calls.map((c) => c.cmd).join(','));
+
+    // 就在这儿把令牌填上 → 按钮立刻变（不用再点一次"检查更新"）
+    env.calls.length = 0;
+    $('s-githubToken').value = 'ghp_live';
+    $('s-githubToken').dispatchEvent(new w.Event('input', { bubbles: true }));
+    await flush();
+    ok('填上令牌后按钮当场变成「下载并安装」',
+        $('btnUpdateInstall').textContent === '下载并安装',
+        $('btnUpdateInstall').textContent);
+    ok('  这回没多调一次检查（只是重画）',
+        env.cmd('update_check').length === 0,
+        env.calls.map((c) => c.cmd).join(','));
+
+    // 清掉 → 立刻退回"用浏览器下载"
+    $('s-githubToken').value = '';
+    $('s-githubToken').dispatchEvent(new w.Event('input', { bubbles: true }));
+    await flush();
+    ok('清空令牌后按钮当场退回「用浏览器下载」',
+        $('btnUpdateInstall').textContent === '用浏览器下载',
+        $('btnUpdateInstall').textContent);
+    env.setPending({ has: false });
+
+    // ---- 令牌被 GitHub 拒掉：原因要冒出来 ----
+    env.listeners.get('qs://update')({
+        payload: {
+            version: '1.0.0', newer: false, current: '1.0.0', notes: '', size: 0,
+            page: '', url: '', authed: false, manual: true,
+            authWarning: 'GitHub 令牌无效、已过期，或者没有这个仓库的权限',
+        },
+    });
+    await flush();
+    ok('令牌被拒时把原因说给用户',
+        /令牌无效/.test($('toast').textContent || ''),
+        $('toast').textContent);
+
+    // ---- 清除按钮 ----
+    env.calls.length = 0;
+    click($('btnGithubTokenClear'));
+    await flush();
+    const clr = env.cmd('set_setting').find((c) => c.args.key === 'githubToken');
+    ok('清除按钮把令牌存成空串', clr && clr.args.value === '');
+    ok('  输入框同时清空', $('s-githubToken').value === '');
+
+    // ---- 点「检查更新」前会先把输入框落盘（防止 IPC 乱序用旧令牌）----
+    env.calls.length = 0;
+    $('s-githubToken').value = 'ghp_new';
+    click($('btnUpdateCheck'));
+    await flush();
+    const seqCmds = env.calls.map((c) => c.cmd + (c.args && c.args.key ? ':' + c.args.key : ''));
+    ok('检查更新前先保存令牌，再发 update_check',
+        seqCmds.indexOf('set_setting:githubToken') >= 0
+        && seqCmds.indexOf('update_check') > seqCmds.indexOf('set_setting:githubToken'),
+        seqCmds.join(' → '));
+}
+
+/* ================================================================== */
 (async function main() {
     try {
         await testSettings();
+        await testUpdateToken();
         await testOcrSettingsPage();
         await testOcrDepCheck();
         await testIconEditorEntries();

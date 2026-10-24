@@ -987,6 +987,25 @@ pub ocr_accurate: bool,
     /// 未勾选时「检查更新」按钮仍然可用（那是一次手动动作，不受开关限制）。
     #[serde(default = "default_true")]
     pub auto_update: bool,
+    /// GitHub 个人访问令牌（Personal Access Token）。
+    ///
+    /// 空串 = 匿名请求 —— GitHub REST API 对匿名请求只给 **60 次/小时**，
+    /// 一台机器上多开几次设置页、或者跟别的工具共用公网 IP 就会撞限流
+    /// （用户报的「检查更新老是失败」就是这么来的）。
+    ///
+    /// 填了之后所有 GitHub 请求都带 `Authorization: Token <它>`，额度提到
+    /// **5000 次/小时**，并且可以直连 API 一次把版本号/说明/下载地址全拿到
+    /// （见 `update::check`）。
+    ///
+    /// ⚠ 这是**凭据**，两条铁律：
+    ///   ① 绝不写日志、绝不拼进 URL（`update.rs` 里的日志只记"有没有令牌"）；
+    ///   ② 只存本机 config.json —— 它整体是加密信封（见 `save_to`），
+    ///      备份/WebDAV 上传的也是加密后的那一份。
+    ///
+    /// ⚠ 兼容 `用户名:令牌` 这种老格式（用户从别处抄配置时常见，Obtainium
+    ///   也专门兼容过）：真正发请求前由 `update::effective_token` 取冒号后的部分。
+    #[serde(default)]
+    pub github_token: String,
     /// OCR 结果窗口的宽 / 高（逻辑像素）。
     /// 用户拖过窗口大小之后记下来，下次识别就按这个尺寸开 —— 免得每次都要
     /// 重新拉一遍。0 表示「还没记录过」，这时用默认的 760×620。
@@ -1212,7 +1231,8 @@ impl Default for Config {
             webdav_pass: String::new(),
             webdav_on_start: false,
             webdav_on_exit: false,
-        auto_update: true,
+            auto_update: true,
+            github_token: String::new(),
             ocr_win_w: 0,
             ocr_win_h: 0,
             backup_dir: String::new(),
@@ -2341,6 +2361,31 @@ pub(crate) fn sanitize(mut c: Config) -> Config {
             c.bar_pos
         ));
         c.bar_pos = normalize_bar_pos(&c.bar_pos);
+    }
+    /* GitHub 令牌（2026-10-24）：粘贴进来的值经常带三种垃圾 ——
+     *   ① 首尾空白/换行（从网页上框选复制的典型形态）；
+     *   ② 中间夹的换行（终端里 `echo` 出来的样子）；
+     *   ③ 外层引号（`"ghp_xxx"` / `'ghp_xxx'`）。
+     * 这些都会让 `Authorization: Token …` 直接 401，而用户完全看不出为什么。
+     * 这里在读配置时就洗干净；空串是合法值（= 匿名请求）。 */
+    let tok = c
+        .github_token
+        .trim()
+        .trim_matches(|ch| ch == '"' || ch == '\'')
+        .chars()
+        .filter(|ch| !ch.is_whitespace() && !ch.is_control())
+        /* 长度上限：GitHub 的令牌最长也就 255 左右（fine-grained 更短）。
+         * 512 足够容错，再长的一定是粘贴了别的东西 —— 截断而不是拒绝，
+         * 免得用户填了个带说明文字的值就整个更新功能不工作。 */
+        .take(512)
+        .collect::<String>();
+    if tok != c.github_token {
+        crate::win::log(&format!(
+            "config: GitHub 令牌格式归一（{} → {} 字符）",
+            c.github_token.chars().count(),
+            tok.chars().count()
+        ));
+        c.github_token = tok;
     }
     c
 }

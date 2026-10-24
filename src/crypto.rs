@@ -378,8 +378,27 @@ pub fn decrypt(text: &str, password: &str) -> Result<String, String> {
 mod tests {
     use super::*;
 
+    /// 串行化"会碰 [`KEY_CACHE`] 的用例"。
+    ///
+    /// # 为什么需要它（2026-10-24 修一条老竞态）
+    ///
+    /// `KEY_CACHE` 只缓存**一条**（密码 → 盐/密钥），而 `cargo test` 默认多线程
+    /// 并行跑用例。只要另一个用例在中途用别的密码加/解密，缓存就被换掉，
+    /// 于是 `salt_is_reused_but_nonce_is_fresh` 里"两次加密的盐应相同"会随机失败
+    /// —— 单跑必过、全量偶发，看着像功能坏了，其实是用例在互相踩。
+    ///
+    /// 这条锁只约束测试，产品代码一行不动（缓存容量 1 是刻意的：用户只有一个
+    /// 备份密码，缓存更多只会白占内存）。
+    static CACHE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// 拿锁；前一条用例 panic 把锁毒化了也照常继续（否则会连锁报错）。
+    fn cache_guard() -> std::sync::MutexGuard<'static, ()> {
+        CACHE_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn round_trip_and_wrong_password() {
+        let _g = cache_guard();
         let s = r#"{"version":"1","barList":["百度"]}"#;
         let enc = encrypt(s, "口令123").unwrap();
         assert!(looks_encrypted(&enc));
@@ -399,6 +418,7 @@ mod tests {
     /// v1.4.0：DPAPI 信封（不需要密码那条路）—— 磁盘上永远没有明文。
     #[test]
     fn dpapi_envelope_round_trip() {
+        let _g = cache_guard();   // 末尾那句 decrypt(..., "随便") 会用密码缓存
         let s = r#"{"backup_password":"秘密","ocr_key":"AKID123"}"#;
         let enc = encrypt_dpapi(s).expect("DPAPI 加密失败（测试机上应可用）");
         assert!(looks_dpapi(&enc), "应当被识别成 DPAPI 信封");
@@ -413,6 +433,7 @@ mod tests {
     /// `seal` / `unseal`：有密码走密码，没密码走 DPAPI；明文原样放行。
     #[test]
     fn seal_unseal_picks_the_right_key() {
+        let _g = cache_guard();
         let s = r#"{"a":1}"#;
         // 有密码 → 密码信封（可跨机）
         let with_pw = seal(s, "pw").unwrap();
@@ -437,6 +458,7 @@ mod tests {
 
     #[test]
     fn tampered_ciphertext_is_rejected() {
+        let _g = cache_guard();
         let enc = encrypt("{\"version\":\"1\"}", "pw").unwrap();
         let mut v: serde_json::Value = serde_json::from_str(&enc).unwrap();
         let mut data = base64_decode(v["data"].as_str().unwrap());
@@ -454,6 +476,15 @@ mod tests {
     ///   都跑一遍会让设置页发涩 —— 见 KEY_CACHE 的注释。
     #[test]
     fn salt_is_reused_but_nonce_is_fresh() {
+        /* ⚠ 这条断言"两次加密的盐相同"，对**全局缓存被换掉**极其敏感，所以要把
+         * 两类干扰都挡掉：
+         *   · `config::test_lock()` —— main / config 模块里那些会落盘加密的用例
+         *     （备份往返、"两种备份格式"，它们用 backup-secret / pw-test 这类
+         *     别的密码），它们都持这把锁；
+         *   · `cache_guard()` —— crypto 模块自己的其它用例。
+         * 只挡一半没用：漏掉哪一类，盐都会被那一类中途换掉。 */
+        let _serial = crate::config::test_lock();
+        let _g = cache_guard();
         let a = encrypt("x", "pw").unwrap();
         let b = encrypt("x", "pw").unwrap();
         assert_ne!(a, b, "密文必须不同（nonce 每条都是新的）");
@@ -468,6 +499,7 @@ mod tests {
     /// 换密码必须立刻换盐换密钥：旧密文用新密码解不开，新密文用新密码才解得开。
     #[test]
     fn changing_password_invalidates_the_cached_key() {
+        let _g = cache_guard();
         let a = encrypt("secret", "old-pw").unwrap();
         let c = encrypt("secret", "new-pw").unwrap();
         let va: serde_json::Value = serde_json::from_str(&a).unwrap();

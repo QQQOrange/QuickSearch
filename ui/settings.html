@@ -1352,6 +1352,35 @@
                                取消勾选后不再自动检查（仍可点右边的「检查更新」）。</small>
                     </span>
                 </label>
+                <!-- v1.5.7：GitHub 个人访问令牌。
+                     限额相关的说明都收在这一块 —— 填了它接口额度从 60 次/小时
+                     提到 5000 次/小时；没填时只提示新版 + 给网页下载链接。 -->
+                <div class="upd-token">
+                    <div class="upd-token-head">
+                        <b>GitHub 个人访问令牌</b>
+                        <!-- 问号 = 官方帮助文档入口。用原生 button 是为了它自带
+                             可聚焦 + Enter/Space 触发（无障碍），不额外写键盘逻辑。 -->
+                        <button type="button" class="qhelp" id="btnGithubTokenHelp"
+                                data-tip="什么是 GitHub 个人访问令牌？点这里看官方说明"
+                                aria-label="什么是 GitHub 个人访问令牌？在新标签页打开 GitHub 官方帮助文档">
+                            <span aria-hidden="true">?</span>
+                        </button>
+                    </div>
+                    <div class="upd-token-row">
+                        <input class="txt" id="s-githubToken" type="password" spellcheck="false"
+                               autocomplete="off" aria-describedby="githubTokenTip"
+                               placeholder="github_pat_… 或 ghp_…（留空 = 匿名请求，每小时 60 次）">
+                        <button type="button" class="btn" id="btnGithubTokenClear"
+                                title="清空令牌，改回匿名请求">清除</button>
+                    </div>
+                    <div class="upd-token-tip" id="githubTokenTip">
+                        填了之后所有 GitHub 请求都会带上它：接口额度从 <b>60 次/小时</b> 提到
+                        <b>5000 次/小时</b>，也只有填了才走<b>程序内自动下载</b>；留空时
+                        —— 不管是启动时自动检查到的，还是点「检查更新」查到的 ——
+                        都只提示有新版本并给出下载链接，不会自动下载。只需要公开仓库的读取权限；
+                        令牌只存在本机加密配置里，不会上传、不会写进日志。
+                    </div>
+                </div>
                 <div class="upd-actions">
                     <button type="button" class="btn" id="btnUpdateCheck">检查更新</button>
                     <span class="upd-hint" id="updHint"></span>
@@ -1373,6 +1402,13 @@
                         <button type="button" class="btn" id="btnUpdateRestart" hidden>立即重启</button>
                         <button type="button" class="linkbtn" id="btnUpdatePage"
                                 title="在浏览器里打开这个版本的说明页">在网页上查看 ↗</button>
+                    </div>
+                    <!-- v1.5.7：完整下载地址（用户可以复制 / 也可点开）。
+                         没填令牌时这是**唯一**的下载入口，所以必须一直显示。 -->
+                    <div class="upd-link" id="updLinkRow" hidden>
+                        <span class="upd-link-k">GitHub 下载链接</span>
+                        <a class="upd-link-url" id="updDownloadLink" href="#"
+                           aria-label="在浏览器中打开 GitHub 下载链接"></a>
                     </div>
                     <div class="upd-note-tip" id="updDoneTip" hidden>
                         ✔ 新版本已经装好。点「立即重启」即可用上新版（不点也不会丢，下次开程序就是新版）。

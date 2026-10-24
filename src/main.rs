@@ -3791,6 +3791,9 @@ fn config_view() -> Value {
         "webdavOnExit": cfg.webdav_on_exit,
         // v1.2.0：自动更新开关。设置页「关于」里那个勾选框就是它。
         "autoUpdate": cfg.auto_update,
+        // v1.5.7：GitHub 个人访问令牌。和 webdavPass 一样是"要回显给本人改"的
+        // 凭据 —— 页面是本机文件，config.json 整体加密；但它**不进日志**。
+        "githubToken": cfg.github_token,
         "lastEngine": cfg.last_engine,
         // r54 识图搜索。跟设置走（是用户偏好，不是逐机器的东西）——
         // 换电脑恢复之后识图引擎的勾选要还在。
@@ -3977,6 +3980,13 @@ fn apply_view(v: &Value, cfg: &mut config::Config) {
     if let Some(x) = b("webdavOnExit") { cfg.webdav_on_exit = x; }
     // v1.2.0：自动更新开关（跟着备份/恢复走 —— 它是用户偏好，不是逐机器的东西）
     if let Some(x) = b("autoUpdate") { cfg.auto_update = x; }
+    // GitHub 令牌跟着备份走（换了电脑不用重填）。空值不覆盖：备份里没有这个键
+    // 是很常见的（旧版本导出的），照单全收会把本机已填的令牌清掉。
+    if let Some(x) = s("githubToken") {
+        if !x.trim().is_empty() {
+            cfg.github_token = x.trim().to_string();
+        }
+    }
     // 注意：这三项**空值不覆盖**。备份是在填 WebDAV 之前导出的很常见，
     // 要是照单全收把地址/密码清空，之后所有同步都会失败，用户还不一定反应过来。
     if let Some(x) = s("webdavUrl") {
@@ -4388,6 +4398,11 @@ fn apply_one_setting(cfg: &mut config::Config, key: &str, value: Value) -> Resul
         // v1.2.0：自动更新。⚠ `set_setting` 是白名单式的 —— 不在这里登记，
         // 前端勾选框「看着有反应、其实没存」（这个坑页内自检抓到过一次）。
         "autoUpdate" => cfg.auto_update = value.as_bool().unwrap_or(true),
+        /* GitHub 个人访问令牌（v1.5.7）。存原样，读的时候由
+         * `update::effective_token` 兼容 `用户名:令牌` 老格式；
+         * 这里只做一次 trim（前端可能带空格）。
+         * ⚠ 绝不写日志 —— 这是凭据。 */
+        "githubToken" => cfg.github_token = value.as_str().unwrap_or("").trim().to_string(),
         "webdavUrl" => {
             // 单键修改走的是设置页实时保存。这里只做「补协议 + 补尾斜杠」，
             // **不**把软件子目录写进配置（用户要求：地址栏只填根地址）。
@@ -5757,11 +5772,21 @@ impl Drop for UpdateGuard {
 static UPDATE_PENDING: std::sync::Mutex<Option<update::UpdateInfo>> =
     std::sync::Mutex::new(None);
 
-/// 把一次检查结果推给设置页（`qs://update`）。
+/// 拼一次「有新版」的载荷（`qs://update` 事件与 `update_pending` **共用**）。
 ///
-/// `manual = true` 时即使没有新版也要发（用户手动点的，必须给回话）。
-fn emit_update(info: &update::UpdateInfo, manual: bool) {
-    let payload = serde_json::json!({
+/// 抽成纯函数是为了让口径能被测试钉住：`can_auto` 由调用方传进来，
+/// 单测可以直接构造"检查时用了令牌、但现在没令牌"这种矛盾场景。
+///
+/// `can_auto` = 现在能不能在程序内自动下载（见 [`update::can_auto_download`]）。
+/// **绝不能**填 `info.authed`：那是"检查那一刻用没用上令牌"，
+/// 而启动时那次自动检查的结果会一直躺在 `UPDATE_PENDING` 里，
+/// 用户填/清令牌却发生在它之后（详见 `update::can_auto_download` 的注释）。
+fn update_payload(
+    info: &update::UpdateInfo,
+    manual: bool,
+    can_auto: bool,
+) -> serde_json::Value {
+    serde_json::json!({
         "version": info.version,
         "tag": info.tag,
         "newer": info.newer,
@@ -5769,8 +5794,26 @@ fn emit_update(info: &update::UpdateInfo, manual: bool) {
         "notes": info.notes,
         "size": info.size,
         "page": info.page,
+        /* 直接下载地址（没令牌时前端把它显示出来，让用户点去浏览器）。 */
+        "url": info.url,
+        /* 这次检查**实际**用没用上令牌 —— 只用于解释"为什么令牌没生效"。 */
+        "authed": info.authed,
+        /* 现在能不能在程序内自动下载 —— 界面按钮只认这一个。 */
+        "canAuto": can_auto,
+        "authWarning": info.auth_warning,
         "manual": manual,
-    });
+    })
+}
+
+/// 把一次检查结果推给设置页（`qs://update`）。
+///
+/// `manual = true` 时即使没有新版也要发（用户手动点的，必须给回话）。
+///
+/// 检测更新只有两条路 —— 启动后自动一次（`auto_check_on_start`）、
+/// 手动点一次（`update_check`）—— 两条都从这里出去，所以
+/// "没令牌不许自动下载"只需要在 [`update_payload`] 里判一次。
+fn emit_update(info: &update::UpdateInfo, manual: bool) {
+    let payload = update_payload(info, manual, update::can_auto_download());
     let _ = APP.get().map(|a| a.emit_to("settings", "qs://update", payload));
 }
 
@@ -5792,9 +5835,18 @@ fn do_check_update(manual: bool) {
     match update::check(current) {
         Ok(info) => {
             win::log(&format!(
-                "update: 检查完成 —— 远端 {}，当前 {current}，有新版={}",
-                info.tag, info.newer
+                "update: 检查完成 —— 远端 {}，当前 {current}，有新版={}，用令牌={}",
+                info.tag, info.newer, info.authed
             ));
+            /* 令牌有问题（过期 / 没权限）时后端已经自动降级成匿名请求了，
+             * 这里把原因说给用户听 —— 否则"填了令牌但没生效"完全无迹可寻。 */
+            if let Some(w) = &info.auth_warning {
+                win::log(&format!("update: 令牌提示 —— {w}"));
+                if manual {
+                    let _ = APP.get()
+                        .map(|a| a.emit_to("settings", "qs://toast", w.clone()));
+                }
+            }
             if info.newer {
                 if let Ok(mut g) = UPDATE_PENDING.lock() {
                     *g = Some(info.clone());
@@ -5840,6 +5892,10 @@ fn update_check() {
 }
 
 /// 前端打开「关于」页时问一句"现在有没有待装的新版"。
+///
+/// ⚠ 这**不是**第三种检测：不联网、不调 GitHub，只是把启动时那次自动检查
+/// 存下来的结果读出来（否则那次结果会随着"设置页还没打开"白白丢掉）。
+/// 里面的 `canAuto` 仍然**现算**，理由见 [`update::can_auto_download`]。
 #[tauri::command]
 fn update_pending() -> serde_json::Value {
     let g = match UPDATE_PENDING.lock() {
@@ -5847,14 +5903,12 @@ fn update_pending() -> serde_json::Value {
         Err(p) => p.into_inner(),
     };
     match g.as_ref() {
-        Some(i) => serde_json::json!({
-            "has": true,
-            "version": i.version,
-            "tag": i.tag,
-            "notes": i.notes,
-            "size": i.size,
-            "page": i.page,
-        }),
+        Some(i) => {
+            let mut v = update_payload(i, false, update::can_auto_download());
+            // 前端靠 has 判断"有没有待装的"，补上这一个键
+            v["has"] = serde_json::Value::Bool(true);
+            v
+        }
         None => serde_json::json!({ "has": false }),
     }
 }
@@ -5884,6 +5938,19 @@ async fn update_install() {
                 }
             }
         };
+        /* v1.5.7 / 用户 2026-10-24：「没填令牌时只提示有新版本、不自动下载」。
+         *
+         * 界面已经按 `canAuto` 把按钮换成了"去网页下载"，但后端必须再拦一道 ——
+         * 旧页面缓存、探针、或者用户点得太快都可能绕过界面判断。
+         *
+         * ⚠ 这里**现算**配置，不看 `info.authed`：那是"检查那一刻"的结论，
+         *   而启动时那次自动检查可能发生在用户填令牌之前。照抄旧结论会把
+         *   刚填好令牌的人挡在门外（反而更难理解）。 */
+        if !update::can_auto_download() {
+            win::log("update: 没有 GitHub 令牌，按口径不自动下载（只提示 + 给链接）");
+            wd_toast("没填 GitHub 令牌，只提示不自动下载 —— 点下面的下载链接去浏览器装");
+            return;
+        }
         win::log(&format!("update: 开始下载 {}", info.url));
         let app = APP.get().cloned();
         let mut last_emit = std::time::Instant::now();
@@ -14707,6 +14774,54 @@ mod tests {
             t0 + Duration::from_millis(800),
             Duration::from_millis(900)
         ));
+    }
+
+    /// 载荷里的 `canAuto` 只认"**现在**有没有令牌"，不认"检查时用没用上"。
+    ///
+    /// # 为什么要单独立一条（用户 2026-10-24 的补充要求）
+    ///
+    /// 用户的原话：「检测更新就只有两种形式，一种是软件打开的时候自动检测一次，
+    /// 另一种就是手动点击检测……如果没有填个人访问密钥的情况下，就算检测到了，
+    /// 也不能点击下载。」
+    ///
+    /// 两条路都走 [`update_payload`]，所以口径钉在这里就覆盖了全部入口。
+    /// 而这里最容易写错的地方是**把 `info.authed` 直接填进去** —— 那样会漏掉
+    /// "结果是缓存出来"的情形：启动 8 秒后那次自动检查把 `UpdateInfo` 存进
+    /// `UPDATE_PENDING`，用户之后才打开设置页、才填令牌，于是界面还举着
+    /// "用浏览器下载"（明明已经填了）。反过来清空令牌时更危险：界面举着
+    /// "下载并安装"，点下去被后端拦，等于骗了用户一次。
+    ///
+    /// 所以断言分两组，第 ② 组就是那个"矛盾场景"。
+    #[test]
+    fn 没令牌的载荷不许给自动下载() {
+        let info = update::UpdateInfo {
+            version: "99.0.0".into(),
+            tag: "v99.0.0".into(),
+            newer: true,
+            current: "1.5.7".into(),
+            notes: "说明".into(),
+            url: "https://example.com/QuickSearch.exe".into(),
+            size: 123,
+            sha256: "A".repeat(64),
+            page: "https://example.com/release".into(),
+            authed: true,           // ← 故意：这次检查用了令牌
+            auth_warning: None,
+        };
+
+        // ① 现在没令牌 → 不许自动下载（哪怕检查时用过令牌）
+        let a = update_payload(&info, true, false);
+        assert_eq!(a["canAuto"], serde_json::json!(false), "没令牌就必须只给链接");
+        assert_eq!(a["authed"], serde_json::json!(true), "authed 仍如实反映那次检查");
+        assert_eq!(
+            a["url"].as_str().unwrap_or(""),
+            "https://example.com/QuickSearch.exe",
+            "不给下载按钮，就必须把网址交出来，否则用户没有出路"
+        );
+
+        // ② 现在有令牌（检查时没有）→ 可以自动下载
+        let b = update_payload(&info, false, true);
+        assert_eq!(b["canAuto"], serde_json::json!(true), "填了令牌就该能自动下");
+        assert_eq!(b["manual"], serde_json::json!(false), "启动时那次仍标成非手动");
     }
 
     /// **横条圆角与图标外框圆角必须同心**（用户报的"外框圆角和横条不一致"）。

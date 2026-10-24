@@ -109,6 +109,21 @@ pub struct UpdateInfo {
     pub sha256: String,
     /// 这个 release 的网页地址（想让用户自己去看时用）
     pub page: String,
+    /// 这次查更新**是不是真的用了令牌**（诊断用）。
+    ///
+    /// 只进日志和"令牌为啥没生效"的提示，**不决定能不能下载** ——
+    /// 那个口径是 [`can_auto_download`]（按**现在**的配置现算）。
+    /// 两者会不一致，且这正是设计意图：
+    ///   · 启动时的自动检查没令牌，用户十分钟后才填 → 这里 `false`，但能下载；
+    ///   · 检查时令牌被 GitHub 拒掉 → 这里 `false`、`auth_warning` 有话说，
+    ///     但点下载照样能成（公开仓库的资产匿名可下，`open_update_stream`
+    ///     会先匿名、失败再带令牌重试）。
+    pub authed: bool,
+    /// 令牌有问题时的提示（只在"降级成匿名请求"那一轮出现，其余为 `None`）。
+    ///
+    /// 不放进日志（日志没人看），由界面显示一次 —— 用户填了个错令牌却毫无反应
+    /// 是最难查的那类问题。
+    pub auth_warning: Option<String>,
 }
 
 /// `1.2.10` 这类版本号 → 可比较的数字三元组。
@@ -171,34 +186,103 @@ fn agent() -> ureq::Agent {
         .build()
 }
 
+/// 把配置里存的那串「GitHub 个人访问令牌」洗成真正能用的令牌。
+///
+/// 做三件事（都是实测会踩的坑）：
+///   1. **兼容 `用户名:令牌` 这种老格式** —— 用户从别处抄配置、或者按某些
+///      教程填的，前面会带用户名。GitHub 的令牌本身不含冒号，有冒号就取后面
+///      那段（Obtainium 也专门做了这一步，见它的 `getTokenIfAny`）。
+///   2. 去掉所有空白与控制字符（粘贴时常带换行）。
+///   3. 空串 / 只有空白 → `None`（= 匿名请求，不是"填了个空令牌"）。
+///
+/// ⚠ 返回值是**凭据**：只能进 `Authorization` 头，不许进日志、不许拼 URL。
+pub fn effective_token(raw: &str) -> Option<String> {
+    let s = raw.trim().trim_matches(|c| c == '"' || c == '\'');
+    if s.is_empty() {
+        return None;
+    }
+    // `user:token` → 取冒号之后；`token:` 这种（冒号在末尾）不算老格式，按原样
+    let s = match s.find(':') {
+        Some(i) if i + 1 < s.len() => s[i + 1..].trim(),
+        _ => s,
+    };
+    let cleaned: String = s
+        .chars()
+        .filter(|c| !c.is_whitespace() && !c.is_control())
+        .collect();
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned)
+    }
+}
+
+/// 当前配置里的令牌（没有就是 `None`）。
+fn current_token() -> Option<String> {
+    crate::cfg_with(|c| effective_token(&c.github_token))
+}
+
+/// 「现在能不能在程序内自动下载」—— 全程序**唯一**口径。
+///
+/// 用户 2026-10-24 的要求：**没填个人访问令牌时，即使查到了新版本也不能点下载**，
+/// 只提示 + 给 GitHub 网址让浏览器去下。所以这条判断只认一件事：
+/// 配置里**现在**有没有可用令牌。
+///
+/// # 为什么每次都现算，不存"检查那一刻"的结论
+///
+/// 检测更新只有两条路（启动后自动一次 / 手动点一次），但结果会被缓存
+/// （`UPDATE_PENDING`）—— 存的是"8 秒后那次自动检查"的结论，而用户填令牌
+/// 是**之后**才发生的事。如果拿旧结论当依据，会出现两种自相矛盾的界面：
+///
+///   · 启动时没令牌查到新版 → 用户随后填了令牌 → 还举着"用浏览器下载"；
+///   · 检查时用了令牌 → 用户随后清空 → 还举着"下载并安装"，点了被后端拦。
+///
+/// 现算就没这个问题：填上立刻可下载，清掉立刻只给链接。
+///
+/// 注意它和 [`UpdateInfo::authed`] 不是一回事：那个记的是"**那次检查**实际
+/// 用上了令牌"（填了但被 GitHub 拒掉也是 false，用于日志与降级提示）；
+/// 这里是"**现在**有没有令牌"。令牌被拒时下载照样能成 —— 公开仓库的
+/// release 资产匿名就能下，`open_update_stream` 会先匿名、失败再带令牌重试。
+pub fn can_auto_download() -> bool {
+    current_token().is_some()
+}
+
 /// 查一次最新版本。
 ///
-/// 失败时给**人话**错误（网络不通 / 没有发布过 / 返回看不懂），
-/// 调用方直接把它显示给用户或写进日志。
+/// 失败时给**人话**错误（网络不通 / 没有发布过 / 看不懂返回），
+/// 调用方直接显示给用户或写进日志。
 ///
-/// # 两段式：先"拿版本号"，必要时才"拿详情"（抗 API 限流）
+/// # 两条路：填了令牌就直连 API，没填就尽量省额度
 ///
-/// GitHub 的 REST API 对**未认证**请求限到 60 次/小时，一台机器上多开几次
-/// 设置页、或者跟别的工具共用公网 IP，很容易撞上限流 —— 实测就撞过一次
-/// （`X-RateLimit-Remaining: 0`，回 403 且 body 为空）。用户那边的观感就是
-/// "检查更新老是失败"。
+/// **填了令牌**（v1.5.7 新增）：一次 `releases/latest` API 就把版本号、说明、
+/// 下载地址全拿到 —— 认证请求是 5000 次/小时，一次请求的成本可以忽略，而且
+/// 少一个来回更快。
 ///
-/// 所以分成两步：
+/// **没填令牌**：GitHub 对匿名请求只给 60 次/小时，撞上限流是常事
+/// （`X-RateLimit-Remaining: 0`，回 403 且 body 为空），用户那边的观感就是
+/// "检查更新老是失败"。所以走两段式：
 ///  1. **版本号**：请求 `github.com/.../releases/latest`，**不做重定向**，
 ///     从 302 的 `Location` 里抠出 tag。这条**不计入 API 限流**，且极快。
 ///  2. **详情**（说明 / 下载地址 / 体积）：只有第 1 步判出"确实有新版"才去调
 ///     API —— 也就是说，日常"已是最新版"的情况**一次 API 都不消耗**。
 pub fn check(current: &str) -> Result<UpdateInfo, String> {
+    match current_token() {
+        Some(tok) => check_with_token(current, &tok),
+        None => check_anonymous(current),
+    }
+}
+
+/// 没令牌那条路：302 省额度，确认有新版才调 API。
+fn check_anonymous(current: &str) -> Result<UpdateInfo, String> {
     let tag = latest_tag().or_else(|e| {
         crate::win::log(&format!("update: 302 拿 tag 失败（{e}），退回用 API"));
         latest_tag_via_api()
     })?;
     let version = tag.trim_start_matches(['v', 'V']).to_string();
-    let newer = is_newer(&version, current);
 
     /* 没有新版 → **不再调 API**，直接给一个"够用"的结果。
      * 调用方（手动检查）只需要知道"已是最新"，不需要说明与下载地址。 */
-    if !newer {
+    if !is_newer(&version, current) {
         return Ok(UpdateInfo {
             version,
             tag,
@@ -209,9 +293,37 @@ pub fn check(current: &str) -> Result<UpdateInfo, String> {
             size: 0,
             sha256: String::new(),
             page: RELEASES_URL.to_string(),
+            // 匿名请求 —— 前端据此只给"去网页下载"，不在程序内自动下
+            authed: false,
+            auth_warning: None,
         });
     }
-    fill_details(tag, version, current)
+    fill_details(current)
+}
+
+/// 有令牌那条路：一次 API 拿全（5000 次/小时的额度，没必要再省那一次）。
+///
+/// # 令牌被拒要能自己退回去（Obtainium 的做法）
+///
+/// 用户可能填了一个过期的、拼错的、或者没有这个仓库权限的令牌。这时候
+/// **不能让更新功能整个坏掉** —— 公开仓库匿名也能查。所以：
+/// 401/403 且 body 明确说令牌有问题 → 记一条日志、改成匿名请求再查一遍，
+/// 并把 `auth_warning` 带回前端提示用户（一次，不重复弹）。
+fn check_with_token(current: &str, token: &str) -> Result<UpdateInfo, String> {
+    match api_latest(Some(token)) {
+        Ok(v) => info_from_api(&v, current, true),
+        Err(ApiErr::AuthRejected) => {
+            crate::win::log("update: 令牌被 GitHub 拒了（不是限流）—— 退回匿名请求");
+            let mut info = check_anonymous(current)?;
+            info.auth_warning = Some(
+                "GitHub 令牌无效、已过期，或者没有这个仓库的权限 —— 已自动改用匿名请求，\
+                 额度会降到 60 次/小时"
+                    .to_string(),
+            );
+            Ok(info)
+        }
+        Err(e) => Err(e.into_message(true)),
+    }
 }
 
 /// 第 1 步：从 `releases/latest` 的 302 `Location` 里拿 tag（**不吃 API 限流**）。
@@ -258,7 +370,7 @@ fn latest_tag() -> Result<String, String> {
 
 /// 第 1 步的兜底：直接问 API 的 `tag_name`。
 fn latest_tag_via_api() -> Result<String, String> {
-    let j = api_latest()?;
+    let j = api_latest(None).map_err(|e| e.into_message(false))?;
     let tag = j
         .get("tag_name")
         .and_then(|x| x.as_str())
@@ -271,35 +383,156 @@ fn latest_tag_via_api() -> Result<String, String> {
     Ok(tag)
 }
 
-/// 调一次 `releases/latest` API，返回整份 JSON。
-fn api_latest() -> Result<serde_json::Value, String> {
-    let a = agent();
-    let resp = a
-        .get(&latest_api())
-        .set("Accept", "application/vnd.github+json")
-        .call()
-        .map_err(|e| match e {
-            ureq::Error::Status(404, _) => "这个仓库还没有发布过正式版本".to_string(),
-            /* 403 / 429 基本都是限流。给人话 + 明确的"等一会儿再试"，
-             * 而不是甩一个 "HTTP 403 Forbidden" 让用户猜。 */
-            ureq::Error::Status(403, _) | ureq::Error::Status(429, _) => {
-                "GitHub 接口暂时限流了（未登录请求每小时只有 60 次），过一会儿再试".to_string()
-            }
-            ureq::Error::Status(code, r) => {
-                let body = r.into_string().unwrap_or_default();
-                let head: String = body.chars().take(120).collect();
-                format!("GitHub 返回 HTTP {code}：{head}")
-            }
-            other => crate::ocr::explain(&other),
-        })?;
-    let text = resp.into_string().map_err(|e| format!("读取响应失败：{e}"))?;
-    serde_json::from_str(&text).map_err(|e| format!("返回的不是 JSON：{e}"))
+/// GitHub API 的错误分类。
+///
+/// 为什么要分类：三种错法对用户/程序的意义完全不同 ——
+///   · **令牌被拒**：可以（也应该）脱掉令牌用匿名请求再试一次，功能别整个坏掉；
+///   · **限流**：要告诉用户"还要等多久"，没填令牌的还要顺手告诉他怎么解决；
+///   · 其它：原样把人话错误抛给界面。
+///
+/// 顺序照 Obtainium 的做法（`githubErrorCheck`）：**先看限流头，再看认证** ——
+/// 有的令牌在额度耗尽时也会被回 401，先判认证就会误报"令牌无效"。
+enum ApiErr {
+    /// 令牌被拒（401/403 且 body 说 access token / bad credentials）
+    AuthRejected,
+    /// 限流。`Some(n)` = 还要等 n 分钟（从 `x-ratelimit-reset` 算出来的）
+    RateLimited(Option<u64>),
+    /// 其它错误（已经翻成人话）
+    Other(String),
 }
 
-/// 第 2 步：确实有新版时，去 API 拿说明 / 下载地址 / 体积。
-fn fill_details(tag: String, version: String, current: &str) -> Result<UpdateInfo, String> {
-    let v = api_latest()?;
-    let notes = v.get("body").and_then(|x| x.as_str()).unwrap_or("").to_string();
+impl ApiErr {
+    /// 翻成给用户看的一句话。`authed` = 这次请求有没有带令牌（决定提示文案）。
+    fn into_message(self, authed: bool) -> String {
+        match self {
+            ApiErr::AuthRejected => "GitHub 令牌无效或已过期 —— 到「更新」里换一个".to_string(),
+            ApiErr::RateLimited(minutes) => rate_limit_message(minutes, authed),
+            ApiErr::Other(s) => s,
+        }
+    }
+}
+
+/// 限流提示：说清"为什么"和"怎么解决"。
+///
+/// 没填令牌时**必须**带上"去填令牌"这条出路 —— 用户报的「检查更新老是失败」
+/// 就是撞了那 60 次/小时，而界面上原来只写"过一会儿再试"，等于没给办法。
+fn rate_limit_message(minutes: Option<u64>, authed: bool) -> String {
+    let wait = match minutes {
+        Some(m) => format!("约 {m} 分钟后恢复"),
+        None => "过一会儿再试".to_string(),
+    };
+    if authed {
+        format!("GitHub 接口限流了（这个令牌每小时的额度用完了）—— {wait}")
+    } else {
+        format!(
+            "GitHub 接口限流了（没填令牌时每小时只有 60 次）—— {wait}。\
+             到「更新」里填一个 GitHub 个人访问令牌，额度是 5000 次/小时"
+        )
+    }
+}
+
+/// 当前时间到某个 Unix 时间戳还有几分钟（向上取整，夹在 9999 以内）。
+///
+/// 时间戳已经过去 / 本机时钟比 GitHub 慢，都按 0 分钟算（不显示负数）。
+fn minutes_until(epoch: u64) -> Option<u64> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    // div_ceil：向上取整（"还剩 30 秒"要说成 1 分钟，不能说 0 分钟）
+    Some(epoch.saturating_sub(now).div_ceil(60).min(9999))
+}
+
+/// 把 401/403 的响应体翻成"这是不是令牌问题"。
+///
+/// 判据抄 Obtainium 的 `_isAuthRejection`：只看 body 里的 `message` 有没有
+/// `access token` / `bad credentials`。GitHub 对"令牌没这个仓库的权限"回的是
+/// `Resource not accessible by personal access token`，对过期令牌回
+/// `Bad credentials` —— 两种都要能自动降级，否则用户填错一个字符就再也
+/// 检查不了更新。
+fn auth_rejection(body: &str) -> bool {
+    let msg = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| {
+            v.get("message")
+                .and_then(|m| m.as_str())
+                .map(|s| s.to_ascii_lowercase())
+        })
+        .unwrap_or_default();
+    msg.contains("access token") || msg.contains("bad credentials") || msg.contains("bad oauth")
+}
+
+/// 调一次 `releases/latest` API，返回整份 JSON。
+///
+/// `token` = 要带的 GitHub 个人访问令牌（`None` = 匿名）。带令牌时请求头是
+/// `Authorization: Token <它>` —— 和 Obtainium 一致；GitHub 同时接受
+/// `Bearer`，但 `Token` 是 classic / fine-grained 都能用的那种写法。
+fn api_latest(token: Option<&str>) -> Result<serde_json::Value, ApiErr> {
+    let a = agent();
+    let mut req = a
+        .get(&latest_api())
+        .set("Accept", "application/vnd.github+json");
+    if let Some(t) = token {
+        req = req.set("Authorization", &format!("Token {t}"));
+    }
+    let resp = req.call().map_err(|e| match e {
+        ureq::Error::Status(code, r) => {
+            /* 先抓头，再读 body —— 顺序反了（先 into_string）头就没了。
+             * 这两个头是判断"限流还是别的"的唯一依据。 */
+            let remaining = r.header("x-ratelimit-remaining").map(|s| s.to_string());
+            let reset = r
+                .header("x-ratelimit-reset")
+                .and_then(|s| s.parse::<u64>().ok());
+            let body = r.into_string().unwrap_or_default();
+            if remaining.as_deref() == Some("0") {
+                return ApiErr::RateLimited(reset.and_then(minutes_until));
+            }
+            if (code == 401 || code == 403) && auth_rejection(&body) {
+                return ApiErr::AuthRejected;
+            }
+            match code {
+                404 => ApiErr::Other("这个仓库还没有发布过正式版本".to_string()),
+                // 没带限流头的 403/429 多半还是限流（GitHub 有时不给头）
+                403 | 429 => ApiErr::RateLimited(None),
+                _ => {
+                    let head: String = body.chars().take(120).collect();
+                    ApiErr::Other(format!("GitHub 返回 HTTP {code}：{head}"))
+                }
+            }
+        }
+        other => ApiErr::Other(crate::ocr::explain(&other)),
+    })?;
+    let text = resp
+        .into_string()
+        .map_err(|e| ApiErr::Other(format!("读取响应失败：{e}")))?;
+    serde_json::from_str(&text).map_err(|e| ApiErr::Other(format!("返回的不是 JSON：{e}")))
+}
+
+/// 从 API 的那份 JSON 里拼出 `UpdateInfo`。
+///
+/// `authed` = 这次是不是**真的**用了令牌。前端据此决定：有令牌 → 程序内
+/// 下载安装；没令牌 → 只提示有新版 + 给网页下载链接（用户 2026-10-24 的要求）。
+fn info_from_api(
+    v: &serde_json::Value,
+    current: &str,
+    authed: bool,
+) -> Result<UpdateInfo, String> {
+    let tag = v
+        .get("tag_name")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if tag.is_empty() {
+        return Err("这次响应里没有版本号（tag_name 缺失）".to_string());
+    }
+    let version = tag.trim_start_matches(['v', 'V']).to_string();
+    let newer = is_newer(&version, current);
+    let notes = v
+        .get("body")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
     let page = v
         .get("html_url")
         .and_then(|x| x.as_str())
@@ -307,7 +540,8 @@ fn fill_details(tag: String, version: String, current: &str) -> Result<UpdateInf
         .to_string();
 
     /* 挑更新包：资产名**恒为 QuickSearch.exe**（见 PUSH-GUIDE 的上传步骤）。
-     * 挑不到就报错 —— 不能给用户一个"有新版但没有下载地址"的状态。 */
+     * 有新版却挑不到就报错 —— 不能给用户一个"有新版但没有下载地址"的状态
+     * （没新版时 url 空着是正常的，界面根本不会展示下载入口）。 */
     let mut url = String::new();
     let mut size = 0u64;
     if let Some(assets) = v.get("assets").and_then(|x| x.as_array()) {
@@ -324,21 +558,74 @@ fn fill_details(tag: String, version: String, current: &str) -> Result<UpdateInf
             }
         }
     }
-    if url.is_empty() {
+    if newer && url.is_empty() {
         return Err(format!("{tag} 这个版本里没有 QuickSearch.exe 更新包"));
     }
 
     Ok(UpdateInfo {
-        newer: true,
+        version,
+        tag,
+        newer,
+        current: current.to_string(),
         sha256: sha_from_notes(&notes),
         notes,
         url,
         size,
         page,
-        version,
-        tag,
-        current: current.to_string(),
+        authed,
+        auth_warning: None,
     })
+}
+
+/// 没令牌那条路的第 2 步：确实有新版时，去 API 拿说明 / 下载地址 / 体积。
+fn fill_details(current: &str) -> Result<UpdateInfo, String> {
+    let v = api_latest(None).map_err(|e| e.into_message(false))?;
+    info_from_api(&v, current, false)
+}
+
+/// 下载请求的失败文案。
+fn download_error(e: ureq::Error) -> String {
+    match e {
+        ureq::Error::Status(code, r) => {
+            let body = r.into_string().unwrap_or_default();
+            let head: String = body.chars().take(120).collect();
+            format!("下载更新包失败：HTTP {code} {head}")
+        }
+        other => format!("下载更新包失败：{}", crate::ocr::explain(&other)),
+    }
+}
+
+/// 打开更新包的下载流。
+///
+/// 先按**匿名**请求：本项目的 release 资产是公开的，匿名一定能下 ——
+/// 反过来，填了一个"对这个仓库没权限"的令牌去下载，反而可能被拒。
+/// 只有匿名被拒（401/403/404，私有仓库的表现）且**确实配了令牌**时，
+/// 才带令牌重试一次。
+fn open_update_stream(
+    a: &ureq::Agent,
+    url: &str,
+    token: Option<&str>,
+) -> Result<Box<dyn std::io::Read + Send + Sync + 'static>, String> {
+    match a.get(url).call() {
+        Ok(r) => Ok(r.into_reader()),
+        Err(ureq::Error::Status(code, _)) if matches!(code, 401 | 403 | 404) => match token {
+            Some(t) => {
+                crate::win::log(&format!(
+                    "update: 匿名下载被拒（HTTP {code}），改用配置里的令牌重试"
+                ));
+                a.get(url)
+                    .set("Authorization", &format!("Token {t}"))
+                    .call()
+                    .map(|r| r.into_reader())
+                    .map_err(download_error)
+            }
+            None => Err(format!(
+                "下载更新包失败：HTTP {code} —— 这个包可能不是公开的，\
+                 试试在「更新」里填一个 GitHub 个人访问令牌"
+            )),
+        },
+        Err(e) => Err(download_error(e)),
+    }
 }
 
 /// 下载更新包到 `<exe 同目录>/QuickSearch.exe.new`，返回落地路径。
@@ -367,18 +654,7 @@ pub fn download(
 
     let a = agent();
     let total = if info.size > 0 { info.size } else { 0 };
-    let mut reader = a
-        .get(&info.url)
-        .call()
-        .map_err(|e| match e {
-            ureq::Error::Status(code, r) => {
-                let body = r.into_string().unwrap_or_default();
-                let head: String = body.chars().take(120).collect();
-                format!("下载更新包失败：HTTP {code} {head}")
-            }
-            other => format!("下载更新包失败：{}", crate::ocr::explain(&other)),
-        })?
-        .into_reader();
+    let mut reader = open_update_stream(&a, &info.url, current_token().as_deref())?;
 
     let mut file =
         std::fs::File::create(&new_path).map_err(|e| format!("写更新包失败（磁盘满？）：{e}"))?;
@@ -631,5 +907,105 @@ mod tests {
         if std::env::var("QS_UPDATE_WEB").is_err() {
             assert_eq!(latest_web(), format!("{RELEASES_URL}/latest"));
         }
+    }
+
+    /// 令牌清洗：三种"粘贴垃圾" + Obtainium 那种 `用户名:令牌` 老格式。
+    ///
+    /// 这一条对着的是真实场景：用户从网页上框选复制 → 前后带换行；
+    /// 从终端 echo 出来 → 中间夹换行；照老教程填 → 带用户名。任何一处没洗，
+    /// `Authorization: Token …` 都会 401，而用户只看到"检查更新失败"。
+    #[test]
+    fn 令牌清洗兼容老格式与粘贴垃圾() {
+        assert_eq!(effective_token(""), None);
+        assert_eq!(effective_token("  \n\t "), None, "只有空白 = 没填，不是空令牌");
+
+        assert_eq!(effective_token("ghp_abc123"), Some("ghp_abc123".into()));
+        // 从网页/终端复制常见的三种垃圾
+        assert_eq!(effective_token("  \"ghp_abc\"\n"), Some("ghp_abc".into()));
+        assert_eq!(effective_token("ghp_a\nbc"), Some("ghp_abc".into()));
+        // `用户名:令牌` 老格式（Obtainium 的 getTokenIfAny 也专门兼容这一种）
+        assert_eq!(effective_token("octocat:ghp_abc"), Some("ghp_abc".into()));
+        // 冒号在末尾 → 不是老格式，原样保留（宁可多一个字符，也别把令牌吞了）
+        assert_eq!(effective_token("ghp_abc:"), Some("ghp_abc:".into()));
+        // fine-grained 令牌里的下划线不能被当成垃圾洗掉
+        assert_eq!(
+            effective_token("github_pat_11A_ bbb"),
+            Some("github_pat_11A_bbb".into())
+        );
+    }
+
+    /// 从 API 结果拼 `UpdateInfo`：挑对资产、把 `authed` 原样传下去。
+    ///
+    /// `authed` 是 v1.5.7 的关键：前端拿它决定"程序内下载"还是"只给网页链接"。
+    #[test]
+    fn 从api结果拼出更新信息并带上令牌状态() {
+        let sha = "A".repeat(64);
+        let v = serde_json::json!({
+            "tag_name": "v9.9.9",
+            "body": format!("修复若干\nSHA256: {sha}"),
+            "html_url": "https://github.com/QQQOrange/QuickSearch/releases/tag/v9.9.9",
+            "assets": [
+                { "name": "other.zip", "size": 9, "browser_download_url": "https://x/other.zip" },
+                { "name": "QuickSearch.exe", "size": 123, "browser_download_url": "https://x/QuickSearch.exe" }
+            ]
+        });
+        let info = info_from_api(&v, "1.0.0", true).expect("应当能拼出来");
+        assert_eq!(info.version, "9.9.9");
+        assert_eq!(info.tag, "v9.9.9");
+        assert!(info.newer);
+        assert!(info.authed, "令牌状态要传给前端");
+        assert_eq!(info.url, "https://x/QuickSearch.exe", "只认 exe 资产");
+        assert_eq!(info.size, 123);
+        assert_eq!(info.sha256, sha);
+        assert!(info.auth_warning.is_none());
+
+        // 匿名 / 令牌被拒降级 → 必须 false（否则前端会给一个必定 403 的下载按钮）
+        assert!(!info_from_api(&v, "1.0.0", false).unwrap().authed);
+    }
+
+    /// 有新版却没 exe 资产 → 报错（不能给"有新版但没下载地址"的状态）；
+    /// 没新版时没资产是正常的（界面根本不展示下载入口）。
+    #[test]
+    fn 有新版但没有安装包要报错() {
+        let v = serde_json::json!({ "tag_name": "v9.9.9", "assets": [] });
+        assert!(info_from_api(&v, "1.0.0", true).is_err());
+
+        let v2 = serde_json::json!({ "tag_name": "v0.9.0", "assets": [] });
+        let i = info_from_api(&v2, "1.0.0", true).unwrap();
+        assert!(!i.newer);
+        assert_eq!(i.url, "");
+    }
+
+    /// 限流文案：必须说清"等多久"和"怎么彻底解决"。
+    ///
+    /// 用户报的「检查更新老是失败」就是撞了匿名 60 次/小时，而老文案只写
+    /// "过一会儿再试" —— 等于没给办法。
+    #[test]
+    fn 限流提示要给出填令牌这条出路() {
+        let anon = rate_limit_message(Some(37), false);
+        assert!(anon.contains("37 分钟"), "要告诉用户还要等多久：{anon}");
+        assert!(
+            anon.contains("个人访问令牌"),
+            "没令牌时必须告诉他怎么解决：{anon}"
+        );
+
+        let authed = rate_limit_message(None, true);
+        assert!(authed.contains("令牌"), "带上令牌后说的是令牌额度：{authed}");
+        assert!(
+            !authed.contains("60 次"),
+            "填了令牌就别再提匿名额度，会让人以为令牌没用上：{authed}"
+        );
+    }
+
+    /// 恢复时间按分钟**向上取整**，过期时间戳不能算出负数。
+    #[test]
+    fn 限流恢复时间按分钟向上取整() {
+        assert_eq!(minutes_until(0), Some(0), "过期时间戳 → 0，不能是负数");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        // 10 分钟后：±几秒的执行误差不会跨过分钟边界
+        assert_eq!(minutes_until(now + 600), Some(10));
     }
 }

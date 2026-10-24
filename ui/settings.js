@@ -3063,6 +3063,9 @@ const TEXTS = [
     ['w-webdavUser', 'webdavUser'],
     ['w-webdavPass', 'webdavPass'],
     ['w-backupPass', 'backupPassword'],
+    /* v1.5.7：GitHub 个人访问令牌。走同一套 change → set_setting，不另起逻辑；
+     * 「检查更新」按钮点击时还会再落一次盘（见 updInit），防止 IPC 顺序问题。 */
+    ['s-githubToken', 'githubToken'],
     // r54：识图的「公网图片地址」。⚠ 后端 apply_one_setting 只收 http(s) 开头的
     //   值（见 main.rs 的 imgPublicUrl 分支）—— 填个 file:// 之类的会被拒，
     //   所以界面在失焦时提示一句，别让人以为存进去了。
@@ -6654,6 +6657,15 @@ function webviewLabel() {
  *  发新版时**同时**加一条，对不上就是漏了。 */
 const CHANGELOG = [
     {
+        ver: 'v1.5.7',
+        items: [
+            '<b>新增：GitHub 个人访问令牌（解决"检查更新老是失败"）</b> —— 更新页多了一个输入框，填上令牌后所有 GitHub 请求都会带上它，接口额度从 <b>60 次/小时</b> 提到 <b>5000 次/小时</b>。不用再靠"少调接口"绕限额：有令牌时一次请求就把版本号、说明、下载地址全拿回来。令牌只存在<b>本机加密配置</b>里，不会上传、也<b>不会写进日志</b>；填错或过期时会自动退回匿名请求，并明确告诉你原因，不会让更新功能整个坏掉。',
+            '<b>没填令牌时：只提示有新版本，不自动下载</b> —— 按你说的加了一条判断：没有令牌时程序<b>不执行自动下载</b>，而是把 GitHub 下载链接<b>完整显示出来</b>，点一下（或点「用浏览器下载」）就在浏览器里下。填了令牌才是原来的「下载并安装」——程序内下好、校验、替换。这条对<b>两种检测方式都成立</b>：启动时自动查到的、手动点「检查更新」查到的，一律只给链接；后端还有一道硬拦，绕不过去。判断按<b>当前</b>配置现算 —— 你当场填上令牌，按钮立刻就变，不用再查一次。',
+            '<b>令牌旁边加了问号</b> —— 鼠标悬停或键盘聚焦会浮出提示气泡，点一下在浏览器打开 <b>GitHub 官方中文帮助文档</b>（什么是个人访问令牌、怎么创建、要勾哪些权限）。图标用原生按钮实现：Tab 能聚焦、回车/空格能触发，读屏软件也能念出用途。',
+            '⚠ 一个容易忽略的细节：令牌输入框支持粘贴时常见的三种垃圾（首尾空白、中间换行、外层引号），也兼容 <code>用户名:令牌</code> 这种从别处抄来的老格式 —— 不然你复制过来的值会带着一个看不见的换行，然后一直 401。',
+        ],
+    },
+    {
         ver: 'v1.5.6',
         items: [
             '<b>补一条逻辑：Ctrl+C 哪怕没复制到文本，也一定弹横条</b> —— 你指出的：「现在有两种唤出横条的方式，一种是选中文本，一种是用 Ctrl+C，所以按 Ctrl+C 的时候，哪怕没有复制到文本，那也得换出横条」。以前这条通道其实<b>挂在"剪贴板必须变"这个前提上</b>：在那些"不接受复制"的软件里按 Ctrl+C，你看到的和"没这个功能"一模一样。现在 Ctrl+C <b>无条件弹</b>：复制成功就带文字弹；复制到的是图片就弹「识别图片文字」；什么都没复制到就弹一条<b>空横条</b>（还能点识图 / OCR，至少知道软件在工作）。',
@@ -6961,8 +6973,19 @@ function fillAbout() {
 /*   update_restart   → 起新进程再退出自己                                */
 /* ------------------------------------------------------------------ */
 
-/** 最近一次「有新版」的详情（`qs://update` / `update_pending` 都往里写）。 */
+/** 最近一次「有新版」的详情（`qs://update` / `update_pending` 都往里写）。
+ *  结构：{ version, notes, size, page, url, canAuto }。
+ *  `canAuto` = **现在**能不能在程序内自动下载（后端按当前配置现算），
+ *  它决定主按钮是「下载并安装」还是「用浏览器下载」。
+ *  `authed` 只是"那次检查实际用没用上令牌"，仅用于解释提示，不参与这个判断。 */
 let UPD_INFO = null;
+
+/** GitHub 个人访问令牌的官方中文帮助文档（那个问号图标点开的地址）。
+ *
+ *  集中放在这里：以后再改链接只动这一行，不用在 DOM / 事件里翻。
+ *  ⚠ 用 `open_links` 交给系统浏览器打开，不在 WebView 里跳 —— 设置页是本地
+ *    页面，跳走就回不来了。 */
+const GITHUB_PAT_DOC_URL = 'https://docs.github.com/zh/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens';
 
 /** 把字节数变成人话（和 Rust 的 aimodels::human_size 同口径）。 */
 function updSizeText(n) {
@@ -6990,6 +7013,78 @@ function updPaintProgress(done, total) {
 }
 
 /** 有新版 → 把详情块摆出来。 */
+/** 把「这次能不能在程序内自动下载」画到界面上。
+ *
+ *  口径（用户 2026-10-24）：**没填 GitHub 令牌时只提示有新版本、不自动下载**，
+ *  并给出 GitHub 下载链接让用户点去浏览器。所以：
+ *    · 有令牌 → 主按钮「下载并安装」；
+ *    · 没令牌 → 主按钮「用浏览器下载」，并把完整网址显示在下面。
+ *
+ *  判断只看 `canAuto`（后端按**当前**配置现算），不看 `authed`
+ *  —— 后者是"检查那一刻用没用上令牌"，而启动时的检查比用户填令牌更早，
+ *  拿它当依据会让"刚填好令牌"和"刚清空令牌"两种情形都显示错。 */
+function updPaintAuthMode() {
+    const info = UPD_INFO || {};
+    const canAuto = !!info.canAuto;
+    const url = info.url || '';
+    const ins = $('btnUpdateInstall');
+    if (ins) {
+        ins.textContent = canAuto ? '下载并安装' : '用浏览器下载';
+        ins.hidden = false;
+        ins.disabled = false;
+    }
+    const row = $('updLinkRow');
+    const link = $('updDownloadLink');
+    if (link) {
+        if (url) {
+            // 同时显示完整网址：用户能看清、能复制，也能点开
+            link.textContent = url;
+            link.setAttribute('href', url);
+        } else {
+            link.textContent = '';
+            link.removeAttribute('href');
+        }
+    }
+    if (row) row.hidden = !url;
+}
+
+/** 输入框里这一串算不算"填了令牌"（后端 `effective_token` 的轻量镜像）。
+ *
+ *  只用来**预先**改按钮文字，不做校验：真正说了算的是后端（它还会截长、
+ *  落盘前再清洗一遍，并用 `can_auto_download()` 现算）。这里宁可判宽一点 ——
+ *  判宽了最多是"显示能下、点下去被后端拦一句"，判窄了会让人以为填了没用。 */
+function updTokenFilled(v) {
+    let s = String(v == null ? '' : v).trim();
+    // 外层成对引号（从网页 / 文档里复制常带）
+    if (s.length >= 2 && (s[0] === '"' || s[0] === "'") && s[s.length - 1] === s[0]) {
+        s = s.slice(1, -1);
+    }
+    // 兼容从别处抄来的 `用户名:令牌` 老格式
+    const colon = s.indexOf(':');
+    if (colon >= 0) s = s.slice(colon + 1);
+    // 去掉粘贴时混进来的空白 / 换行 / 控制字符，剩下的才算数
+    return s.replace(/[\s\u0000-\u001f\u007f]/g, '').length > 0;
+}
+
+/** 令牌输入框变了 → 若正摆着"发现新版本"，按钮跟着变。
+ *
+ *  不联网、不问后端：只是把同一个口径（有没有令牌）重画一次。 */
+function updSyncCanAuto(tokenValue) {
+    if (!UPD_INFO) return;
+    const canAuto = updTokenFilled(tokenValue);
+    if (!!UPD_INFO.canAuto === canAuto) return;
+    UPD_INFO.canAuto = canAuto;
+    updPaintAuthMode();
+    const hint = $('updHint');
+    if (hint && UPD_INFO.version) {
+        hint.textContent = canAuto
+            ? '发现新版本 v' + UPD_INFO.version + '，可以下载'
+            : '发现新版本 v' + UPD_INFO.version
+                + ' —— 没填 GitHub 令牌，请点下面的链接去浏览器下载';
+    }
+}
+
+/** 发现新版时的详情块。 */
 function updShowFound(v) {
     const box = $('updFound');
     if (!box) return;
@@ -7006,9 +7101,8 @@ function updShowFound(v) {
          *   Markdown 的换行照样看得清。 */
         notes.textContent = (UPD_INFO && UPD_INFO.notes) || '（这个版本没有写说明）';
     }
-    // 已经有下载好的包时，按钮状态由 qs://update-done 决定
-    const ins = $('btnUpdateInstall');
-    if (ins) ins.hidden = false;
+    // 主按钮的形态（自动下载 / 只用浏览器）与下载链接都在这儿定
+    updPaintAuthMode();
 }
 
 /** 打开「关于」页时问后端一句"有没有待装的"，并把仓库按钮接上。 */
@@ -7022,6 +7116,44 @@ function updInit() {
             invoke('open_repo_page').catch(() => {});
         });
     }
+    /* v1.5.7：令牌相关的三个入口。都不改输入框原有的保存逻辑
+     * （它在 TEXTS 里，change 时自动 set_setting），这里只做加法。 */
+    const help = $('btnGithubTokenHelp');
+    if (help && !help.dataset.bound) {
+        help.dataset.bound = '1';
+        /* 原生 <button>：Tab 能聚焦，Enter / Space 会自动派发 click ——
+         * 键盘用户不需要额外处理。这里只负责"打开官方文档"。 */
+        help.addEventListener('click', () => {
+            invoke('open_links', { links: [GITHUB_PAT_DOC_URL] })
+                .catch((e) => toast('打不开帮助文档：' + e));
+        });
+    }
+    const clr = $('btnGithubTokenClear');
+    if (clr && !clr.dataset.bound) {
+        clr.dataset.bound = '1';
+        clr.addEventListener('click', () => {
+            const el = $('s-githubToken');
+            if (el) el.value = '';
+            if (CONF) CONF.githubToken = '';
+            updSyncCanAuto('');
+            invoke('set_setting', { key: 'githubToken', value: '' })
+                .then(() => toast('已清空令牌，改回匿名请求（每小时 60 次）'))
+                .catch((e) => toast('清空失败：' + e));
+        });
+    }
+    /* 输入框一改，按钮立刻跟着变。
+     *
+     * 为什么要这一步：如果这会儿已经摆着"发现新版本"，而用户就地填上令牌，
+     * 按钮还写着「用浏览器下载」就说不通了（他明明已经填了）。这里不联网、
+     * 不问后端 —— 只是按同一个口径（有没有令牌）重画一次，省掉"再点一次
+     * 检查更新"的动作。真正拦下载的仍是后端。 */
+    const tokEl0 = $('s-githubToken');
+    if (tokEl0 && !tokEl0.dataset.canauto) {
+        tokEl0.dataset.canauto = '1';
+        const sync = () => updSyncCanAuto(tokEl0.value);
+        tokEl0.addEventListener('input', sync);
+        tokEl0.addEventListener('change', sync);
+    }
     const check = $('btnUpdateCheck');
     if (check && !check.dataset.bound) {
         check.dataset.bound = '1';
@@ -7034,7 +7166,14 @@ function updInit() {
             //   时也会发 qs://toast 说明原因。但按钮不能一直按不动，
             //   给一个 20 秒的保险（比后端的 15 秒超时稍长）。
             setTimeout(() => { check.disabled = false; }, 20000);
-            invoke('update_check').catch((e) => {
+            /* ⚠ 先把输入框里的令牌落盘再查：change 事件虽然会在点击时先触发，
+             *   但两条 IPC 不保证按顺序执行 —— 用户"粘贴完直接点检查更新"很可能
+             *   用的是落盘前的旧令牌，看起来就是"填了没生效"。 */
+            const tokEl = $('s-githubToken');
+            const saved = tokEl
+                ? invoke('set_setting', { key: 'githubToken', value: tokEl.value }).catch(() => {})
+                : Promise.resolve();
+            saved.then(() => invoke('update_check')).catch((e) => {
                 if (hint) hint.textContent = '检查失败：' + e;
             });
         });
@@ -7043,6 +7182,20 @@ function updInit() {
     if (ins && !ins.dataset.bound) {
         ins.dataset.bound = '1';
         ins.addEventListener('click', () => {
+            const info = UPD_INFO || {};
+            /* 没令牌 → 按口径不自动下载，直接把这个包交给浏览器。
+             * 后端 `update_install` 还有同样一道拦截（双保险）。 */
+            if (!info.canAuto) {
+                if (!info.url) {
+                    toast('没有拿到下载地址，先点「检查更新」');
+                    return;
+                }
+                const hint0 = $('updHint');
+                if (hint0) hint0.textContent = '已在浏览器中打开下载链接';
+                invoke('open_links', { links: [info.url] })
+                    .catch((e) => toast('打不开下载链接：' + e));
+                return;
+            }
             ins.disabled = true;
             const hint = $('updHint');
             if (hint) hint.textContent = '正在下载…';
@@ -7051,6 +7204,23 @@ function updInit() {
                 toast('下载失败：' + e);
                 ins.disabled = false;
             });
+        });
+    }
+    /* 下载链接那一行：也走系统浏览器。用 <a> 是为了让"复制链接地址"
+     * 这类浏览器原生操作照常可用，所以 href 填真地址、点击时再拦住。 */
+    const dl = $('updDownloadLink');
+    if (dl && !dl.dataset.bound) {
+        dl.dataset.bound = '1';
+        const openDl = (e) => {
+            if (e) e.preventDefault();
+            const url = (UPD_INFO && UPD_INFO.url) || dl.getAttribute('href') || '';
+            if (!url || url === '#') return;
+            invoke('open_links', { links: [url] }).catch((err) => toast('打不开下载链接：' + err));
+        };
+        dl.addEventListener('click', openDl);
+        // <a> 回车本来就会派发 click；补一个空格，和原生按钮手感一致
+        dl.addEventListener('keydown', (e) => {
+            if (e.key === ' ' || e.key === 'Spacebar') openDl(e);
         });
     }
     const rst = $('btnUpdateRestart');
@@ -7075,10 +7245,16 @@ function updInit() {
     // 问一句有没有待装的（启动时那次检查的结果可能已经在那儿了）
     invoke('update_pending').then((r) => {
         if (r && r.has) {
-            UPD_INFO = { version: r.version, notes: r.notes, size: r.size, page: r.page };
+            UPD_INFO = {
+                version: r.version, notes: r.notes, size: r.size, page: r.page,
+                url: r.url, authed: !!r.authed, canAuto: !!r.canAuto,
+            };
             updShowFound(r.version);
             const hint = $('updHint');
-            if (hint) hint.textContent = '发现新版本 v' + r.version;
+            if (hint) {
+                hint.textContent = '发现新版本 v' + r.version
+                    + (r.canAuto ? '' : ' —— 没填 GitHub 令牌，请点下面的链接去浏览器下载');
+            }
         }
     }).catch(() => {});
 }
@@ -7095,15 +7271,25 @@ listen('qs://update', (ev) => {
     if (check) check.disabled = false;
     const hint = $('updHint');
     if (p.newer) {
-        UPD_INFO = { version: p.version, notes: p.notes, size: p.size, page: p.page };
+        UPD_INFO = {
+            version: p.version, notes: p.notes, size: p.size, page: p.page,
+            url: p.url, authed: !!p.authed, canAuto: !!p.canAuto,
+        };
         updShowFound(p.version);
-        if (hint) hint.textContent = '发现新版本 v' + p.version + '，可以下载';
+        if (hint) {
+            hint.textContent = p.canAuto
+                ? '发现新版本 v' + p.version + '，可以下载'
+                : '发现新版本 v' + p.version + ' —— 没填 GitHub 令牌，请点下面的链接去浏览器下载';
+        }
     } else {
         const found = $('updFound');
         if (found) found.hidden = true;
         if (hint) hint.textContent = '已是最新版本（v' + (p.current || CONF.version || '—') + '）';
         if (p.manual) toast('已是最新版本');
     }
+    /* 令牌填了但 GitHub 不认（过期 / 没权限）：后端已经自动降到匿名请求，
+     * 那句原因必须让用户看见，否则"填了令牌却还是 60 次/小时"完全查不出来。 */
+    if (p.authWarning) toast(p.authWarning);
 });
 
 /* 下载进度 */
