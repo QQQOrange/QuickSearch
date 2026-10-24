@@ -17,9 +17,82 @@
 |---|---|
 | 本地仓库 | ✅ 分支 `main`，工作区干净 |
 | 远端配置 | ✅ `origin` = `https://github.com/QQQOrange/QuickSearch.git` |
-| GitHub 凭据 | ✅ 凭据管理器里有（`git credential fill` 能拿到） |
+| GitHub 凭据 | ✅ 凭据管理器里有（`git credential fill` 能拿到，2026-10-25 验证 200） |
 | 网络 | ⚠️ **间歇性**：`github.com:443` 时通时不通；`api.github.com` 一直可用 |
-| 发布 | ✅ Release `v1.0.0`、`v1.1.0`、`v1.1.1`、`v1.2.0` |
+| 发布 | ✅ 最新 Release **v1.5.10**（2026-10-25），资产 `QuickSearch.exe` 13,415,936 字节 |
+
+---
+
+## 2026-10-25 发 v1.5.10 时踩到的三个坑（都已解决，记下来免得重犯）
+
+### 1. 远端历史可能是走 API 建的，push 前**必须先 fetch 比较**
+
+v1.5.0~v1.5.3 当年是走 API 推的，commit SHA 与本地**不同**（内容相同）。
+于是 `git push origin main` 直接：
+
+```text
+! [rejected]  main -> main (fetch first)
+hint: Updates were rejected because the remote contains work that you do not have locally.
+```
+
+正确做法（**不要 force push**）：
+
+```bash
+git fetch origin main
+git diff --stat <本地对应的那个版本> origin/main   # 为空 = 内容一致
+git rebase --onto origin/main <本地对应的那个版本> main
+```
+
+实测 `git diff --stat 5eda648 ad74d58` 为空 → rebase 8 个 commit 一次过、零冲突。
+
+> ⚠ **rebase 之后所有 tag 都指向旧 SHA**，要重打：
+> ```bash
+> for v in 1.5.4 1.5.5 1.5.6 1.5.7 1.5.8 1.5.9 1.5.10; do
+>   sha=$(git log --format="%H %s" | grep -F "（v$v）" | head -1 | cut -d' ' -f1)
+>   git tag -f "v$v" "$sha"
+> done
+> ```
+
+### 2. 判断 push 成功**不能只 grep `main -> main`**
+
+被拒的那一行**也**长这样：
+
+```text
+! [rejected]        main -> main (fetch first)
+```
+
+所以必须先排除 `rejected`：
+
+```bash
+if echo "$out" | grep -qE "main -> main" && ! echo "$out" | grep -q rejected; then ...
+```
+
+或者干脆用 API 核对远端 SHA（最可靠）：
+
+```bash
+curl -s https://api.github.com/repos/QQQOrange/QuickSearch/commits/main | grep -m1 '"sha"'
+```
+
+### 3. git 协议持续不通时，**单文件更新走 Contents API**
+
+`CONNECT tunnel failed, response 502` 连续 10 轮都不通，但 `api.github.com` 正常。
+这时不要硬等，用 Contents API 改那一个文件：
+
+```bash
+# 1) 先拿远端当前 sha
+curl -H "Authorization: token $TOKEN" \
+  "https://api.github.com/repos/QQQOrange/QuickSearch/contents/<path>?ref=main"
+# 2) PUT 回去（content 用 base64，带上 sha 和 branch）
+curl -X PUT ... "https://api.github.com/repos/QQQOrange/QuickSearch/contents/<path>"
+```
+
+> 副作用：会产生一个 SHA 与本地不同的 commit，本地 `origin/main` 看起来"落后"。
+> 等网络恢复 `git fetch` + `git rebase` 即可自愈 —— 改动内容相同，Git 会判定
+> "patch already applied" 直接跳过。**内容已核对一致**（2026-10-25 实测 4645 字符全等）。
+
+> ⚠ 附件（exe）**不能**走 Contents API，必须走
+> `POST https://uploads.github.com/repos/<owner>/<repo>/releases/<id>/assets?name=QuickSearch.exe`
+> ，`Content-Type: application/octet-stream`，成功返回 **201**。
 
 ---
 
@@ -119,8 +192,14 @@ Invoke-WebRequest -Method Post -Uri "https://api.github.com/repos/QQQOrange/Quic
 - [ ] `cargo test` 全过、`cargo clippy` 0 warning
 - [ ] 真机探针全过
 - [ ] 四处版本号一致（`Cargo.toml` / `tauri.conf.json` / `package.json` / `package-lock.json`）
+      —— ⚠ `package.json` 最容易漏（v1.5.4~v1.5.9 就一直停在 1.5.3 没动）
 - [ ] `docs/RELEASE-v<版本>.md` 已写，校验值与实际产物一致
 - [ ] **发布说明里有一行 `SHA256: <64 位十六进制>`**（自动更新靠它校验更新包）
+- [ ] **push 前先 `git fetch` 比较本地与远端**（远端若是 API 建的会 rejected，见坑 1）
+- [ ] Release 建完**核对三件事**：`releases/latest` 指向新 tag、资产
+      `state == "uploaded"`、`size` 与本地产物一致
+      —— ⚠ **资产数 0 时自动更新能"检查到新版"却装不了**，v1.5.10 差点漏掉
+- [ ] 从更早版本直升的用户：发布说明里要有**累积改动说明**（中间版本不单独发 release）
 - [ ] 产物目录没有 `onnxruntime.dll`
 - [ ] README 与 PRD 里**没有**已删除功能的描述（如"手动补描""颜色解混"）
 - [ ] 许可文件与 README/发布说明里的许可是同一个
