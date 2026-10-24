@@ -554,6 +554,45 @@ fn pick_bar_side(
     }
 }
 
+/// 把拖选矩形（按下点 → 抬起点，屏幕物理 px）折成可以当「文字行矩形」用的框，
+/// 供 [`pick_bar_side`] 判断上下两侧放不放得下。
+///
+/// # 为什么需要这一步（v1.5.5，用户报「上方下方都弹在下面」）
+///
+/// `win::caret_box()` 走的是 `GetGUIThreadInfo`，只有**原生文本控件**才会报
+/// `rcCaret`；Chromium 系浏览器 / Electron 的网页光标是渲染进程自己画的，
+/// 这一层永远是空矩形。实测日志里每一行都是：
+///
+/// ```text
+/// show_bar: atMouse=false cfgMouse=false caret=None anchor=(1935,1051)
+/// place: side=mouse caret=None ...
+/// ```
+///
+/// 也就是「贴文字」这条路**从来没进过**，一律退化成贴鼠标 —— 而鼠标停在选区的
+/// 右下角，所以不管选上方还是下方，横条看着都在文字下方。
+///
+/// 拖选这条路上，按下点/抬起点本来就是现成的几何：纵向取两点的跨度，
+/// 再各向外让出半个行高（鼠标多半落在字行中间，不让就会把字盖住）。
+/// 全场景可用、零跨进程调用、零等待。
+///
+/// ⚠ 它比真光标**更适合当首选**：多行选区时真光标停在最后一行，按它判
+///   「上方」会把横条摆到最后一行的上面、盖住上面几行；这里的跨度是整块选区。
+///
+/// 纵向让出的量按 **CSS px × DPI 缩放**折算：行高跟字号走，而字号是 CSS px。
+fn selection_box_from_drag(
+    drag: (i32, i32, i32, i32),
+    scale: f64,
+) -> (i32, i32, i32, i32) {
+    let (_, sy, ex, ey) = drag;
+    // 半个行高再宽一点：常见 UI 字 14~18 px，行高 20~27 CSS px，半行 10~13。
+    // 取 12 能盖住绝大多数；夹在 8~36 px 防 DPI 算飞。
+    let pad_y = ((12.0 * scale).round() as i32).clamp(8, 36);
+    let (top, bottom) = (sy.min(ey), sy.max(ey));
+    // 左右给同一个点就够：`pick_bar_side` 只读上下边，横向锚点沿用抬起点
+    // （= 选区末端，和真光标那条路的 `caret left` 语义一致）。
+    (ex, top - pad_y, ex, bottom + pad_y)
+}
+
 /// 前端量完布局后回报，我们据此摆窗口。
 ///
 /// `bar_h` 是**横条胶囊自己**的高度（CSS px），和 `h`（整个 stage 的高度）不是
@@ -2596,7 +2635,9 @@ fn start_capture(target_pid: u32, drag: (i32, i32, i32, i32)) {
                 win::log("start_capture: 取词期间用户收了条/点了别处 —— 这一次不弹");
                 return;
             }
-            let gen = show_bar(text.clone(), false, true);
+            /* 把这次拖选的矩形一并带过去：浏览器里真光标取不到，
+             * 「上方/下方」只能靠它。 */
+            let gen = show_bar_at(text.clone(), false, true, Some(drag));
             /* ⚠ `via` 为空串 = 三条通道**全都没拿到文字**（OCR 也失败）——
              * 那也是 OCR 这条路上的失败，同样要复核：用户日志里"选中的是网址，
              * 横条却是空的"就是这么来的（`show_bar: ""`）。 */
@@ -2670,7 +2711,7 @@ fn show_ocr_only_bar() {
     OCR_ONLY.store(true, Ordering::SeqCst);
     dismiss_bar();
     std::thread::sleep(Duration::from_millis(30));
-    show_bar(String::new(), true, false);
+    show_bar(String::new(), true, false, None);
 }
 
 /// 弹出横条。返回值 = 本次唤起的**代次**（`GEN`），调用方拿它做"这条补丁是不是
@@ -2707,7 +2748,35 @@ fn redact_url(u: &str) -> String {
 }
 
 #[tauri::command]
-fn show_bar(text: String, at_mouse: bool, via_copy: bool) -> usize {
+fn show_bar(
+    text: String,
+    at_mouse: bool,
+    via_copy: bool,
+    /* 可选：这次「拖选」的矩形 `[按下x, 按下y, 抬起x, 抬起y]`（屏幕物理 px）。
+     *
+     * 真实划词由 Rust 内部直接传给 `show_bar_at`（走钩子那条路，见 start_capture），
+     * 前端不传就是 None（Tauri 对 Option 参数的缺省语义就是 None）。
+     * 留这个口子是为了**验证**：探针能拿一条确定的拖选矩形驱真流程，
+     * 再断言 `place: side=` 和窗口矩形，而不是靠人手划一下看感觉 ——
+     * 「上方/下方都弹在下面」这个 bug 就是只靠单测没兜住的那种。 */
+    sel: Option<Vec<i32>>,
+) -> usize {
+    let sel = sel.as_ref().and_then(|v| match v.as_slice() {
+        [a, b, c, d] => Some((*a, *b, *c, *d)),
+        _ => None,
+    });
+    show_bar_at(text, at_mouse, via_copy, sel)
+}
+
+/// `show_bar` 的实体，多一个 `sel`：这次拖选的矩形（按下点 → 抬起点，
+/// 屏幕物理 px），只有划词那条路拿得到。它只用来**兜底决定上下侧**，
+/// 见 [`selection_box_from_drag`] 里的长注释。
+fn show_bar_at(
+    text: String,
+    at_mouse: bool,
+    via_copy: bool,
+    sel: Option<(i32, i32, i32, i32)>,
+) -> usize {
     let t0 = std::time::Instant::now();
     /* ⚠ v1.4.0：**日志里不记用户选中的文字**，只记字数。
      *
@@ -2722,20 +2791,38 @@ fn show_bar(text: String, at_mouse: bool, via_copy: bool) -> usize {
 
     // 位置：
     //   · 开了「跟随鼠标」或者这条是 Ctrl+C 触发 -> 贴鼠标；
-    //   · 否则贴选中的文字（下方优先，放不下自动翻上方 —— 那步在 layout_bar 里做，
-    //     因为要等前端量出胶囊的真实高度才知道放不放得下）。
+    //   · 否则贴选中的文字：**优先用这次拖选的轨迹**，没有轨迹（Ctrl+C /
+    //     键盘选词）才退回真光标矩形。上下侧由「外观 → 弹出位置」决定，
+    //     放不下自动翻侧，那步在 layout_bar 里做（要等前端量出胶囊的真实高度）。
+    //
+    // ⚠ 为什么拖选优先于真光标（v1.5.5）：
+    //   ① 真光标只有原生文本控件才给，浏览器 / Electron 里永远是 None ——
+    //      只认它的话「上方/下方」两个选项完全没差别（用户报的 bug）；
+    //   ② **多行选区**时真光标在最后一行，按它判「上方」会把横条摆到最后一行
+    //      上面、盖住上面几行；拖选轨迹跨所有行，才是"选区整块"的范围。
     let cfg = cfg_snapshot();
-    let caret = if at_mouse || cfg.anchor_at_mouse {
-        None
+    let (caret, caret_src) = if at_mouse || cfg.anchor_at_mouse {
+        (None, "none")
     } else {
-        win::caret_box()
+        match sel {
+            Some(d) => {
+                // 行高按 CSS px 折算，缩放得取**用户本来那个软件**的
+                // （横条窗口此刻还停在屏幕外，问它没意义）。
+                let sc = win::dpi_scale(win::foreground_window());
+                (Some(selection_box_from_drag(d, sc)), "drag")
+            }
+            None => match win::caret_box() {
+                Some(c) => (Some(c), "caret"),
+                None => (None, "none"),
+            },
+        }
     };
     let anchor = match caret {
         Some((cl, _, _, cb)) => POINT { x: cl, y: cb },
         None => win::cursor_pos(),
     };
     win::log(&format!(
-        "show_bar: atMouse={at_mouse} cfgMouse={} caret={:?} anchor=({},{})",
+        "show_bar: atMouse={at_mouse} cfgMouse={} caret={:?} src={caret_src} anchor=({},{})",
         cfg.anchor_at_mouse, caret, anchor.x, anchor.y
     ));
     let t_anchor = t0.elapsed();
@@ -3428,7 +3515,7 @@ fn spawn_detector() {
                                         );
                                         return;
                                     }
-                                    let gen = show_bar(t, true, true);
+                                    let gen = show_bar(t, true, true, None);
                                     if pending {
                                         late_text_patch(seq0, gen, fg_pid);
                                     }
@@ -11684,7 +11771,7 @@ fn parse_hotkey(s: &str) -> Option<(bool, bool, bool, bool, u32)> {
 /// 全局快捷键唤起收藏夹：弹一条贴鼠标的横条，并让前端把收藏面板打开。
 /// 面板里没有指定目录 → 前端把所有一级目录都列出来。
 fn show_fav_panel_bar() {
-    show_bar(String::new(), true, false);
+    show_bar(String::new(), true, false, None);
     let _ = app().emit_to("bar", "qs://fav-open", serde_json::json!({}));
 }
 
@@ -14349,7 +14436,7 @@ fn main() {
                     std::thread::sleep(Duration::from_millis(1500));
                     let p = win::cursor_pos();
                     win::log(&format!("--bar: show at ({},{})", p.x, p.y));
-                    show_bar(String::new(), false, false);
+                    show_bar(String::new(), false, false, None);
                 });
             }
             // --ensure-file：盯文件发「滚到某控件并重报坐标」的事件（测试用）。
@@ -14465,7 +14552,7 @@ fn main() {
                         if let Some(s) = clip::snapshot() {
                             clip::restore(&s);
                         }
-                        show_bar(format!("压力测试样本 {i} —— 选中文字即可弹出搜索横条"), false, false);
+                        show_bar(format!("压力测试样本 {i} —— 选中文字即可弹出搜索横条"), false, false, None);
                         std::thread::sleep(Duration::from_millis(80));
                         dismiss_bar();
                         std::thread::sleep(Duration::from_millis(40));
@@ -17455,5 +17542,40 @@ mod tests {
         let (y, side) = pick_bar_side((0, 20, 100, 28), tiny, gap, bar_ph, pad, false);
         assert_eq!(y, 20 - 6 - 40);
         assert_eq!(side, "above-clamped");
+    }
+
+    /// v1.5.5：浏览器里真光标取不到时的兜底 —— 拖选矩形 → 文字行框。
+    ///
+    /// 用户报的原话：「我不管是调文字上方还是文字下方，最后它出现的都是在
+    /// 文字下方」。根因是 `caret=None` 全程退化成贴鼠标，所以这里钉两件事：
+    /// ① 框的上下边 = 拖选两端的跨度（多行选区也成立）；
+    /// ② 同一个拖选，上方/下方必须算出**不同**的 y，且分处选区上下。
+    #[test]
+    fn selection_box_from_drag_规则() {
+        // 单行左→右拖选：鼠标落在字行中间，上下各让半个行高
+        let boxx = selection_box_from_drag((100, 500, 300, 500), 1.0);
+        assert_eq!(boxx, (300, 488, 300, 512), "单行：以抬起点为横向锚点，上下各 12px");
+
+        // 反方向拖（右→左）同样成立：纵向取 min/max，与拖动方向无关
+        let rev = selection_box_from_drag((400, 900, 100, 500), 1.0);
+        assert_eq!(rev, (100, 488, 100, 912));
+
+        // 多行拖选：上边跟第一行走，下边跟最后一行走
+        let multi = selection_box_from_drag((120, 300, 560, 800), 1.0);
+        assert_eq!((multi.1, multi.3), (288, 812));
+
+        // DPI 折算与夹取：0.5 倍不会比 8px 更小，4 倍不会超过 36px
+        assert_eq!(selection_box_from_drag((0, 500, 0, 500), 0.5).1, 500 - 8);
+        assert_eq!(selection_box_from_drag((0, 500, 0, 500), 4.0).1, 500 - 36);
+
+        // 同一个拖选：选上方 / 选下方必须真的分处选区上下（用户报的就是这条不成立）
+        let area = (0, 0, 1920, 1080);
+        let (gap, bar_ph, pad) = (6, 40, 8);
+        let (above_y, above_side) = pick_bar_side(boxx, area, gap, bar_ph, pad, false);
+        let (below_y, below_side) = pick_bar_side(boxx, area, gap, bar_ph, pad, true);
+        assert_eq!((above_side, below_side), ("above", "below"));
+        assert!(above_y + bar_ph <= 500, "上方：胶囊整体在鼠标点之上");
+        assert!(below_y >= 500, "下方：胶囊顶边在鼠标点之下");
+        assert!(below_y > above_y, "两个选项不能算出同一个位置");
     }
 }
