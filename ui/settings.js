@@ -2791,6 +2791,19 @@ function syncStyleUI() {
     syncGlassPreset();
 }
 
+/* v1.5.4：弹出位置控件跟着「横条跟随鼠标位置」联动。
+ *
+ * 贴鼠标弹的时候压根没有"文字在哪"（Ctrl+C 那条路也一样），选上方/下方
+ * 没有意义 —— 此时把控件置灰，省得用户以为选了没生效。
+ * 三种时机都要刷：首屏绑定、开关变化、后端广播回来。 */
+function syncBarPosUI() {
+    const seg = $('s-barPos');
+    if (!seg) return;
+    const off = !!CONF.anchorAtMouse;
+    seg.classList.toggle('off', off);
+    for (const b of seg.querySelectorAll('button')) b.disabled = off;
+}
+
 /* ==========================================================================
  * 液态玻璃参数预设（#129）
  *
@@ -2902,6 +2915,9 @@ const SEGS = [
     // 空格档位三态（需求 7）：不动 / 智能 / 强力
     ['s-ocrCleanSpace', 'ocrCleanSpace', 'smart'],
     ['s-theme', 'theme', 'system'],
+    // v1.5.4：横条弹出位置（文字上方 / 下方）。字符串值，正好走 SEGS 泛型通路；
+    // 后端白名单在 config::normalize_bar_pos（脏值归一成 above）。
+    ['s-barPos', 'barPos', 'above'],
 ];
 
 /* r56：「最近使用」最多摆几个。**不走 SEGS** —— 那个泛型通路把 data-v 当字符串
@@ -3314,6 +3330,8 @@ function qsSetText(id, s) {
 function bindSwitches() {
     applyTheme();
     syncStyleUI();
+    // v1.5.4：弹出位置控件的置灰态跟着「跟随鼠标」走（首屏 + 每次广播都刷）
+    syncBarPosUI();
     /* 帧率档位的高亮 + 那一行的显隐。
      *
      * 以前只在这里调一次，且注释写着"必须排在 syncStyleUI 之后"
@@ -3387,6 +3405,11 @@ function bindSwitches() {
              * 样式是由 barGlass / barBlur 推导的（qsBarStyle），所以两个键都算上。 */
             if (key === 'barGlassLive' || key === 'barGlass' || key === 'barBlur') {
                 syncGlassFpsUI();
+            }
+            /* v1.5.4：「跟随鼠标位置」决定「弹出位置」有没有意义 ——
+             * 贴鼠标弹时选上/下方是空操作，控件置灰。 */
+            if (key === 'anchorAtMouse') {
+                syncBarPosUI();
             }
         });
     }
@@ -6629,6 +6652,13 @@ function webviewLabel() {
  *  但日志内容没跟着走）。现在**每条都写死自己的版本号**，
  *  发新版时**同时**加一条，对不上就是漏了。 */
 const CHANGELOG = [
+    {
+        ver: 'v1.5.4',
+        items: [
+            '<b>新增：横条可以选「弹在文字上方还是下方」</b> —— 你要的：「还要可以选择横条是在选中文字的上方还是下方」。设置页 <b>外观 → 横条外观 → 弹出位置</b> 里选，默认<b>文字上方</b>（和以前一样：不盖住你刚选中的字）。这只是<b>首选方向</b>：选的那一侧放不下时，照样会自动翻到另一侧，不会出现"选了下却飞到了屏幕外"。打开「横条跟随鼠标位置」时本项无效（那条路一律贴鼠标），控件会置灰。改动<b>下次弹横条就生效</b>，不用重启。',
+            '<b>「点横条外面就收起」确认完好</b> —— 你这次也问了这条。其实 v1.3.0 起就有：横条弹着的时候，鼠标左键/右键点到横条外面任何地方（别的窗口、桌面、任务栏都算），横条立刻收起；唯一例外是<b>收藏夹面板被钉住</b>的时候（钉住就是"别被随便点掉"）。从本机运行日志里抽查过：弹条 → 点外面 → 收起，链路是通的。要是你遇到过"点了外面没收起来"，告诉我是哪种情况（比如点在横条半透明的阴影上？），我再复现。',
+        ],
+    },
     {
         ver: 'v1.5.3',
         items: [

@@ -921,7 +921,7 @@ mod tests {
             "http://",
             "https:// 说明",
             "https://\u{200B}",               // 协议后只有一个零宽字符
-            "https://​ 说明",
+            "https://\u{200B} 说明",
         ] {
             assert!(text_to_url(s).is_none(), "空主机名必须拒: {s:?}");
         }

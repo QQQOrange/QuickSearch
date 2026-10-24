@@ -772,6 +772,18 @@ pub struct Config {
     /// 注意 Ctrl+C 那条触发路径**始终**跟随鼠标：那条路没有可靠的"文字在哪"信息，
     /// 而且用户按 Ctrl+C 时手指就在键盘上、鼠标也刚动过，贴鼠标反而更顺手。
     pub anchor_at_mouse: bool,
+    /// 横条弹出时优先贴在选中文字的哪一侧：
+    ///   `"above"` = 文字**上方**（默认，老行为）
+    ///   `"below"` = 文字**下方**
+    ///
+    /// 用户 2026-10-24 原话：「还要可以选择横条是在选中文字的上方还是下方」。
+    ///
+    /// 这只是**首选方向**：首选那一侧放不下时照样会自动翻到另一侧
+    /// （老逻辑就是"上方优先、放不下翻下方"，默认值沿袭这一行为）。
+    /// 「跟随鼠标」打开、或走 Ctrl+C 那条路触发时本项无效 —— 那两条路
+    /// 没有可靠的"文字在哪"信息，一律贴鼠标。
+    #[serde(default = "default_bar_pos")]
+    pub bar_pos: String,
     /// 收藏夹。`groups` 是一级目录；每个 group 里既能直接放 items，
     /// 也能放 children（二级目录）—— 用户要求最多两级。
     /// 放进横条的哨兵是 `@fav:<groupId>`（见 FAV_PREFIX）。
@@ -1152,6 +1164,7 @@ impl Default for Config {
             shadow: false,
             bar_blur: 0,
             anchor_at_mouse: false,
+            bar_pos: default_bar_pos(),
             favorites: Vec::new(),
             fav_hotkey: String::new(),
             backup_password: String::new(),
@@ -2038,6 +2051,26 @@ fn default_bar_away_px() -> i32 {
     400
 }
 
+/// 横条首选弹出方向的默认值：文字**上方**。
+///
+/// 沿袭 v1.5.3 及以前的行为（`layout_bar` 里"上方优先、放不下翻下方"），
+/// 老配置里没有这个键、或手改成乱七八糟的值时，都回到这一个。
+fn default_bar_pos() -> String {
+    "above".to_string()
+}
+
+/// 弹出方向的白名单归一：只认 `above` / `below`，别的（含空串）一律回默认。
+///
+/// 一条入口给两处用：`sanitize`（读配置/恢复备份时）和 main.rs 的
+/// `apply_one_setting`（设置页点选时）—— 两边口径一致，才不会出现
+/// "界面选了下、存进去的却是别的"。
+pub fn normalize_bar_pos(s: &str) -> String {
+    match s {
+        "below" => "below".to_string(),
+        _ => default_bar_pos(),
+    }
+}
+
 /// 识图多选名单的默认值：两家**框选完直接出结果**的真上传引擎
 /// （r70 起 = Yandex + SauceNAO，实测通过；百度当前上传被反爬拒绝，退出默认）。
 ///
@@ -2294,6 +2327,15 @@ pub(crate) fn sanitize(mut c: Config) -> Config {
             c.bar_away_px
         ));
         c.bar_away_px = default_bar_away_px();
+    }
+    /* 弹出方向（2026-10-24）：白名单外的一律回「上方」。serde 默认已经是
+     * above，这里挡的是手改配置 / 老备份恢复进来的脏值。 */
+    if !matches!(c.bar_pos.as_str(), "above" | "below") {
+        crate::win::log(&format!(
+            "config: 弹出位置 「{}」 不合法，回到「上方」",
+            c.bar_pos
+        ));
+        c.bar_pos = normalize_bar_pos(&c.bar_pos);
     }
     c
 }
@@ -4649,5 +4691,32 @@ mod sanitize_tests {
             (0, 0),
             "0 = 不收起，是合法值，不能夹掉"
         );
+    }
+
+    /// 2026-10-24：横条弹出位置（文字上方 / 下方）的读入归一。
+    ///
+    /// 默认是「上方」（沿袭老行为）；白名单外的一律回默认，空串也是。
+    #[test]
+    fn sanitize_normalizes_bar_pos() {
+        let _serial = big_lock();
+        let c = Config::default();
+        assert_eq!(c.bar_pos, "above", "默认弹在文字上方（老行为）");
+        assert_eq!(normalize_bar_pos("below"), "below");
+        assert_eq!(normalize_bar_pos("above"), "above");
+        assert_eq!(normalize_bar_pos(""), "above", "空串回默认");
+        assert_eq!(normalize_bar_pos("left"), "above", "白名单外回默认");
+
+        let mut bad = Config::default();
+        bad.bar_pos = "下面".to_string();
+        let bad = sanitize(bad);
+        assert_eq!(bad.bar_pos, "above", "手改的脏值要夹回默认");
+
+        // 合法值原样保留（用 struct 更新语法构造，免得 clippy 念
+        // field_reassign_with_default —— 那一票老测试已经在念了，不添新的）
+        let below = sanitize(Config {
+            bar_pos: "below".to_string(),
+            ..Default::default()
+        });
+        assert_eq!(below.bar_pos, "below", "合法值原样保留");
     }
 }

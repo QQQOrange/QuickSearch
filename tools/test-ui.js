@@ -298,6 +298,8 @@ function baseConf(over) {
         triggerSelect: true, triggerCopy: true, autoStart: false,
         iconSize: 30, alpha: 100, iconStyle: 'auto', barPadding: 5,
         animations: true, shadow: false, anchorAtMouse: false, autoElevate: true,
+        // v1.5.4：横条弹出位置（above = 文字上方 / below = 下方）
+        barPos: 'above',
         delayMs: 0, filterMode: 'off', filterList: [],
         ocrEnable: true, ocrLang: 'CHN_ENG', ocrAccurate: true,
         barList: ['百度', 'Google', '必应', '百度翻译', '知乎', '哔哩哔哩', '淘宝'],
@@ -410,6 +412,53 @@ async function testSettings() {
         const c3 = env.lastCmd('set_setting');
         ok('  落盘键名 barAwayPx', !!c3 && c3.args.key === 'barAwayPx',
             c3 && JSON.stringify(c3.args));
+        // 复位，后面那些用例还要按默认值算
+        env.pushConfig(baseConf());
+        await flush();
+    }
+
+    /* ---- 2026-10-24 弹出位置（文字上方 / 下方）：控件在外观栏、落盘键名对 ----
+     * 用户在「外观 → 横条外观」里选横条优先贴选中文字的哪一侧；选的那侧
+     * 放不下时后端会自动翻到另一侧（翻侧规则在 main.rs 的 pick_bar_side
+     * 单元测试里钉死）。 */
+    {
+        ok('「弹出位置」分段控件在外观栏', !!$('s-barPos'));
+        eq('  两个档位：文字上方 / 文字下方',
+            [...$('s-barPos').querySelectorAll('button')].map((b) => b.dataset.v),
+            ['above', 'below']);
+        eq('  默认选中「文字上方」（沿袭老行为）',
+            $('s-barPos').querySelector('button.on').dataset.v, 'above');
+
+        // 配置里是 below → 选中态跟着走
+        env.pushConfig(baseConf({ barPos: 'below' }));
+        await flush();
+        eq('  配置 below 时「文字下方」是选中态',
+            $('s-barPos').querySelector('button.on').dataset.v, 'below');
+
+        // 点「文字上方」→ 写 barPos=above
+        env.calls.length = 0;
+        $('s-barPos').querySelector('button[data-v="above"]')
+            .dispatchEvent(new w.Event('click', { bubbles: true }));
+        const c = env.lastCmd('set_setting');
+        ok('  点档位写入 barPos',
+            !!c && c.args.key === 'barPos' && c.args.value === 'above',
+            c && JSON.stringify(c.args));
+
+        /* 「跟随鼠标位置」打开时本项没有意义（那条路一律贴鼠标），控件置灰。
+         * 这条顺带钉住联动：改开关 → seg.off + 按钮 disabled。 */
+        $('s-anchorAtMouse').checked = true;
+        $('s-anchorAtMouse').dispatchEvent(new w.Event('change', { bubbles: true }));
+        await flush();
+        ok('  打开「跟随鼠标位置」后弹出位置控件置灰',
+            $('s-barPos').classList.contains('off')
+            && [...$('s-barPos').querySelectorAll('button')].every((b) => b.disabled));
+        $('s-anchorAtMouse').checked = false;
+        $('s-anchorAtMouse').dispatchEvent(new w.Event('change', { bubbles: true }));
+        await flush();
+        ok('  关掉「跟随鼠标位置」后恢复可点',
+            !$('s-barPos').classList.contains('off')
+            && [...$('s-barPos').querySelectorAll('button')].every((b) => !b.disabled));
+
         // 复位，后面那些用例还要按默认值算
         env.pushConfig(baseConf());
         await flush();

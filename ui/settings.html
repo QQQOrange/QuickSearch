@@ -146,8 +146,15 @@
             </div>
         </div>
         <div class="row">
-            <div class="rt"><b>横条跟随鼠标位置</b><small>打开后一律贴着鼠标弹；关闭则贴着选中的文字弹（下方放不下会自动翻到上方）</small></div>
+            <div class="rt"><b>横条跟随鼠标位置</b><small>打开后一律贴着鼠标弹；关闭则贴着选中的文字弹</small></div>
             <label class="sw"><input type="checkbox" id="s-anchorAtMouse"><i></i></label>
+        </div>
+        <div class="row col">
+            <div class="rt"><b>弹出位置</b><small>横条优先贴在选中文字的哪一侧 · 那一侧放不下时会自动翻到另一侧 · 打开「跟随鼠标位置」后本项无效</small></div>
+            <div class="seg" id="s-barPos">
+                <button type="button" data-v="above">文字上方</button>
+                <button type="button" data-v="below">文字下方</button>
+            </div>
         </div>
         <div class="row">
             <div class="rt"><b>统一图标大小</b><small>按图标<b>实际画面</b>统一大小；关掉则按原图显示，有些会显得偏小</small></div>

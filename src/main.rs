@@ -500,6 +500,60 @@ fn dismiss_bar() {
     let _ = app().emit_to("bar", "qs://hidden", ());
 }
 
+/// 横条该落选中文字的哪一侧。返回 `(胶囊左上角 y, 方向名)`。
+///
+/// # 为什么单独提成纯函数
+///
+/// 摆位是用户最在意、又最容易随设置改动出错的行为（v1.5.4 起用户可以在
+/// 「外观 → 弹出位置」里选上方/下方）。提出来之后：① `layout_bar` 里只剩
+/// 一行调用；② 翻侧规则能直接跑单元测试，不用起窗口。
+///
+/// # 翻侧规则
+///
+/// 首选那一侧放不下就**翻到另一侧**；两侧都放不下时按首选侧尽量贴
+/// （后续 clamp 会把胶囊压回工作区内，至少方向是对的）。
+/// 方向名同时写进 `place: side=…` 日志 —— 验证脚本靠它断言
+/// "用户选了下就真的在下面"，而不是靠猜窗口坐标。
+///
+/// # 参数
+///
+/// · `caret` = 文字那一行的矩形 `(left, top, right, bottom)`（屏幕物理 px）
+/// · `area` = 工作区四边（同上）
+/// · `gap` / `bar_ph` = 与文字的间距 / 横条胶囊高度（物理 px）
+/// · `pad` = 与工作区边缘保持的距离（物理 px）
+/// · `prefer_below` = 用户选了「文字下方」；false = 「文字上方」（默认）
+fn pick_bar_side(
+    caret: (i32, i32, i32, i32),
+    area: (i32, i32, i32, i32),
+    gap: i32,
+    bar_ph: i32,
+    pad: i32,
+    prefer_below: bool,
+) -> (i32, &'static str) {
+    let (_, ct, _, cb) = caret;
+    let fit_above = ct - gap - bar_ph >= area.1 + pad;
+    let fit_below = cb + gap + bar_ph <= area.3 - pad;
+    if prefer_below {
+        if fit_below {
+            // 胶囊顶边贴在文字下沿之下
+            (cb + gap, "below")
+        } else if fit_above {
+            // 下方放不下：翻到上方（老行为）
+            (ct - gap - bar_ph, "above")
+        } else {
+            // 两侧都放不下：按用户选的方向贴，clamp 会兜住不出屏
+            (cb + gap, "below-clamped")
+        }
+    } else if fit_above {
+        // 胶囊底边贴在文字上沿之上 —— 默认位置：不盖住刚选中的文字
+        (ct - gap - bar_ph, "above")
+    } else if fit_below {
+        (cb + gap, "below")
+    } else {
+        (ct - gap - bar_ph, "above-clamped")
+    }
+}
+
 /// 前端量完布局后回报，我们据此摆窗口。
 ///
 /// `bar_h` 是**横条胶囊自己**的高度（CSS px），和 `h`（整个 stage 的高度）不是
@@ -613,22 +667,21 @@ fn layout_bar(
     // 只有把决策落进日志，验证脚本才能断言，而不是靠猜窗口坐标。
     let side: &str;
     let (mut ix2, mut iy2) = match caret {
-        Some((cl, ct, _, cb)) => {
-            // 默认优先放在文字**上方**：用户刚选中的文字不应该被横条盖住，
-            // 放在上方最符合直觉；上方放不下再翻转到下方。
-            let fit_above = ct - gap - bar_ph >= area.top + pad;
-            let want_below = !fit_above && cb + gap + bar_ph <= area.bottom - pad;
-            let iy2 = if want_below {
-                // 胶囊顶边贴在文字下沿之下
-                side = "below";
-                cb + gap
-            } else {
-                // 胶囊底边贴在文字上沿之上（fit_above 为 true 时标准位置；
-                // fit_above 为 false 时会被后续 clamp 压到工作区顶部，但至少方向是对的）
-                side = if fit_above { "above" } else { "above-clamped" };
-                ct - gap - bar_ph
-            };
-            (cl, iy2)
+        Some(c) => {
+            /* v1.5.4：方向由「外观 → 弹出位置」决定（默认上方 = 老行为）。
+             * 注意这是**读取时**的配置快照 —— 用户在设置里改了方向，
+             * 下一次摆位（哪怕只是面板开合引起的重排）立刻按新方向来，
+             * 不需要收回横条重新划一次。 */
+            let (iy, s) = pick_bar_side(
+                c,
+                (area.left, area.top, area.right, area.bottom),
+                gap,
+                bar_ph,
+                pad,
+                cfg_with(|cf| cf.bar_pos == "below"),
+            );
+            side = s;
+            (c.0, iy)
         }
         // 贴鼠标：锚点就是实体区域左上角
         _ => {
@@ -3527,6 +3580,9 @@ fn config_view() -> Value {
         "shadow": cfg.shadow,
         "barBlur": cfg.bar_blur,
         "anchorAtMouse": cfg.anchor_at_mouse,
+        // v1.5.4：横条弹出位置（"above" = 文字上方 / "below" = 下方）。
+        // 贴鼠标弹（anchorAtMouse / Ctrl+C 触发）时本项无效。
+        "barPos": cfg.bar_pos,
         "delayMs": cfg.delay_ms,
         // 2026-10-23：横条自己收起来的两条阈值（见 config.rs 对应字段的注释）。
         "barIdleSec": cfg.bar_idle_sec,
@@ -4014,6 +4070,11 @@ fn apply_one_setting(cfg: &mut config::Config, key: &str, value: Value) -> Resul
             cfg.bar_away_px = value.as_i64().unwrap_or(400).clamp(0, 4000) as i32
         }
         "barNeedText" => cfg.bar_need_text = value.as_bool().unwrap_or(true),
+        // v1.5.4：弹出位置。白名单和 sanitize 同一条口径（config::normalize_bar_pos），
+        // 脏值当场归一成 "above"，不会出现"界面选了下、存进去是别的"。
+        "barPos" => {
+            cfg.bar_pos = config::normalize_bar_pos(value.as_str().unwrap_or(""))
+        }
         // 收藏夹整树（设置页本地编辑完一次性写回）
         "favorites" => {
             if let Ok(f) = serde_json::from_value::<Vec<config::FavGroup>>(value.clone()) {
@@ -14708,7 +14769,6 @@ mod tests {
     }
 
     /// 复核的触发条件：认残了 / 认不出来 / 浏览器里整片没认出字，才动剪贴板。
-    #[test]
     /// OCR 噪声识别（用户 2026-10-23 报的那串）。
     ///
     /// 用例里的第一行就是用户原样给的：选中「马尾辫skill安装」，横条拿到的是
@@ -17352,5 +17412,48 @@ mod tests {
         assert!(tracemoe_result_page("not json at all").is_err(),
                 "非 JSON 要 Err");
         assert!(tracemoe_result_page("").is_err(), "空串要 Err");
+    }
+
+    /// v1.5.4：横条弹出位置（文字上方 / 下方）的翻侧规则。
+    ///
+    /// 这几条把用户能在设置里选的行为钉死：首选侧优先、放不下翻另一侧、
+    /// 两侧都放不下时按首选侧贴（clamped）。默认场景 caret=(0, 500, 100, 530)，
+    /// 工作区 0..1000，胶囊高 40、间距 6、边距 8。
+    #[test]
+    fn pick_bar_side_规则() {
+        let caret = (0, 500, 100, 530);
+        let area = (0, 0, 1000, 1000);
+        let (gap, bar_ph, pad) = (6, 40, 8);
+
+        // 默认（首选上方）：上方有得放 → 胶囊底边贴在文字上沿之上
+        let (y, side) = pick_bar_side(caret, area, gap, bar_ph, pad, false);
+        assert_eq!(y, 500 - 6 - 40);
+        assert_eq!(side, "above");
+
+        // 首选上方 + 上方贴顶放不下（文字在 10..40 一带）→ 翻到下方
+        let near_top = (0, 10, 100, 40);
+        let (y, side) = pick_bar_side(near_top, area, gap, bar_ph, pad, false);
+        assert_eq!(y, 40 + 6);
+        assert_eq!(side, "below");
+
+        // 首选下方：下方有得放 → 胶囊顶边贴在文字下沿之下
+        let (y, side) = pick_bar_side(caret, area, gap, bar_ph, pad, true);
+        assert_eq!(y, 530 + 6);
+        assert_eq!(side, "below");
+
+        // 首选下方 + 下方贴底放不下（文字在 960..990 一带）→ 翻到上方
+        let near_bottom = (0, 960, 100, 990);
+        let (y, side) = pick_bar_side(near_bottom, area, gap, bar_ph, pad, true);
+        assert_eq!(y, 960 - 6 - 40);
+        assert_eq!(side, "above");
+
+        // 两侧都放不下（工作区比胶囊还矮）→ 按首选侧贴，方向名带 clamped
+        let tiny = (0, 20, 1000, 30);
+        let (y, side) = pick_bar_side((0, 20, 100, 28), tiny, gap, bar_ph, pad, true);
+        assert_eq!(y, 28 + 6);
+        assert_eq!(side, "below-clamped");
+        let (y, side) = pick_bar_side((0, 20, 100, 28), tiny, gap, bar_ph, pad, false);
+        assert_eq!(y, 20 - 6 - 40);
+        assert_eq!(side, "above-clamped");
     }
 }
