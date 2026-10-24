@@ -78,7 +78,7 @@
             <input type="range" id="s-barAway" min="0" max="1000" step="20">
         </div>
         <div class="row">
-            <div class="rt"><b>没取到文字就不弹</b><small>划选 / Ctrl+C 没拿到任何内容时不弹横条 —— 这是"误触也弹"最主要的来源。关掉之后一律弹（适合游戏、自绘界面这类取不到词的软件）</small></div>
+            <div class="rt"><b>划选没取到文字就不弹</b><small>只影响"划选"这一条路：拖窗口、拖滚动条、拖画布这类误触取不到词时不弹。Ctrl+C 是主动按下的，不受这个开关影响 —— 哪怕没复制到内容也一定弹</small></div>
             <label class="sw"><input type="checkbox" id="s-barNeedText"><i></i></label>
         </div>
     </section>

@@ -2167,55 +2167,61 @@ fn capture_by_ocr(drag: (i32, i32, i32, i32)) -> Option<String> {
 ///
 /// `before` 是**按下按键那一刻**的剪贴板序号（由钩子回传导出）。
 ///
-/// 行为口径（用户拍板）：**按了 Ctrl+C 就一定在鼠标位置弹横条**。
-/// 剪贴板变了就用新复制的内容，没变就用剪贴板里现成的那份（可能为空）。
-/// 细节见 `read_current` 里那段注释。
+/// # 行为口径（用户 2026-10-24 再次拍板）
+///
+/// 「按 control 加 c 的时候，就哪怕没有复制到文本，那也得换出横条，这是一个
+/// 逻辑问题」。也就是说 Ctrl+C 是**独立的第二条唤起通道**，不能挂在"剪贴板
+/// 必须变"这个前提上 —— 那个前提会让"复制失败"和"没这个功能"在用户眼里
+/// 长得一模一样。
+///
+/// 所以 `read_current` 现在只回答**弹成什么样**，不再回答**弹不弹**：
+///   · 剪贴板很快变了 + 有文字 → 带文字的横条；
+///   · 变出来的是图片 → 「识别图片文字」形态（OCR）；
+///   · 变了但只有文件 / 等不到变化 → **空横条**（照样弹，用户能点 OCR / 识图）。
+///
+/// ⚠ 空条**绝不复用剪贴板里现成的旧内容**。老版本"按了 Ctrl+C 就读剪贴板"
+///   的毛病正是这个：在终端按 Ctrl+C（SIGINT）、对话框里复制空选区、手滑
+///   碰一下，都会弹出一条装着**上一次剪贴板内容**的横条 —— 那才是用户
+///   2026-10-23 报的「横条会莫名其妙地出来，明明我没选中文字」。
 enum Got {
-    /// 拿到文字，正常弹横条。
-    ///
-    /// 字段是 `(文字, 是不是还可能有个迟到的复制)`。
-    ///
-    /// **文字可能是空串** —— 剪贴板确实变了（用户真的复制了），但里面既没有
-    /// 文本也没有图片（多半是文件）。要不要弹由调用方按 `bar_need_text` 决定。
-    /// `true` = 这次复制多半还在路上，调用方要给 `late_text_patch` 一个机会
-    /// 把真正的文字补上（"立刻弹 + 迟到补"）。
-    Text(String, bool),
+    /// 拿到文字（保证非空）—— 正常弹横条。
+    Text(String),
     /// 剪贴板里进的是一张图 —— 图片上的字是选不中的，这时候弹一条
     /// 「识别图片文字」的横条，点一下就能框选 OCR
     Image,
-    /// **这一次 Ctrl+C 根本没复制任何东西**（剪贴板序号一直没变）。
+    /// **这一次 Ctrl+C 没等到任何东西**：剪贴板序号一直没变（终端里是
+    /// SIGINT、对话框里是空选区、手滑碰一下……），或者序号变了但里面
+    /// 既没文本也没图（复制的是文件）。
     ///
-    /// 用户 2026-10-23 报的最主要一条「横条会莫名其妙地出来，明明我没选中
-    /// 文字」就是它：老版本"只要按了 Ctrl+C 就弹"，于是 Ctrl+C 在终端里是
-    /// SIGINT、在对话框里是"复制一个空选区"、手滑碰一下……都会弹出一条
-    /// 装着**上一次剪贴板内容**的横条。现在等不到序号变化就什么都不做。
-    NoCopy,
+    /// ⚠ 以前这个分支是"什么都不做"。现在改成照样弹空横条，见上面的口径。
+    Nothing,
 }
 
 fn read_current(before: u32) -> Got {
-    /* ① 先等「剪贴板真的变了」。
+    /* ① 先给「剪贴板真的变了」一小段机会。
      *
      * ⚠ 这一段**不持剪贴板锁**：等的时候持锁会把同时进行的拖选取词整整堵住
      *   （它也要拿同一把锁读剪贴板），用户"划一下、再按 Ctrl+C"就会互相拖。
      *   锁只在真读的那一刻拿（下面 ②）。
      *
-     * 为什么是"等"而不是"立刻弹 + 迟到补"：那条路的前提是"按了 Ctrl+C 就该有
-     * 反应"，代价是**没复制也会弹**。用户现在明确要求收紧 —— 宁可晚 20ms，
-     * 也不要弹一条内容对不上的横条。
-     *
-     * 窗口 500ms：主流软件把内容放进剪贴板都在几毫秒内，500ms 只是给
-     * "远程桌面 / 剪贴板管理器转一手"留的余量。真没复制到的，就什么都不弹。 */
-    const COPY_WAIT_MS: u64 = 500;
+     * ⚠ 这 120ms 的用途是**决定弹什么**，不是**决定弹不弹**（2026-10-24
+     *   用户口径变更，见 `Got` 的注释）。所以它要短：
+     *   · 主流软件把内容放进剪贴板都在几毫秒内，120ms 足够让"正常情况下"
+     *     一次弹准（带文字的横条），用户看不到任何延迟；
+     *   · 等不到就先弹空条（立刻有反应），复制真慢的（远程桌面 / 剪贴板
+     *     管理器转一手）由 `late_text_patch` 再等 900ms 补进去。
+     *   老版本是 500ms 且等不到就**什么都不做** —— 那是"没反应"的来源。 */
+    const COPY_WAIT_MS: u64 = 120;
     let deadline = std::time::Instant::now() + Duration::from_millis(COPY_WAIT_MS);
     let mut waited = false;
     while clip::seq() == before {
         if std::time::Instant::now() >= deadline {
             if waited {
                 win::log(&format!(
-                    "copy path: 等了 {COPY_WAIT_MS}ms 剪贴板序号都没变 —— 这次没有真的复制，不弹"
+                    "copy path: 等了 {COPY_WAIT_MS}ms 剪贴板序号都没变 —— 这次没复制到东西，照样弹空条"
                 ));
             }
-            return Got::NoCopy;
+            return Got::Nothing;
         }
         waited = true;
         std::thread::sleep(Duration::from_millis(8));
@@ -2231,8 +2237,10 @@ fn read_current(before: u32) -> Got {
                 Err(std::sync::TryLockError::Poisoned(e)) => break e.into_inner(),
                 Err(std::sync::TryLockError::WouldBlock) => {
                     if std::time::Instant::now() >= deadline {
-                        win::log("copy path: 剪贴板被另一条取词占着，跳过本次");
-                        return Got::NoCopy;
+                        /* 剪贴板被另一条取词占着 —— 那也**不能**什么都不弹：
+                         * 用户按了 Ctrl+C，横条就得出来（空条也行）。 */
+                        win::log("copy path: 剪贴板被另一条取词占着 —— 先弹空条");
+                        return Got::Nothing;
                     }
                     std::thread::sleep(Duration::from_millis(10));
                 }
@@ -2246,14 +2254,67 @@ fn read_current(before: u32) -> Got {
         .unwrap_or_default();
 
     if !t.is_empty() {
-        return Got::Text(t, false); // 文字就是新的，不需要再补
+        return Got::Text(t); // 文字就是新的
     }
     if clip::has_image() && cfg_with(|c| c.ocr_enable) {
         win::log("copy path: 剪贴板里是图片 —— 弹出「识别图片文字」横条");
         return Got::Image;
     }
-    win::log("copy path: 序号变了但既没文本也没图（大概是文件）");
-    Got::Text(String::new(), false)
+    win::log("copy path: 序号变了但既没文本也没图（大概是文件）—— 弹空条");
+    Got::Nothing
+}
+
+/// Ctrl+C 这次该弹成什么样。
+///
+/// 抽成纯函数只为把用户口径钉在测试里：**没有任何一种结果是"不弹"**。
+#[derive(Debug, PartialEq)]
+enum CopyBar {
+    /// 弹一条带这段文字的横条
+    WithText(String),
+    /// 弹「只留 OCR」形态（剪贴板里是图片）
+    OcrImage,
+    /// 弹一条空横条 —— 没取到文字，也得让用户看见软件在工作
+    Empty,
+}
+
+fn ctrl_copy_bar(got: Got) -> CopyBar {
+    match got {
+        Got::Image => CopyBar::OcrImage,
+        Got::Text(t) if !t.trim().is_empty() => CopyBar::WithText(t),
+        // 只有文件 / 什么都没等到：照样弹，只是没有文字可搜
+        Got::Text(_) | Got::Nothing => CopyBar::Empty,
+    }
+}
+
+/// 用户真的按了一次 Ctrl+C：读内容 → 弹条。
+///
+/// **立刻返回**：读剪贴板（最多 120ms 等待 + 600ms 抢锁兜底）全在后台线程里。
+/// 低级钩子的消费线程绝不能在这儿堵 —— 回调超时会被系统静默摘钩。
+fn copy_trigger(before: u32) {
+    // 归属校验要用**按 Ctrl+C 那一刻**的前台进程 —— 补丁跑起来时
+    // 用户可能已经点到横条上了，那时前台是我们自己。
+    let fg_pid = win::window_pid(win::foreground_window());
+    let spawned = std::thread::Builder::new()
+        .name("qs-copy".into())
+        .spawn(move || match ctrl_copy_bar(read_current(before)) {
+            // Ctrl+C 这条路贴鼠标：这条路没有可靠的「文字在哪」，
+            // 而且此刻用户的手就在鼠标和键盘之间，贴鼠标最顺手。
+            CopyBar::WithText(t) => {
+                show_bar(t, true, true, None);
+            }
+            CopyBar::OcrImage => show_ocr_only_bar(),
+            CopyBar::Empty => {
+                /* 空条先弹（用户按了 Ctrl+C，就得立刻看见反应），之后 900ms
+                 * 内复制真落地了再补进去 —— 同一根横条，不重新摆窗，看不见跳动。
+                 * 这条补丁顺带兜住"复制慢"（远程桌面 / 剪贴板管理器转一手）。 */
+                let gen = show_bar(String::new(), true, true, None);
+                late_text_patch(before, gen, fg_pid);
+            }
+        });
+    if spawned.is_err() {
+        win::log("copy path: 起线程失败 —— 兜底直接弹空条");
+        show_bar(String::new(), true, true, None);
+    }
 }
 
 /// 剪贴板 owner 是不是「按下 Ctrl+C 那一刻的前台进程」。
@@ -2766,6 +2827,25 @@ fn show_bar(
         _ => None,
     });
     show_bar_at(text, at_mouse, via_copy, sel)
+}
+
+/// **仅供探针**：把「用户按了一次 Ctrl+C」这件事完整走一遍真路径。
+///
+/// `copy` 给了文字就先写进剪贴板（模拟一次**成功**的复制）；不给就什么都不做
+/// （模拟「按了 Ctrl+C 但没复制到任何东西」）。
+///
+/// 为什么需要这个口子：`copy_trigger` 只由低级键盘钩子触发，探针没法可靠地往
+/// 任意前台窗口合成一次真 Ctrl+C（权限、焦点、时序都不可控）。而「没复制到
+/// 也要弹」这条口径恰恰只有在真路径上才验证得了 —— v1.5.4 就吃过"单测全绿、
+/// 实际没生效"的亏（见 `selection_box_from_drag` 的注释）。
+#[tauri::command]
+fn __probe_copy_trigger(copy: Option<String>) -> u32 {
+    let before = clip::seq();
+    if let Some(t) = copy {
+        clip::set_text(&t);
+    }
+    copy_trigger(before);
+    before
 }
 
 /// `show_bar` 的实体，多一个 `sel`：这次拖选的矩形（按下点 → 抬起点，
@@ -3498,33 +3578,8 @@ fn spawn_detector() {
                             if !trigger_allowed(None) {
                                 continue;
                             }
-                            win::log("copy path: 收到 Ctrl+C，等剪贴板真的变了再弹");
-                            // 归属校验要用**按 Ctrl+C 那一刻**的前台进程 —— 补丁跑起来时
-                            // 用户可能已经点到横条上了，那时前台是我们自己。
-                            let fg_pid = win::window_pid(win::foreground_window());
-                            std::thread::spawn(move || match read_current(seq0) {
-                                // Ctrl+C 这条路贴鼠标：这条路没有可靠的「文字在哪」，
-                                // 而且此刻用户的手就在鼠标和键盘之间，贴鼠标最顺手。
-                                Got::Text(t, pending) => {
-                                    /* 复制落地了但一个字都没有（剪的是文件之类）——
-                                     * 横条上没有可搜的东西，弹出来只是打扰。按
-                                     * `barNeedText` 决定：默认不弹。 */
-                                    if t.is_empty() && cfg_with(|c| c.bar_need_text) {
-                                        win::log(
-                                            "copy path: 复制到的是文件/空内容，没有文字 —— 不弹",
-                                        );
-                                        return;
-                                    }
-                                    let gen = show_bar(t, true, true, None);
-                                    if pending {
-                                        late_text_patch(seq0, gen, fg_pid);
-                                    }
-                                }
-                                Got::Image => show_ocr_only_bar(),
-                                // 序号一直没变 = 这次 Ctrl+C 没真的复制任何东西
-                                // （终端里是 SIGINT、对话框里是空选区、手滑碰一下…）。
-                                Got::NoCopy => {}
-                            });
+                            win::log("copy path: 收到 Ctrl+C（无论有没复制到东西都要弹）");
+                            copy_trigger(seq0);
                         }
                     }
                 }
@@ -14224,6 +14279,8 @@ fn main() {
             set_settings,
             // r70：内部唤起入口（探针/自动化驱真流程用；见 show_bar 的文档）
             show_bar,
+            // v1.5.6：Ctrl+C 真路径（探针用，模拟"按了 Ctrl+C 但没复制到东西"）
+            __probe_copy_trigger,
             layout_bar,
             grow_bar,
             focus_bar,
@@ -17577,5 +17634,37 @@ mod tests {
         assert!(above_y + bar_ph <= 500, "上方：胶囊整体在鼠标点之上");
         assert!(below_y >= 500, "下方：胶囊顶边在鼠标点之下");
         assert!(below_y > above_y, "两个选项不能算出同一个位置");
+    }
+
+    /// Ctrl+C 的口径（用户 2026-10-24）：「哪怕没有复制到文本，那也得换出横条」。
+    ///
+    /// 这条测试的价值不在"分支对不对"（match 一眼就能看），而在**钉住口径**：
+    /// 以后任何人想让某个分支"静默跳过"，改这里就会红。
+    #[test]
+    fn ctrl_copy_never_silently_skips() {
+        assert_eq!(
+            ctrl_copy_bar(Got::Text("选中的字".into())),
+            CopyBar::WithText("选中的字".into())
+        );
+        assert_eq!(ctrl_copy_bar(Got::Image), CopyBar::OcrImage);
+
+        // 没等到剪贴板变化（终端 SIGINT / 空选区 / 手滑碰一下）→ 弹空条
+        assert_eq!(
+            ctrl_copy_bar(Got::Nothing),
+            CopyBar::Empty,
+            "按了 Ctrl+C 没复制到东西，也必须弹"
+        );
+        // 复制的是文件（序号变了、没文本没图）→ 同样弹空条
+        assert_eq!(
+            ctrl_copy_bar(Got::Text(String::new())),
+            CopyBar::Empty,
+            "复制到的是文件，也必须弹"
+        );
+        // 全是空白的"文字"等于没文字
+        assert_eq!(
+            ctrl_copy_bar(Got::Text("  \r\n\t".into())),
+            CopyBar::Empty,
+            "空白文字不能当成有内容"
+        );
     }
 }

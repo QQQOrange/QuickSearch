@@ -2660,7 +2660,8 @@ function renderAiList() {
 const SWITCHES = [
     ['s-triggerSelect', 'triggerSelect'],
     ['s-triggerCopy', 'triggerCopy'],
-    // 2026-10-23：没取到文字就不弹（误触乱弹的主要来源，默认开）
+    // 2026-10-23：划选没取到文字就不弹（误触乱弹的主要来源，默认开）
+    // 2026-10-24：只管划选 —— Ctrl+C 一定弹，见 main.rs 的 ctrl_copy_bar
     ['s-barNeedText', 'barNeedText'],
     ['s-anchorAtMouse', 'anchorAtMouse'],
     ['s-autoStart', 'autoStart'],
@@ -2718,7 +2719,7 @@ const SWITCH_DEFAULT = {
     ocrCleanUnwrap: false,
     triggerSelect: true,
     triggerCopy: true,
-    // 2026-10-23：没取到文字就不弹（与 config.rs 的 serde 默认值一致）
+    // 2026-10-23：划选没取到文字就不弹（与 config.rs 的 serde 默认值一致）
     barNeedText: true,
     anchorAtMouse: false,
     autoStart: false,
@@ -6652,6 +6653,15 @@ function webviewLabel() {
  *  但日志内容没跟着走）。现在**每条都写死自己的版本号**，
  *  发新版时**同时**加一条，对不上就是漏了。 */
 const CHANGELOG = [
+    {
+        ver: 'v1.5.6',
+        items: [
+            '<b>补一条逻辑：Ctrl+C 哪怕没复制到文本，也一定弹横条</b> —— 你指出的：「现在有两种唤出横条的方式，一种是选中文本，一种是用 Ctrl+C，所以按 Ctrl+C 的时候，哪怕没有复制到文本，那也得换出横条」。以前这条通道其实<b>挂在"剪贴板必须变"这个前提上</b>：在那些"不接受复制"的软件里按 Ctrl+C，你看到的和"没这个功能"一模一样。现在 Ctrl+C <b>无条件弹</b>：复制成功就带文字弹；复制到的是图片就弹「识别图片文字」；什么都没复制到就弹一条<b>空横条</b>（还能点识图 / OCR，至少知道软件在工作）。',
+            '<b>空横条不会装上次剪贴板里的旧内容</b> —— 这点特意守住了。以前"按了 Ctrl+C 就读剪贴板"的老毛病，就是在终端按 Ctrl+C（等于中断信号）、对话框里复制空选区、手滑碰一下，都会弹出一条装着你<b>上一次复制的东西</b>的横条，那正是"横条莫名其妙冒出来"的真正来源。现在走"没复制到"这条路时一律是空的，旧内容一个字都不会带出来。',
+            '<b>顺带快了</b>：以前按 Ctrl+C 要先等最多 <b>500ms</b> 确认"剪贴板到底变没变"才决定弹不弹。现在这 500ms 变成 <b>120ms</b>，而且只用来决定"带不带文字"—— 正常复制几毫秒就到位，你感觉不到等待；复制特别慢的（远程桌面、剪贴板管理器转一手）先弹空条、随后把文字补进同一根横条，不会跳。',
+            '⚠ 设置里那个开关改名成「<b>划选没取到文字就不弹</b>」：它现在<b>只管划选这一条路</b>（拖窗口、拖滚动条、拖画布那些误触取不到词时不弹）。Ctrl+C 是你主动按的、不存在误触，不受它管 —— 哪怕关着也一样弹。',
+        ],
+    },
     {
         ver: 'v1.5.5',
         items: [
