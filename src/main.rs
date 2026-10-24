@@ -4643,8 +4643,9 @@ fn export_groups_list() -> Value {
 ///   全被对话框吃掉，实测白跑三轮），而"导出的文件能不能再导回来"这条链路
 ///   必须验。拆出来之后单测覆盖来回逻辑，真机探针只验界面/对话框本身。
 #[tauri::command]
-fn export_items(app: AppHandle, items: Vec<String>) {
-    win::log(&format!("export_items: {items:?}"));
+fn export_items(app: AppHandle, items: Vec<String>, encrypt: Option<bool>) {
+    win::log(&format!("export_items: {items:?} encrypt={encrypt:?}"));
+    let encrypt = encrypt.unwrap_or(false);
     if items.is_empty() {
         let _ = APP.get().map(|a| a.emit_to("settings", "qs://toast", "一项都没勾，没什么可导出的".to_string()));
         return;
@@ -4663,23 +4664,38 @@ fn export_items(app: AppHandle, items: Vec<String>) {
             win::log("export_items: cancelled");
             return;
         };
+        /* 这份导出最后到底是密文还是明文 —— 必须**先算出来**才能写对 toast。
+         * 判据和 `write_plain` 内部完全一致（同一个 `needs_encrypt`），
+         * 不会出现"说是明文、其实是密文"这种自相矛盾的回执。 */
+        let view = config_view();
+        let forced = {
+            let (_, data) = export::build(&view, &items);
+            export::needs_encrypt(&items, &data)
+        };
+        let sealed = forced || encrypt;
         let msg = match export::write_plain(
             &p,
             &items,
-            &config_view(),
-            // v1.5.9：含个人令牌时用它加密；不含时这个值压根不会被用到
+            &view,
+            // 用本机备份密码加密；导出时不会明文保存它
             Some(&cfg_with(|c| c.backup_password.clone())),
+            encrypt,
         ) {
             Ok(n) => {
-                let had_token = cfg_with(|c| !c.github_token.trim().is_empty())
-                    && items.iter().any(|i| i == "secrets");
-                win::log(&format!("export_items -> {} keys={n}", p.display()));
-                /* 这一步必须说清楚"这是不是明文"：用户可能正要把文件发给别人。
-                 * 含令牌的那份是加密的，不能还喊"明文、可直接发给别人"。 */
-                if had_token {
+                win::log(&format!(
+                    "export_items -> {} keys={n} sealed={sealed} forced={forced}",
+                    p.display()
+                ));
+                /* 回执必须说清三件事之一：强制加密 / 自选加密 / 明文。
+                 * 用户可能正要把文件发给别人，含糊一句就会误导。 */
+                if forced {
                     format!(
-                        "配置已导出（含个人访问令牌，已用备份密码加密，{n} 个设置项）\
-                         —— 对方要先在「备份」页填上同一个密码才能导入"
+                        "配置已导出（{n} 个设置项）—— 含隐私项，已强制加密；\
+                         对方要在「备份」页填上同一个备份密码才能导入"
+                    )
+                } else if sealed {
+                    format!(
+                        "配置已导出并加密（{n} 个设置项）—— 导入时需要输入这次用的备份密码"
                     )
                 } else {
                     format!("配置已导出（明文，{n} 个设置项，可直接发给别人导入）")
@@ -4687,7 +4703,7 @@ fn export_items(app: AppHandle, items: Vec<String>) {
             }
             Err(e) => {
                 win::log(&format!("export_items failed: {e}"));
-                // 这里的 e 是有话要说的（比如"含令牌必须设密码"），别吞掉
+                // 这里的 e 是有话要说的（比如"有隐私项必须设密码"），别吞掉
                 e
             }
         };
@@ -4700,24 +4716,108 @@ fn picked_file(dlg: rfd::FileDialog) -> Option<std::path::PathBuf> {
     dlg.save_file()
 }
 
-/// r54 需求 3：导入**明文**导出的配置。
+/// 已选好、等着用户输密码的那份导入文件。
 ///
-/// 用户原话：「导入功能仅支持直接恢复导出的明文数据，不支持导入加密备份」。
-/// 所以这里不尝试解密 —— 遇到加密备份直接报错并指路「备份」页。
+/// 为什么要有这个全局：原生文件对话框只能弹一次，而"这份文件是加密的、要密码"
+/// 是**选完之后**才知道的事。把路径存下来，等前端把密码送回来就行 ——
+/// 否则得让用户重新选一遍文件，还得先跟他解释为什么。
+static IMPORT_PENDING: Mutex<Option<std::path::PathBuf>> = Mutex::new(None);
+
+/// 把读出来的那份数据灌进配置（明文 / 解密之后共用这一段）。
 ///
 /// ⚠ **合并式**而不是覆盖式：只把文件里带的那些键灌回去，别的键原样留着。
 ///   这正是"我只导出搜索引擎配置给同事"能用的前提 —— 要是整份覆盖，
 ///   同事的收藏夹、快捷键会被我这份文件清空。
+fn import_apply(items: Vec<String>, data: Value) -> Result<(), String> {
+    let n_keys = data.as_object().map(|o| o.len()).unwrap_or(0);
+    let named: Vec<&str> = items
+        .iter()
+        .filter_map(|id| export::find_group(id).map(|g| g.name))
+        .collect();
+    /* 令牌有没有被这份文件换掉 —— 必须在灌键**之前**记下来。
+     *
+     * 为什么要专门说一句：一份别人给的 `.qsconf` 只要勾了 secrets 组，
+     * 就能把本机令牌换成对方的。换了之后你所有 GitHub 请求都走对方账号，
+     * 对方能看到你查了哪些仓库。这不是阻止（用户可能就是想换），
+     * 但**绝不能一声不响**。 */
+    let token_before = cfg_with(|c| c.github_token.trim().to_string());
+    let mut token_note = String::new();
+    {
+        let mut cfg = st()
+            .cfg
+            .lock()
+            .map_err(|_| "配置正忙，稍后再试".to_string())?;
+        // 灌键。⚠ 这里复用 apply_view 而不是自己写一套读取规则：
+        //   clamp、默认值、归一化（比如 imgEngines 过 normalize_list）、
+        //   **图标落盘**（overrideIcons 里的 dataURL 由 config::restore_icon
+        //   写回 icons 目录并回填 overrides）全都和备份恢复走同一条路。
+        //   两条导入路用同一套解析，是"导入结果可预期"的前提 —— 自己再写
+        //   一份的话，同一个键在备份恢复和明文导入里会读出两种结果。
+        apply_view(&data, &mut cfg);
+        let after = cfg.github_token.trim().to_string();
+        if !after.is_empty() && after != token_before {
+            win::log("import_items: 个人访问令牌被文件里的值替换");
+            token_note = if token_before.is_empty() {
+                "，并已填入文件里的个人访问令牌".to_string()
+            } else {
+                "；个人访问令牌已被文件里的值替换".to_string()
+            };
+        }
+        config::save(&cfg);
+    }
+    broadcast();
+    win::log(&format!(
+        "import_items done: {n_keys} keys, groups={named:?}"
+    ));
+    let _ = APP.get().map(|a| {
+        a.emit_to(
+            "settings",
+            "qs://toast",
+            format!(
+                "已导入 {} 项（{} 个设置项）{token_note}",
+                named.len(),
+                n_keys
+            ),
+        )
+    });
+    Ok(())
+}
+
+/// 读一份导出文件并导入。`password` 只对密码信封有意义。
+fn import_open(p: &std::path::Path, password: Option<&str>) -> Result<(), String> {
+    let (items, data) = export::read_plain(p, MAX_BACKUP_BYTES, password)?;
+    import_apply(items, data)
+}
+
+/// r54 需求 3：导入导出的配置（第一步：选文件）。
+///
+/// # v1.5.10：加密的导出要用户**自己输密码**
+///
+/// 以前这里是"悄悄用本机备份密码去解"。问题在于：一份从别的机器导出、
+/// 用另一个密码加密的文件，用户会收到一句"密码不对"，而界面上没有任何
+/// 让他输密码的地方 —— 他只能去「备份」页改密码，那会连累所有其他备份。
+///
+/// 现在分三步：
+///   1. 选文件（这里）；
+///   2. 是**密码信封**就发 `qs://import-need-password`，前端弹输入框；
+///   3. 前端把密码送回来调 [`import_with_password`]。
+///
+/// 明文和 DPAPI 信封（`qsEnc:2`）不需要密码，直接在这条命令里导完 ——
+/// DPAPI 的钥匙是 Windows 账户，问用户要密码是要不到东西的。
 ///
 /// ⚠ 和 `export_items` 一样，这条命令也是薄壳：选文件交给对话框，
 ///   "读文件 → 三道闸"在 `export::read_plain` 里（可单测）。见那函数的注释。
 #[tauri::command]
 fn import_items(app: AppHandle) {
     win::log("import_items");
+    // 上一次没输密码就放弃的那份，别留着让它的密码能解开
+    if let Ok(mut g) = IMPORT_PENDING.lock() {
+        *g = None;
+    }
     let _ = app.run_on_main_thread(move || {
         let Some(p) = rfd::FileDialog::new()
-            .set_title("导入 Quick Search 明文配置")
-            .add_filter("QuickSearch 明文配置", &["qsconf", "json"])
+            .set_title("导入 Quick Search 配置")
+            .add_filter("QuickSearch 配置", &["qsconf", "json"])
             .pick_file()
         else {
             win::log("import_items: cancelled");
@@ -4726,63 +4826,99 @@ fn import_items(app: AppHandle) {
         let toast = |s: String| {
             let _ = APP.get().map(|a| a.emit_to("settings", "qs://toast", s));
         };
-        /* v1.5.9：含个人令牌的导出是加密的，这里用本机备份密码去解 ——
-         * 与「备份」页同一个钥匙，用户不用记两套密码。 */
-        let (items, data) = match export::read_plain(
-            &p,
-            MAX_BACKUP_BYTES,
-            Some(&cfg_with(|c| c.backup_password.clone())),
-        ) {
-            Ok(v) => v,
+        /* 先看大小：`read_to_string` 一个 2GB 文件能把内存吃光，
+         * 而这里只是想知道"是不是密文"，不值得为它冒这个险。 */
+        match std::fs::metadata(&p) {
+            Ok(m) if m.len() > MAX_BACKUP_BYTES => {
+                toast("文件超过 32MB，确认选对了吗".to_string());
+                return;
+            }
+            Ok(_) => {}
             Err(e) => {
-                win::log(&format!("import_items rejected: {e}"));
-                toast(e);
+                toast(format!("文件读不出来：{e}"));
+                return;
+            }
+        }
+        let head = match std::fs::read_to_string(&p) {
+            Ok(t) => t,
+            Err(e) => {
+                toast(format!("文件读不出来：{e}"));
                 return;
             }
         };
-        let n_keys = data.as_object().map(|o| o.len()).unwrap_or(0);
-        let named: Vec<&str> = items
-            .iter()
-            .filter_map(|id| export::find_group(id).map(|g| g.name))
-            .collect();
-        /* 令牌有没有被这份文件换掉 —— 必须在灌键**之前**记下来。
-         *
-         * 为什么要专门说一句：一份别人给的 `.qsconf` 只要勾了 secrets 组，
-         * 就能把本机令牌换成对方的。换了之后你所有 GitHub 请求都走对方账号，
-         * 对方能看到你查了哪些仓库。这不是阻止（用户可能就是想换），
-         * 但**绝不能一声不响**。 */
-        let token_before = cfg_with(|c| c.github_token.trim().to_string());
-        let mut token_note = String::new();
-        {
-            let mut cfg = match st().cfg.lock() {
-                Ok(c) => c,
-                Err(_) => {
-                    toast("配置正忙，稍后再试".to_string());
-                    return;
-                }
-            };
-            // 灌键。⚠ 这里复用 apply_view 而不是自己写一套读取规则：
-            //   clamp、默认值、归一化（比如 imgEngines 过 normalize_list）、
-            //   **图标落盘**（overrideIcons 里的 dataURL 由 config::restore_icon
-            //   写回 icons 目录并回填 overrides）全都和备份恢复走同一条路。
-            //   两条导入路用同一套解析，是"导入结果可预期"的前提 —— 自己再写
-            //   一份的话，同一个键在备份恢复和明文导入里会读出两种结果。
-            apply_view(&data, &mut cfg);
-            let after = cfg.github_token.trim().to_string();
-            if !after.is_empty() && after != token_before {
-                win::log("import_items: 个人访问令牌被文件里的值替换");
-                token_note = if token_before.is_empty() {
-                    "，并已填入文件里的个人访问令牌".to_string()
-                } else {
-                    "；个人访问令牌已被文件里的值替换".to_string()
-                };
+        /* 只认信封头，不解析内容 —— 这一步的目的只是"要不要问密码"。
+         * 真正的三道闸在 read_plain / parse 里，它们对明文和密文是同一套。 */
+        if crypto::envelope_version(&head) == Some(1) {
+            let name = p
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
+            win::log(&format!("import_items: 加密文件，等用户输密码（{name}）"));
+            if let Ok(mut g) = IMPORT_PENDING.lock() {
+                *g = Some(p);
             }
-            config::save(&cfg);
+            let _ = APP.get().map(|a| {
+                a.emit_to(
+                    "settings",
+                    "qs://import-need-password",
+                    serde_json::json!({ "name": name }),
+                )
+            });
+            return;
         }
-        broadcast();
-        win::log(&format!("import_items done: {n_keys} keys, groups={named:?}"));
-        toast(format!("已导入 {} 项（{} 个设置项）{token_note}", named.len(), n_keys));
+        // 明文 / DPAPI：直接导完
+        if let Err(e) = import_open(&p, None) {
+            win::log(&format!("import_items rejected: {e}"));
+            toast(e);
+        }
     });
+}
+
+/// 导入的第二步：用户把密码输好了。
+///
+/// 密码**只用来解这一次的文件**，不写进配置、不进日志 ——
+/// 它和「备份」页那个备份密码是两件事（虽然常常是同一个）。
+///
+/// # 为什么失败时要把路径放回去
+///
+/// 输错密码是最可能发生的重试场景。如果这里 `take()` 掉就不还了，
+/// 用户第二次输对也没用 —— 得重新走一遍「选文件」。所以失败时**原样放回**，
+/// 让前端能就地重输。
+///
+/// 返回 `Err` 而不是发 toast：错误要显示在密码框里（用户正盯着它），
+/// toast 一闪就没了，用户还得猜是不是自己没点中。
+#[tauri::command]
+fn import_with_password(password: String) -> Result<(), String> {
+    win::log("import_with_password");
+    let Some(p) = IMPORT_PENDING.lock().ok().and_then(|mut g| g.take()) else {
+        return Err("没有待导入的文件了 —— 请重新选一次".to_string());
+    };
+    match import_open(&p, Some(&password)) {
+        Ok(_) => {
+            win::log("import_with_password: ok");
+            Ok(())
+        }
+        Err(e) => {
+            // 放回去，让人能就地改密码重试
+            if let Ok(mut g) = IMPORT_PENDING.lock() {
+                *g = Some(p);
+            }
+            win::log(&format!("import_with_password failed: {e}"));
+            Err(e)
+        }
+    }
+}
+
+/// 用户在密码框上点了取消：丢掉待导入的那份。
+///
+/// 不丢也能用（下次 `import_items` 会覆盖），但留着一个"随时能被某个密码
+/// 解开的路径"没有任何好处。
+#[tauri::command]
+fn import_cancel() {
+    if let Ok(mut g) = IMPORT_PENDING.lock() {
+        *g = None;
+    }
+    win::log("import_cancel: 已丢弃待导入的文件");
 }
 
 /// 导出配置（含自定义图标的 data URL）到一个 json 文件，方便换机器 / 备份。
@@ -6121,6 +6257,44 @@ fn verify_github_token(token: String) -> Result<update::TokenCheck, String> {
         Err(e) => {
             win::log(&format!("update: 令牌验证失败 —— {e}"));
             Err(e)
+        }
+    }
+}
+
+/// 当前 GitHub 接口额度的用量：给令牌输入框下面那行「已用 X 次 / 共 Y 次」。
+///
+/// # 为什么走 `/rate_limit` 而不是复用「验证」
+///
+/// 「验证」打的是 `/user`，那是要**计入额度**的。设置页每开一次就烧一次配额，
+/// 攒起来也是钱；而 `/rate_limit` 按 GitHub 的规定**不计入额度**，
+/// 所以它可以常驻、可以频繁刷新。
+///
+/// 返回 `{ok, authed, limit, remaining, used, reset}`。
+/// 失败时 `{ok:false, error}` —— 前端据此把这一行藏起来（离线时不该留一句
+/// 可能过期的数字在那儿）。
+#[tauri::command]
+fn github_rate_state() -> serde_json::Value {
+    match update::rate_state() {
+        Ok(s) => {
+            /* 只记数字，不记令牌 —— 这一行每次设置页打开都会打，日志不能带凭据。 */
+            win::log(&format!(
+                "update: 额度 {}/{}（{}）",
+                s.used(),
+                s.limit,
+                if s.authed { "带令牌" } else { "匿名" }
+            ));
+            serde_json::json!({
+                "ok": true,
+                "authed": s.authed,
+                "limit": s.limit,
+                "remaining": s.remaining,
+                "used": s.used(),
+                "reset": s.reset,
+            })
+        }
+        Err(e) => {
+            win::log(&format!("update: 查额度失败 —— {e}"));
+            serde_json::json!({ "ok": false, "error": e })
         }
     }
 }
@@ -14631,6 +14805,8 @@ fn main() {
     export_groups_list,
     export_items,
     import_items,
+            import_with_password,
+            import_cancel,
             ocr_test,
             ocr_env_check,
             ocr_open_language_settings,
@@ -14691,6 +14867,7 @@ fn main() {
             update_pending,
             // v1.5.8：令牌「验证」按钮（不落盘，只问一次 GitHub）
             verify_github_token,
+            github_rate_state,
             update_install,
             update_restart,
             open_repo_page,

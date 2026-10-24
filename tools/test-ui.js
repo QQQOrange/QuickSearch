@@ -81,6 +81,16 @@ function makeEnv(htmlFile, conf) {
         hasToken: false, secretCount: 0,
     };
     const setSecState = (s) => { SEC_STATE = s; };
+    /* `github_rate_state` 的桩（v1.5.10）：令牌框下面那行「已用 X 次 / 共 Y 次」。
+     * 默认给一份"匿名 60 次"的快照 —— 那是没填令牌时的真实状态。 */
+    let RATE_STATE = {
+        ok: true, authed: false, limit: 60, remaining: 60, used: 0, reset: 0,
+    };
+    const setRateState = (s) => { RATE_STATE = s; };
+    /* `import_with_password` 的桩（v1.5.10）。非空时改成 reject，
+     * 用来测"密码错了要留在框里让人重输"。 */
+    let IMPORT_FAIL = '';
+    const setImportFail = (msg) => { IMPORT_FAIL = msg || ''; };
 
     /* ⚠ 桩必须装进 beforeParse：region.html 这类页面把脚本**内联**写在 HTML 里，
      * jsdom 会在构造函数的那一刻就执行它，等我们再拿到 dom.window 才补 __TAURI__
@@ -112,6 +122,16 @@ function makeEnv(htmlFile, conf) {
                         configPath: 'C:\\Users\\tester\\AppData\\Roaming\\QuickSearch\\config.json',
                         files: [],
                     });
+                }
+                /* export_groups_list（v1.5.10）：导出勾选表的来源。
+                 * 只给三组，够验"隐私项 → 强制加密"这条规则：
+                 * apiKeys / secrets 是隐私，engineConfig 不是。 */
+                if (cmd === 'export_groups_list') {
+                    return Promise.resolve([
+                        { id: 'apiKeys', name: 'API Key / 凭据', desc: '识别引擎的 Key', private: true, checked: false },
+                        { id: 'secrets', name: '个人访问令牌', desc: 'GitHub PAT', private: true, checked: false },
+                        { id: 'engineConfig', name: '引擎配置', desc: '横条摆哪些引擎', private: false, checked: true },
+                    ]);
                 }
                 // cleanup_data：扫描/执行共用一条命令，用 apply 区分。
                 // 返回一份"有东西可清"的清单，好让前端渲染逻辑真的被走到。
@@ -204,6 +224,13 @@ function makeEnv(htmlFile, conf) {
                 }
                 if (cmd === 'update_pending') return Promise.resolve(PENDING);
                 if (cmd === 'backup_security_state') return Promise.resolve(SEC_STATE);
+                if (cmd === 'github_rate_state') return Promise.resolve(RATE_STATE);
+                if (cmd === 'import_with_password') {
+                    return IMPORT_FAIL
+                        ? Promise.reject(IMPORT_FAIL)
+                        : Promise.resolve(null);
+                }
+                if (cmd === 'import_cancel') return Promise.resolve(null);
                 /* v1.5.8：「验证」按钮。⚠ 必须**先于**那条 `return null` 兜底，
                  * 否则 verify 回 null → 前端读 info.login 报错。 */
                 if (cmd === 'verify_github_token') {
@@ -268,6 +295,10 @@ function makeEnv(htmlFile, conf) {
         setVerify,
         /** `backup_security_state` 返回什么（v1.5.9，备份可移植性状态条） */
         setSecState,
+        /** `github_rate_state` 返回什么（v1.5.10，额度用量行） */
+        setRateState,
+        /** 让 `import_with_password` 失败（v1.5.10，测"密码错了"那条路） */
+        setImportFail,
         /** 换一份配置并触发一次真实的 qs://config 事件（走真实的重渲染路径） */
         pushConfig(next) {
             CONF = next;
@@ -2691,6 +2722,170 @@ async function testRegion() {
  * 所以这里钉三件事：DPAPI 必须报"仅本机可解"、有密码必须报"可跨设备"、
  * 那句错话不许回来。
  */
+/* v1.5.10：加密导出勾选框 + 导入密码框 + 额度用量
+ *
+ * 用户 2026-10-25 的三条要求：
+ *   1) 导出按钮旁有勾选框，勾了加密、不勾不加密；**含隐私项时强制加密**；
+ *   2) 导入加密文件时要输入密码；
+ *   3) 令牌框下面显示"已经连了多少次 / 总共多少次"。
+ *
+ * 前两条是安全动作：错了不是难看，是数据泄露或自己的文件打不开。
+ * 所以"强制"那一条要专门验 —— 用户能取消勾选的话，"强制"就不成立了。
+ */
+async function testExportEncryptAndImportPass() {
+    console.log('');
+    console.log('=== 加密导出勾选框 / 导入密码框 / 额度用量（v1.5.10）===');
+    const env = makeEnv('ui/settings.html', baseConf());
+    runScripts(env, ['ui/shared.js', 'ui/settings.js']);
+    await flush();
+    await flush();   // export_groups_list 是异步拿的，要等它回来才渲染勾选表
+    const { w } = env;
+    const $ = (id) => w.document.getElementById(id);
+    const click = (el) => el.dispatchEvent(new w.MouseEvent('click', { bubbles: true, cancelable: true }));
+
+    // ---- ① 勾选框本身 ----
+    const enc = $('s-exportEncrypt');
+    ok('数据页有「加密导出」勾选框', !!enc);
+    ok('  默认不勾（用户没要求就出明文）', enc && enc.checked === false);
+    ok('  默认可用（还没勾到隐私项）', enc && enc.disabled === false);
+    ok('  默认不显示"强制加密"提示', $('exportEncHint') && $('exportEncHint').hidden === true);
+
+    const boxes = () => Array.from($('w-exportBox').querySelectorAll('input[type=checkbox]'));
+    const boxOf = (id) => boxes().find((b) => b.dataset.id === id);
+    const tick = (id, on) => {
+        const b = boxOf(id);
+        b.checked = on;
+        b.dispatchEvent(new w.Event('change', { bubbles: true }));
+    };
+    ok('导出勾选表渲染出来了（3 组）', boxes().length === 3, String(boxes().length));
+
+    // ---- ② 勾隐私项 → 强制勾上并锁住 ----
+    tick('apiKeys', true);
+    await flush();
+    ok('勾了隐私项：加密被自动勾上', enc.checked === true);
+    ok('  并且**锁住**（不能被取消 —— 否则"强制"不成立）', enc.disabled === true);
+    ok('  勾选框整行标成锁定态', /locked/.test($('exportEncWrap').className || ''));
+    ok('  明确写出"强制加密"', /强制加密/.test($('exportEncHint').textContent || '')
+        && $('exportEncHint').hidden === false);
+
+    // 含隐私项导出 → 后端拿到的 encrypt 必须是 true
+    env.calls.length = 0;
+    click($('btnDoExport'));
+    await flush();
+    let c = env.lastCmd('export_items');
+    ok('含隐私项导出：encrypt=true 传给后端', !!(c && c.args && c.args.encrypt === true),
+        c && JSON.stringify(c.args));
+
+    // ---- ③ 取消隐私项 → 恢复可选、自动回到未勾 ----
+    tick('apiKeys', false);
+    await flush();
+    ok('取消隐私项：勾选框恢复可用', enc.disabled === false);
+    ok('  并且自动回到未勾（不把上次的强制当成用户意图）', enc.checked === false);
+    ok('  强制提示收起来', $('exportEncHint').hidden === true);
+
+    env.calls.length = 0;
+    click($('btnDoExport'));
+    await flush();
+    c = env.lastCmd('export_items');
+    ok('普通项导出：encrypt=false（不出加密文件）', !!(c && c.args && c.args.encrypt === false),
+        c && JSON.stringify(c.args));
+
+    // ---- ④ 手动勾加密 → 传 true ----
+    enc.checked = true;
+    env.calls.length = 0;
+    click($('btnDoExport'));
+    await flush();
+    c = env.lastCmd('export_items');
+    ok('手动勾了加密：encrypt=true', !!(c && c.args && c.args.encrypt === true));
+    enc.checked = false;
+
+    /* ---- ⑤ 导入：收到"要密码"事件 → 弹框 ---- */
+    ok('密码框默认藏着', $('impPassBox').hidden === true);
+    const needPass = env.listeners.get('qs://import-need-password');
+    ok('设置页登记了 qs://import-need-password', !!needPass);
+    needPass({ payload: { name: 'config(2026-10-25 10-00-00).qsconf' } });
+    await flush();
+    ok('收到事件后弹出密码框', $('impPassBox').hidden === false);
+    ok('  说明里带上文件名（用户能确认是这份）',
+        /config\(2026-10-25 10-00-00\)/.test($('impPassSub').textContent || ''),
+        $('impPassSub').textContent);
+
+    // 空密码：不提交，就地提示
+    env.calls.length = 0;
+    $('impPassInput').value = '';
+    click($('btnImpPassOk'));
+    await flush();
+    ok('空密码不提交，框里提示', /先输入密码/.test($('impPassErr').textContent || '')
+        && $('impPassErr').hidden === false);
+    ok('  也没调用后端', env.cmd('import_with_password').length === 0);
+
+    // 密码错：框**不能**关（要能就地重输）
+    env.setImportFail('密码不对，解不开这份文件');
+    $('impPassInput').value = 'wrong';
+    click($('btnImpPassOk'));
+    await flush();
+    ok('密码错了：框不关（关了就得重新选文件）', $('impPassBox').hidden === false);
+    ok('  错误显示在框里', /解不开/.test($('impPassErr').textContent || ''),
+        $('impPassErr').textContent);
+
+    // 密码对：交给后端，关框
+    env.setImportFail('');
+    $('impPassInput').value = 'right-pw';
+    env.calls.length = 0;
+    click($('btnImpPassOk'));
+    await flush();
+    c = env.lastCmd('import_with_password');
+    ok('密码对：把密码交给后端', !!(c && c.args && c.args.password === 'right-pw'),
+        c && JSON.stringify(c.args));
+    ok('  导入成功后关框', $('impPassBox').hidden === true);
+
+    // 取消：告诉后端丢掉待导入的文件
+    needPass({ payload: { name: 'x.qsconf' } });
+    await flush();
+    env.calls.length = 0;
+    click($('btnImpPassCancel'));
+    await flush();
+    ok('取消会告诉后端丢弃待导入的文件', env.cmd('import_cancel').length === 1);
+    ok('  并且关框', $('impPassBox').hidden === true);
+
+    // Enter 也能提交（键盘用户）
+    needPass({ payload: { name: 'y.qsconf' } });
+    await flush();
+    $('impPassInput').value = 'pw2';
+    env.calls.length = 0;
+    $('impPassInput').dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await flush();
+    ok('在密码框里按 Enter 也能导入', env.cmd('import_with_password').length === 1);
+    $('impPassInput').dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await flush();
+
+    /* ---- ⑥ 额度用量 ---- */
+    const rate = $('githubRateLine');
+    ok('令牌框下面有额度行', !!rate);
+
+    env.setRateState({ ok: true, authed: true, limit: 5000, remaining: 4997, used: 3, reset: 0 });
+    env.listeners.get('qs://update')({ payload: { newer: false, manual: true } });
+    await flush();
+    ok('额度行显示"已请求 3 次 / 共 5000 次"',
+        /已请求\s*3\s*次\s*\/\s*共\s*5000\s*次/.test(rate.textContent || ''),
+        rate.textContent);
+    ok('  还写了本小时剩多少', /还剩\s*4997\s*次/.test(rate.textContent || ''));
+    ok('  带令牌时不显示匿名提示', !/匿名额度/.test(rate.textContent || ''));
+    ok('  没有标成匿名样式', !/anon/.test(rate.className || ''));
+
+    env.setRateState({ ok: true, authed: false, limit: 60, remaining: 58, used: 2, reset: 0 });
+    env.listeners.get('qs://update')({ payload: { newer: false, manual: true } });
+    await flush();
+    ok('匿名时额度是 60', /共\s*60\s*次/.test(rate.textContent || ''), rate.textContent);
+    ok('  并提示填令牌可以提额度', /匿名额度/.test(rate.textContent || ''));
+    ok('  标成匿名样式（换个颜色）', /anon/.test(rate.className || ''));
+
+    env.setRateState({ ok: false, error: '连不上' });
+    env.listeners.get('qs://update')({ payload: { newer: false, manual: true } });
+    await flush();
+    ok('查不到额度时整行藏起来（不留过期数字）', rate.hidden === true);
+}
+
 async function testBackupSecurity() {
     console.log('');
     console.log('=== 备份可移植性状态条（v1.5.9）===');
@@ -3307,6 +3502,7 @@ async function testUpdateToken() {
         await testRegion();
         await testBackupPage();
         await testBackupSecurity();
+        await testExportEncryptAndImportPass();
         await testFavTools();
         await testCatJump();
     } catch (e) {

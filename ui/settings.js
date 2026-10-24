@@ -4729,14 +4729,171 @@ function pickedExportGroups() {
     return EXPORT_GROUPS.filter((g) => out.indexOf(g.id) >= 0).map((g) => g.id);
 }
 
-/// 把勾了几项写在按钮上（「导出选中的数据…」→ 「导出 3 项…」）。
+/// 把勾了几项写在按钮上（「导出选中的数据…」→ 「导出 3 项…」），
+/// 并维护「加密导出」勾选框的状态。
+///
 /// 为什么值得做：这一栏最容易被误用的点就是"不知道自己导出的是什么"，
 /// 数字是最省字的一句说明。
+///
+/// # v1.5.10：隐私项强制加密
+///
+/// 用户 2026-10-25：「如果导出的数据包括涉及隐私的，那么就强制加密」。
+/// 勾到隐私组时把勾选框**勾上并锁住** —— 锁住是必要的：
+/// 如果只是"偷偷加密"，用户会以为自己导的是明文（拿去当普通文件处理），
+/// 结果打开一堆乱码；如果只弹提示不锁，用户能取消勾选，那"强制"就不成立了。
+///
+/// ⚠ 前端按"勾了隐私组"锁，后端按"隐私组里真有内容"判 —— 前端更保守。
+///   勾了「个人访问令牌」但本机没填令牌时，这里仍然锁住加密，结果只是
+///   多加密一次，不会漏。
 function syncExportCount() {
     const btn = $('btnDoExport');
-    if (!btn) return;
-    const n = pickedExportGroups().length;
-    btn.textContent = n ? `导出 ${n} 项…` : '导出选中的数据…';
+    if (btn) {
+        const n = pickedExportGroups().length;
+        btn.textContent = n ? `导出 ${n} 项…` : '导出选中的数据…';
+    }
+
+    const picked = pickedExportGroups();
+    const forced = picked.some((id) => {
+        const g = EXPORT_GROUPS.find((x) => x.id === id);
+        return !!g && !!g.private;
+    });
+    const cb = $('s-exportEncrypt');
+    if (cb) {
+        if (forced) {
+            cb.checked = true;
+            cb.disabled = true;
+            cb.dataset.forced = '1';
+        } else {
+            /* 从"强制"退出来时恢复成未勾选。
+             * 不恢复的话，下次只勾普通项时它会带着上次的强制状态 ——
+             * 用户会得到一个自己没要求过的加密文件。 */
+            if (cb.dataset.forced === '1') {
+                cb.checked = false;
+                cb.dataset.forced = '';
+            }
+            cb.disabled = false;
+        }
+    }
+    const wrap = $('exportEncWrap');
+    if (wrap) wrap.classList.toggle('locked', forced);
+    const hint = $('exportEncHint');
+    if (hint) {
+        hint.hidden = !forced;
+        if (forced) {
+            hint.textContent =
+                '已勾选隐私项（API Key / 个人访问令牌 / WebDAV 密码 / 备份密码 / 收藏内容），'
+                + '这次导出会强制加密 —— 收件方要输入密码才能导入。';
+        }
+    }
+}
+
+/* ==========================================================================
+ *  v1.5.10：导入密码框
+ *
+ *  后端选完文件之后才知道"这份是密码加密的"，所以它发事件，这里弹框。
+ *
+ *  密码只用来解**这一个文件**：不写配置、不进日志、关掉就丢。
+ *  也**不**拿它去改「备份」页那个备份密码 —— 那是另一件事，
+ *  改了会连累这台机器上所有其他加密备份。
+ * ========================================================================== */
+function impPassShow(name) {
+    const box = $('impPassBox');
+    if (!box) return;
+    const sub = $('impPassSub');
+    if (sub) {
+        sub.textContent = name
+            ? `输入导出「${name}」时用的密码`
+            : '输入导出这份配置时用的密码';
+    }
+    const inp = $('impPassInput');
+    if (inp) {
+        inp.value = '';
+        // 焦点必须落在密码框上：用户刚点了"导入"，就该能直接开始打字
+        setTimeout(() => inp.focus(), 0);
+    }
+    const err = $('impPassErr');
+    if (err) {
+        err.hidden = true;
+        err.textContent = '';
+    }
+    box.hidden = false;
+}
+
+function impPassHide() {
+    const box = $('impPassBox');
+    if (box) box.hidden = true;
+}
+
+async function impPassSubmit() {
+    const inp = $('impPassInput');
+    const err = $('impPassErr');
+    const pw = inp ? inp.value : '';
+    if (!pw) {
+        if (err) {
+            err.textContent = '先输入密码';
+            err.hidden = false;
+        }
+        if (inp) inp.focus();
+        return;
+    }
+    const ok = $('btnImpPassOk');
+    if (ok) ok.disabled = true;
+    try {
+        await invoke('import_with_password', { password: pw });
+        /* 成功时的 toast 由后端发（它知道导入了多少项）—— 这里只关框，
+         * 否则会出现两条内容不一样的"导入成功"。 */
+        impPassHide();
+    } catch (e) {
+        /* 密码错了**绝不关框**：这是最可能的重试场景，
+         * 关了用户就得重新走一遍选文件。 */
+        if (err) {
+            err.textContent = '解不开：' + ((e && e.message) || e);
+            err.hidden = false;
+        }
+        if (inp) {
+            inp.focus();
+            inp.select();
+        }
+    } finally {
+        if (ok) ok.disabled = false;
+    }
+}
+
+/// 取消 = 放弃这次导入（后端也要把待导入的路径丢掉）。
+function impPassCancel() {
+    impPassHide();
+    invoke('import_cancel').catch(() => {});
+}
+
+listen('qs://import-need-password', (ev) => {
+    const p = ev && ev.payload ? ev.payload : {};
+    impPassShow(p.name);
+});
+
+{
+    const box = $('impPassBox');
+    if (box && !box.dataset.bound) {
+        box.dataset.bound = '1';
+        const okBtn = $('btnImpPassOk');
+        if (okBtn) okBtn.addEventListener('click', impPassSubmit);
+        const cancel = $('btnImpPassCancel');
+        if (cancel) cancel.addEventListener('click', impPassCancel);
+        // 点遮罩与点「取消」同一语义
+        const mask = box.querySelector('.qmodal-mask');
+        if (mask) mask.addEventListener('click', impPassCancel);
+        const inp = $('impPassInput');
+        if (inp) {
+            inp.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    impPassSubmit();
+                } else if (e.key === 'Escape') {
+                    e.preventDefault();
+                    impPassCancel();
+                }
+            });
+        }
+    }
 }
 
 function bindDataTab() {
@@ -4749,15 +4906,23 @@ function bindDataTab() {
                 toast('一项都没勾，没什么可导出的');
                 return;
             }
-            invoke('export_items', { items }).catch((e) => toast('导出失败：' + e));
+            /* v1.5.10：把勾选框的状态交给后端。
+             * 后端还会自己判一次"隐私项必须加密"——前端这一票不能覆盖它。 */
+            const encrypt = !!($('s-exportEncrypt') || {}).checked;
+            invoke('export_items', { items, encrypt }).catch((e) => toast('导出失败：' + e));
         });
     }
+    // 勾选框变化只影响按钮上的字？不 —— 它不改项数，所以这里不用重算。
+    // 绑定只为让键盘用户（空格切换）也有反馈；状态由后端在导出时读取。
     const btnI = $('btnDoImport');
     if (btnI && !btnI._bound) {
         btnI._bound = true;
         btnI.addEventListener('click', () => {
-            // 导入是**合并**式的：只把文件里带的那几项灌回去，别的一律不动。
-            // 这一步要说清楚 —— 用户最怕的就是"导入完我别的东西没了"。
+            /* 导入是**合并**式的：只把文件里带的那几项灌回去，别的一律不动。
+             * 这一步要说清楚 —— 用户最怕的就是"导入完我别的东西没了"。
+             *
+             * v1.5.10：这条命令只负责"选文件"。如果文件是密码加密的，
+             * 后端会发 `qs://import-need-password` 让下面那个弹框接上。 */
             invoke('import_items').catch((e) => toast('导入失败：' + e));
         });
     }
@@ -6722,6 +6887,15 @@ function webviewLabel() {
  *  发新版时**同时**加一条，对不上就是漏了。 */
 const CHANGELOG = [
     {
+        ver: 'v1.5.10',
+        items: [
+            '<b>导出旁边多了「加密导出」勾选框</b> —— 你自己决定：勾了这份文件就是加密的（导入时要输密码），不勾就是明文（和以前一样，别人拿到直接就能导入）。',
+            '<b>但勾到隐私项时会强制加密</b> —— API Key、个人访问令牌、WebDAV 密码、备份密码、收藏内容，只要选中了其中任何一项带内容，加密就会<b>自动勾上并锁住</b>。锁住不是不让你选，是这件事没得选：这些数据一旦明文落到别人手上，损失不是"打不开"而是"被拿走"。勾选框会明确写着"强制加密"，不会偷偷替你决定。',
+            '<b>导入加密文件现在会让你输密码</b> —— 以前是拿本机备份密码偷偷试一次，解不开就报一句"密码不对"，可界面上根本没有地方能输。现在选完文件如果发现是加密的，会弹一个框让你输密码；<b>输错了不会关框</b>，直接改一下再试就行，不用重新选文件。明文文件和"只有这台电脑能解"的那种备份照旧不问密码，点了就导。',
+            '<b>令牌框下面能看到额度用到哪了</b> —— 常驻一行「本小时已请求 X 次 / 共 Y 次 · 还剩 Z 次」。没填令牌时是 60 次/小时并提示可以提额，填了就是 5000。这一行查的是 GitHub 的<b>额度接口，不消耗额度</b>，所以开着设置页、反复刷新都不会占到你的配额。查不到（断网）就整行藏起来，不会留一个几小时前的旧数字骗你。',
+        ],
+    },
+    {
         ver: 'v1.5.9',
         items: [
             '<b>个人访问令牌现在也能导出了</b> —— 以前它不属于任何一个导出分组，勾选界面上根本看不见它，等于"备份里带着、导出时带不走"。现在单列成「个人访问令牌」一项，默认不勾，要带走自己打勾。',
@@ -7209,6 +7383,46 @@ function tokSay(msg, kind) {
     el.className = 'upd-token-status' + (kind ? ' ' + kind : '');
 }
 
+/* ==========================================================================
+ *  v1.5.10：额度用量（"已经请求了多少次 / 总共多少次"）
+ *
+ *  用户 2026-10-25 的要求，常驻在令牌输入框下面。
+ *
+ *  数据来自 `github_rate_state`，它打的是 `/rate_limit` —— GitHub 明文规定
+ *  查这个端点**不计入**额度。所以开着设置页、反复刷新都不会烧配额；
+ *  换成 `/user` 去数的话，用户每开一次设置页就少一次更新检查的机会。
+ *
+ *  两条纪律：
+ *    · 查不到（离线 / 被墙 / 没网）就把整行**藏起来** —— 宁可没有，
+ *      也不要留一个可能是几小时前的数字在那儿冒充"现状"；
+ *    · 数字一律先过 `Number()` 再拼进 HTML，不让任何外来字符串碰 DOM。
+ * ========================================================================== */
+async function refreshGithubRate() {
+    const el = $('githubRateLine');
+    if (!el) return;
+    let st = null;
+    try {
+        st = await invoke('github_rate_state');
+    } catch (_) {
+        el.hidden = true;
+        return;
+    }
+    if (!st || typeof st !== 'object' || !st.ok) {
+        el.hidden = true;
+        return;
+    }
+    const used = Number(st.used) || 0;
+    const total = Number(st.limit) || 0;
+    const left = Number(st.remaining) || 0;
+    const authed = !!st.authed;
+    el.className = 'upd-rate' + (authed ? '' : ' anon');
+    el.hidden = false;
+    el.innerHTML =
+        '<i class="rdot"></i>本小时已请求 <b>' + used + '</b> 次 / 共 <b>' + total + '</b> 次'
+        + ' · 还剩 ' + left + ' 次'
+        + (authed ? '' : '（匿名额度，填令牌可提到 5000 次/小时）');
+}
+
 /** 令牌输入框里"已经存好的那一版"。
  *
  *  优先用 `TOK_SAVED`（显式保存 / change 自动落盘时记的），`null` 时退回
@@ -7238,6 +7452,9 @@ function tokRefreshSave() {
 
 /** 打开「关于」页时问后端一句"有没有待装的"，并把仓库按钮接上。 */
 function updInit() {
+    /* v1.5.10：额度用量。不 await —— 它要联网，不能让整页初始化等它。
+     * 查不到会自己把那一行藏起来，不会留个空壳。 */
+    refreshGithubRate();
     const repo = $('aboutRepo');
     if (repo && !repo.dataset.bound) {
         repo.dataset.bound = '1';
@@ -7329,7 +7546,11 @@ function updInit() {
                         : '✓ 已保存为匿名请求（每小时 60 次）', 'ok');
                 })
                 .catch((e) => tokSay('保存失败：' + e, 'err'))
-                .then(() => tokRefreshSave());
+                .then(() => {
+                    tokRefreshSave();
+                    // 额度从 60 变 5000（或反过来）—— 那一行必须跟着改
+                    refreshGithubRate();
+                });
         });
     }
     const clr = $('btnGithubTokenClear');
@@ -7347,7 +7568,10 @@ function updInit() {
                     toast('已清空令牌，改回匿名请求（每小时 60 次）');
                 })
                 .catch((e) => tokSay('清空失败：' + e, 'err'))
-                .then(() => tokRefreshSave());
+                .then(() => {
+                    tokRefreshSave();
+                    refreshGithubRate();
+                });
         });
     }
     /* 输入框一改，按钮立刻跟着变 + 该亮的「保存」亮起来。
@@ -7498,6 +7722,10 @@ listen('qs://update', (ev) => {
     const p = ev.payload || {};
     const check = $('btnUpdateCheck');
     if (check) check.disabled = false;
+    /* v1.5.10：一次检查 = 一次 API 调用，额度那一行要跟着动。
+     * 放最前面：不管后面走哪个分支（有新版本 / 没有 / 失败），
+     * 这次请求都已经花掉了。 */
+    refreshGithubRate();
     const hint = $('updHint');
     if (p.newer) {
         UPD_INFO = {

@@ -538,6 +538,85 @@ fn user_api() -> String {
     "https://api.github.com/user".to_string()
 }
 
+/// `/rate_limit` 的地址（逃生口与上面几个同一个套路）。
+///
+/// ⚠ 这个端点和别的**不一样**：GitHub 明文规定查它**不计入**额度。
+/// 所以"打开设置页就显示用了多少次"才可以做成常驻的 ——
+/// 用 `/user` 去数的话，用户每开一次设置页就烧掉一次配额。
+fn rate_api() -> String {
+    if let Ok(b) = std::env::var("QS_GITHUB_RATE_API") {
+        if !b.trim().is_empty() {
+            return b;
+        }
+    }
+    "https://api.github.com/rate_limit".to_string()
+}
+
+/// 当前接口额度的快照。给设置页那行「已用 X 次 / 共 Y 次」用。
+#[derive(Debug, Clone, PartialEq)]
+pub struct RateState {
+    /// 这次查询**实际**带没带令牌（没填 / 被拒都会是 false）
+    pub authed: bool,
+    /// 每小时上限：有令牌 5000，匿名 60
+    pub limit: u64,
+    /// 本小时还剩多少
+    pub remaining: u64,
+    /// 额度重置的时刻（unix 秒）
+    pub reset: u64,
+}
+
+impl RateState {
+    /// 本小时已经用掉多少次。
+    ///
+    /// `saturating_sub` 而不是 `-`：GitHub 偶尔会给出 `remaining > limit`
+    /// 的瞬时值（改了配额、或者中间缓存），减法会下溢 panic。
+    pub fn used(&self) -> u64 {
+        self.limit.saturating_sub(self.remaining)
+    }
+}
+
+/// 查一次额度。
+///
+/// 只认响应头，不解析 body —— `x-ratelimit-limit/remaining/reset` 一定在，
+/// 而 body 的 `resources.core` 形状哪天变了不该让这一行整个崩掉。
+///
+/// ⚠ 头和 body 的顺序：**先读头，再 `into_string()`**。反了头就没了
+/// （`api_latest` 里踩过同一个坑）。
+pub fn rate_state() -> Result<RateState, String> {
+    let tok = current_token();
+    let a = agent();
+    let mut req = a
+        .get(&rate_api())
+        .set("Accept", "application/vnd.github+json");
+    if let Some(t) = tok.as_deref() {
+        req = req.set("Authorization", &format!("Token {t}"));
+    }
+    let resp = req.call().map_err(|e| match e {
+        ureq::Error::Status(code, r) => {
+            let _ = r.into_string();
+            format!("查额度失败：GitHub 返回 HTTP {code}")
+        }
+        other => crate::ocr::explain(&other),
+    })?;
+    let num = |h: &str| -> u64 {
+        resp.header(h)
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0)
+    };
+    let st = RateState {
+        authed: tok.is_some(),
+        limit: num("x-ratelimit-limit"),
+        remaining: num("x-ratelimit-remaining"),
+        reset: num("x-ratelimit-reset"),
+    };
+    // 头已经读完了，body 不要了（但必须消费掉，否则连接不归还）
+    let _ = resp.into_string();
+    if st.limit == 0 {
+        return Err("GitHub 没给额度信息（响应头里没有 x-ratelimit-limit）".to_string());
+    }
+    Ok(st)
+}
+
 /// 拿这串令牌去问一次 GitHub：「你是谁、额度多少」。
 ///
 /// 为什么验证不用 `releases/latest`：那个接口对**没权限的令牌**回的是 404
@@ -1145,6 +1224,29 @@ mod tests {
             .as_secs();
         // 10 分钟后：±几秒的执行误差不会跨过分钟边界
         assert_eq!(minutes_until(now + 600), Some(10));
+    }
+
+    /// 额度用量里的"已用次数"。
+    ///
+    /// 这一行会直接显示在设置页（"本小时已请求 N 次 / 共 M 次"），
+    /// 算错一个数用户就会以为自己的配额被人偷了。
+    #[test]
+    fn 已用次数是上限减剩余() {
+        let s = RateState { authed: true, limit: 5000, remaining: 4997, reset: 0 };
+        assert_eq!(s.used(), 3);
+
+        // 一次没用
+        let s = RateState { authed: false, limit: 60, remaining: 60, reset: 0 };
+        assert_eq!(s.used(), 0);
+
+        // 用光
+        let s = RateState { authed: true, limit: 5000, remaining: 0, reset: 0 };
+        assert_eq!(s.used(), 5000);
+
+        /* ⚠ GitHub 偶尔会给出 remaining > limit（刚改配额、中间缓存），
+         *   普通减法在这里会下溢 panic。saturating_sub 兜住。 */
+        let s = RateState { authed: true, limit: 60, remaining: 61, reset: 0 };
+        assert_eq!(s.used(), 0, "remaining 比 limit 大时按 0 算，不能 panic");
     }
 
     /// 「验证」按钮要的东西：账号名、额度、令牌种类。

@@ -794,12 +794,42 @@
             </div>
         </div>
         <div class="acts">
+            <!-- v1.5.10：加密导出勾选框（用户 2026-10-25 要求）。
+                 规则：勾了 → 加密；不勾 → 明文；**勾到隐私项时强制加密**，
+                 这时勾选框会被程序勾上并锁住 —— 锁住是必要的，否则用户会以为
+                 "我不勾就能导明文"，然后拿到一个他自己的导出却打不开的文件。 -->
+            <label class="exp-enc" id="exportEncWrap">
+                <input type="checkbox" id="s-exportEncrypt">
+                <span>加密导出</span>
+            </label>
             <button class="btn" id="btnDoExport">导出选中的数据…</button>
             <button class="btn ghost" id="btnDoImport">导入配置文件…</button>
             <span class="grab-hint" id="dataHint"></span>
         </div>
+        <div class="hint" id="exportEncHint" hidden></div>
         <div class="hint" id="dataResult" hidden></div>
     </section>
+
+    <!-- 导入密码框（v1.5.10）。
+         为什么必须有这一步：加密导出的密码**不一定**是本机的备份密码
+         （换机、同事给的都可能是别的），以前拿本机密码悄悄试一次，解不开
+         就报"密码不对"，界面上却没有任何地方能输 —— 用户只能去「备份」页
+         改密码，那会连累所有其他备份。 -->
+    <div class="qmodal" id="impPassBox" hidden>
+        <div class="qmodal-mask"></div>
+        <div class="qmodal-box" role="dialog" aria-modal="true"
+             aria-labelledby="impPassTitle" aria-describedby="impPassSub">
+            <div class="qmodal-title" id="impPassTitle">这份配置是加密的</div>
+            <div class="qmodal-sub" id="impPassSub">输入导出它时用的密码</div>
+            <input class="txt" id="impPassInput" type="password" spellcheck="false"
+                   autocomplete="off" placeholder="导出时设置的密码">
+            <div class="qmodal-err" id="impPassErr" hidden></div>
+            <div class="qmodal-acts">
+                <button class="btn ghost" id="btnImpPassCancel">取消</button>
+                <button class="btn primary" id="btnImpPassOk">导入</button>
+            </div>
+        </div>
+    </div>
     </div>
 
     <!-- ============================ 收藏夹 ============================ -->
@@ -1396,6 +1426,13 @@
                         <button type="button" class="btn" id="btnGithubTokenClear"
                                 title="清空令牌，改回匿名请求">清除</button>
                     </div>
+                    <!-- v1.5.10：额度用量，常驻在密码框正下方（用户要求
+                         「呈现出已经连接了多少次，总共有多少次的文本提示」）。
+                         数字来自 /rate_limit —— 那个端点按 GitHub 规定不计入额度，
+                         所以开着设置页、反复刷新都不会烧配额。
+                         查不到（离线 / 被墙）就整行藏起来，绝不留一个可能是
+                         过期的数字在那儿误导人。 -->
+                    <div class="upd-rate" id="githubRateLine" hidden></div>
                     <!-- 验证 / 保存的结果行（role=status + aria-live 让读屏也能听到）。
                          空的时候由 CSS 的 :empty 收起来，不用 JS 切 hidden。 -->
                     <div class="upd-token-status" id="githubTokenStatus"

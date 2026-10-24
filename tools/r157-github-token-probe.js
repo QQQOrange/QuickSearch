@@ -94,6 +94,22 @@ const server = http.createServer((req, res) => {
         });
         return res.end(JSON.stringify({ login: 'probe-user', name: '探针账号', id: 1 }));
     }
+    if (req.url.indexOf('/api/rate-limit') === 0) {
+        /* v1.5.10：令牌框下面那行「已用 X 次 / 共 Y 次」。
+         * 真机上是 `/rate_limit`。有令牌 5000、匿名 60 —— 和 GitHub 的
+         * 实际规则一致，这样探针验到的数字就是用户会看到的数字。
+         * `remaining` 故意给个非整十的值，好让"已用 = 上限 - 剩余"算得出来。 */
+        const ok = auth === 'Token ' + TOKEN;
+        res.writeHead(200, {
+            'content-type': 'application/json',
+            'x-ratelimit-limit': ok ? '5000' : '60',
+            'x-ratelimit-remaining': ok ? '4996' : '58',
+            'x-ratelimit-reset': String(Math.floor(Date.now() / 1000) + 1800),
+        });
+        return res.end(JSON.stringify({
+            resources: { core: { limit: ok ? 5000 : 60, remaining: ok ? 4996 : 58 } },
+        }));
+    }
     if (req.url.indexOf('/api-latest') === 0) {
         if (MODE === 'ratelimit') {
             res.writeHead(403, {
@@ -181,6 +197,8 @@ const logSize = () => { try { return fs.statSync(LOG).size; } catch (e) { return
         // ★ 这两条是探针专用逃生口（正式启动不带）——让实例去问本地假服务
         QS_UPDATE_API: 'http://127.0.0.1:' + PORT + '/api-latest',
         QS_UPDATE_WEB: 'http://127.0.0.1:' + PORT + '/web-latest',
+        // v1.5.10：额度用量（真机是 /rate_limit，不消耗额度）
+        QS_GITHUB_RATE_API: 'http://127.0.0.1:' + PORT + '/api/rate-limit',
         // v1.5.8：「验证」按钮的 /user，也要指到假服务上才测得了坏令牌
         QS_GITHUB_USER_API: 'http://127.0.0.1:' + PORT + '/api/user',
     });
@@ -428,6 +446,33 @@ const logSize = () => { try { return fs.statSync(LOG).size; } catch (e) { return
     try { s3 = JSON.parse(sec3); } catch (e) { }
     check('收尾：备份密码已还原成探针开跑前的状态',
         !!s3 && s3.portable === (pwBefore.trim().length > 0), sec3 + ' / before=' + JSON.stringify(pwBefore));
+
+    /* ---------- ⑧ 额度用量（v1.5.10）----------
+     *
+     * 设置页令牌框下面那行「本小时已请求 X 次 / 共 Y 次」。
+     * 关键是它必须走 `/rate_limit`（不计额度），不能拿 `/user` 去数 ——
+     * 后者每开一次设置页就烧掉一次配额。下面的断言就是盯着请求路径。 */
+    await setTok(TOKEN);
+    await sleep(300);
+    hits.length = 0;
+    const r1 = await call('github_rate_state');
+    let r1j = null;
+    try { r1j = JSON.parse(r1); } catch (e) { }
+    check('带令牌：额度上限 5000', !!r1j && r1j.ok && r1j.limit === 5000, r1);
+    check('  已用次数 = 上限 - 剩余', !!r1j && r1j.used === 4, r1);
+    check('  authed=true（如实反映这次带了令牌）', !!r1j && r1j.authed === true);
+    check('  走的是 /rate_limit（不消耗额度那个口子）',
+        hits.some((h) => h.path.indexOf('/api/rate-limit') === 0),
+        hits.map((h) => h.path).join(','));
+
+    await setTok('');
+    await sleep(300);
+    const r2 = await call('github_rate_state');
+    let r2j = null;
+    try { r2j = JSON.parse(r2); } catch (e) { }
+    check('匿名：额度上限 60', !!r2j && r2j.ok && r2j.limit === 60, r2);
+    check('  authed=false', !!r2j && r2j.authed === false, r2j && r2j.authed);
+    check('  日志里没有令牌、也没有备份密码', readLogFrom(0).indexOf(TOKEN) < 0);
 
     // 收尾：把探针写进去的配置清干净（自动更新**要还原成 true**，
     // 否则下一轮启动时不会自动检查，第 ⓪ 组就白测了）

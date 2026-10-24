@@ -1257,6 +1257,112 @@ body.idx-on .to-top { bottom: 56px; }
     border-color: color-mix(in srgb, var(--danger) 36%, transparent);
     background: color-mix(in srgb, var(--danger) 10%, transparent);
 }
+
+/* ------------------------- 额度用量（v1.5.10） -------------------------
+ *
+ * 常驻在令牌输入框下面，回答"这台机器这一个小时用掉多少配额"。
+ * 和 .upd-token-status 的分工：那个是**一次操作的结果**（会变、会消失），
+ * 这个是**当前状态**（一直在）。所以它不做边框卡片，只一行小字 ——
+ * 两行都画成卡片的话，用户分不清哪个需要理会。
+ */
+.upd-rate {
+    margin-top: 6px;
+    font-size: 11.5px;
+    line-height: 1.6;
+    color: var(--fg-dim);
+    user-select: text;
+}
+.upd-rate b { color: var(--fg); font-weight: 600; }
+.upd-rate .rdot {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    margin-right: 5px;
+    vertical-align: 1px;
+    background: var(--ok);
+}
+/* 匿名模式换个颜色：额度只有 60，是"需要你处理"的状态 */
+.upd-rate.anon .rdot { background: var(--warn); }
+.upd-rate[hidden] { display: none; }
+
+/* ------------------- 导出加密勾选框（v1.5.10） -------------------
+ *
+ * 接在 .acts 里那串按钮前面。被强制加密时加 .locked：
+ * 勾选框仍然**可见**（用户要能看见"它在加密"，而不是莫名其妙少了个控件），
+ * 但鼠标和键盘都改不动它。 */
+.exp-enc {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-right: 2px;
+    font-size: 12px;
+    color: var(--fg);
+    user-select: none;
+}
+.exp-enc input {
+    width: 14px;
+    height: 14px;
+    margin: 0;
+    accent-color: var(--accent);
+    cursor: pointer;
+}
+.exp-enc.locked { color: var(--fg-dim); }
+.exp-enc.locked input { cursor: not-allowed; }
+
+/* ---------------------- 通用模态框（v1.5.10） ----------------------
+ *
+ * 只为"导入需要密码"这一个场景加的最小实现：遮罩 + 一个卡片。
+ * 不用 <dialog>：`::backdrop` 在旧 WebView2 内核上表现不一致，
+ * 而这里只需要 fixed + mask 两层，行为完全可预期。 */
+.qmodal {
+    position: fixed;
+    inset: 0;
+    z-index: 90;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.qmodal[hidden] { display: none; }
+.qmodal-mask {
+    position: absolute;
+    inset: 0;
+    background: rgba(8, 10, 18, .42);
+}
+.qmodal-box {
+    position: relative;
+    width: min(380px, calc(100vw - 48px));
+    padding: 16px 18px 14px;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: var(--card);
+    box-shadow: var(--shadow);
+}
+.qmodal-title { font-size: 13.5px; font-weight: 600; color: var(--fg); }
+.qmodal-sub {
+    margin-top: 4px;
+    font-size: 11.5px;
+    line-height: 1.6;
+    color: var(--fg-dim);
+}
+.qmodal-box .txt { width: 100%; margin-top: 10px; }
+.qmodal-err {
+    margin-top: 8px;
+    padding: 6px 9px;
+    border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent);
+    border-radius: 6px;
+    font-size: 11.5px;
+    line-height: 1.55;
+    color: var(--danger);
+    background: color-mix(in srgb, var(--danger) 10%, transparent);
+}
+.qmodal-err[hidden] { display: none; }
+.qmodal-acts {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 14px;
+}
 .upd-token-tip {
     margin-top: 7px;
     font-size: 11.5px;
@@ -1523,10 +1629,10 @@ body.idx-on .to-top { bottom: 56px; }
     user-select: text;
 }
 .bk-sec.ok {
-    border-color: color-mix(in srgb, var(--accent) 34%, var(--line));
-    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    border-color: color-mix(in srgb, var(--ok) 34%, var(--line));
+    background: var(--ok-bg);
 }
-.bk-sec.ok .bk-sec-head { color: var(--accent); }
+.bk-sec.ok .bk-sec-head { color: var(--ok); }
 .bk-sec.warn {
     border-color: color-mix(in srgb, var(--danger) 34%, var(--line));
     background: color-mix(in srgb, var(--danger) 7%, transparent);
