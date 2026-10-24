@@ -19,7 +19,22 @@
 | 远端配置 | ✅ `origin` = `https://github.com/QQQOrange/QuickSearch.git` |
 | GitHub 凭据 | ✅ 凭据管理器里有（`git credential fill` 能拿到，2026-10-25 验证 200） |
 | 网络 | ⚠️ **间歇性**：`github.com:443` 时通时不通；`api.github.com` 一直可用 |
-| 发布 | ✅ 最新 Release **v1.5.10**（2026-10-25），资产 `QuickSearch.exe` 13,415,936 字节 |
+| 发布 | ✅ 最新 Release **v1.5.11**（2026-10-25），资产 `QuickSearch.exe` 13,427,200 字节 |
+
+### ⚠ 两条必须记住的环境事实（2026-10-25 实测）
+
+1. **`curl` 走系统代理，程序的 `ureq` 不走系统代理。**
+   所以"我命令行下得好好的"和"软件下不下来"可以同时成立 ——
+   `curl` 输出里出现 `HTTP/1.1 200 Connection Established` 就是走了代理的证据。
+   **验证下载问题时不要用 curl 的结论去否定程序的行为。**
+
+2. **本机 `github.com:443` 直连超时，`api.github.com` 直连正常。**
+   - 检测更新走 `api.github.com` → 通，所以能看到新版；
+   - 下载走 `github.com/.../releases/download/...` → 不通，所以下不下来。
+   这就是 v1.5.11 要加"备源回退"的原因。同一份资产在
+   `api.github.com/repos/<repo>/releases/assets/<id>`（带
+   `Accept: application/octet-stream`）上拿得到。
+   git push 连续 502 也是这条链路。
 
 ---
 
