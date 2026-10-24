@@ -12,6 +12,8 @@
  *     ③ 令牌被拒  → 带令牌试一次被 401，自动降级匿名重试并成功
  *     ④ 限流       → 错误文案里有"约 N 分钟"和"去填令牌"
  *     ⑤ 隐私       → 日志里绝不出现令牌原文
+ *     ⑥ 验证按钮   → 有效令牌回报账号/额度、坏令牌说"无效"、**验证不落盘**
+ *                    （v1.5.8 的「验证」按钮，打的是 /user 那个口子）
  *
  * 用法: node tools/r157-github-token-probe.js
  * 前提: cargo build --release
@@ -65,6 +67,30 @@ const server = http.createServer((req, res) => {
         // 匿名那条路的"拿 tag"：302 到 /tag/v99.0.0，不计 API 额度
         res.writeHead(302, { Location: 'http://127.0.0.1:' + PORT + '/tag/v99.0.0' });
         return res.end();
+    }
+    if (req.url.indexOf('/api/user') === 0) {
+        /* v1.5.8：「验证」按钮打的就是这个口子（真机上是 /user）。
+         * 判据和真 GitHub 对齐：令牌不对就是 401 Bad credentials。 */
+        if (MODE === 'ratelimit') {
+            res.writeHead(403, {
+                'content-type': 'application/json',
+                'x-ratelimit-remaining': '0',
+                'x-ratelimit-reset': String(Math.floor(Date.now() / 1000) + 1800),
+            });
+            return res.end(JSON.stringify({ message: 'API rate limit exceeded' }));
+        }
+        if (auth !== 'Token ' + TOKEN) {
+            res.writeHead(401, { 'content-type': 'application/json' });
+            return res.end(JSON.stringify({ message: 'Bad credentials' }));
+        }
+        res.writeHead(200, {
+            'content-type': 'application/json',
+            'x-ratelimit-limit': '5000',
+            'x-ratelimit-remaining': '4999',
+            // 有兴趣就带上：证明 kind 的推断（有它就是经典令牌）
+            'x-oauth-scopes': 'repo',
+        });
+        return res.end(JSON.stringify({ login: 'probe-user', name: '探针账号', id: 1 }));
     }
     if (req.url.indexOf('/api-latest') === 0) {
         if (MODE === 'ratelimit') {
@@ -153,6 +179,8 @@ const logSize = () => { try { return fs.statSync(LOG).size; } catch (e) { return
         // ★ 这两条是探针专用逃生口（正式启动不带）——让实例去问本地假服务
         QS_UPDATE_API: 'http://127.0.0.1:' + PORT + '/api-latest',
         QS_UPDATE_WEB: 'http://127.0.0.1:' + PORT + '/web-latest',
+        // v1.5.8：「验证」按钮的 /user，也要指到假服务上才测得了坏令牌
+        QS_GITHUB_USER_API: 'http://127.0.0.1:' + PORT + '/api/user',
     });
     const launch = () => spawn(EXE, ['--no-elevate'], { env, cwd: ROOT, stdio: 'ignore' });
     const stop = (p) => new Promise((res) => {
@@ -316,6 +344,38 @@ const logSize = () => { try { return fs.statSync(LOG).size; } catch (e) { return
         log4.split(/\r?\n/).filter((s) => /限流/.test(s)).join(' | '));
     check('  没令牌时引导去填个人访问令牌', /个人访问令牌/.test(log4));
     MODE = 'ok';
+
+    /* ---------- ⑥ 验证按钮（v1.5.8）：有效 / 无效 / 不落盘 ---------- */
+    MODE = 'ok';
+    await setTok('');
+    await sleep(300);
+    hits.length = 0;
+    const off6 = logSize();
+    const v1 = await call('verify_github_token', `{ token: ${JSON.stringify(TOKEN)} }`);
+    let v1j = null;
+    try { v1j = JSON.parse(v1); } catch (e) { }
+    check('验证有效令牌：回报账号与额度',
+        !!v1j && v1j.login === 'probe-user' && v1j.limit === 5000, v1);
+    check('  认得这是经典令牌（响应头带 x-oauth-scopes）',
+        !!v1j && v1j.kind === '经典令牌', v1j && v1j.kind);
+    check('  验证请求确实带了令牌',
+        hits.some((h) => h.path.indexOf('/api/user') === 0 && h.auth === 'Token ' + TOKEN),
+        hits.map((h) => h.path + (h.auth ? ' +auth' : '')).join(','));
+    /* ⚠ 这一条是"验证 ≠ 保存"的硬证据：验证过之后配置里仍是空的，
+     *   所以 canAuto 还是 false。用户可以先验一个抄来的令牌再决定存不存。 */
+    const p6 = await pending();
+    check('  ⚠ 验证不落盘：配置里仍然没令牌，canAuto 还是 false',
+        p6.canAuto === false, JSON.stringify(p6).slice(0, 160));
+
+    const v2 = await call('verify_github_token', `{ token: 'ghp_wrong' }`);
+    check('验证无效令牌：回一句人话（令牌无效/过期）',
+        /令牌无效|Bad credentials/.test(String(v2)), String(v2).slice(0, 160));
+    const v3 = await call('verify_github_token', `{ token: ${JSON.stringify('  ' + TOKEN + '\r\n')} }`);
+    let v3j = null;
+    try { v3j = JSON.parse(v3); } catch (e) { }
+    check('  粘贴时带的空白/换行会被洗掉（和真正发请求同一套洗法）',
+        !!v3j && v3j.login === 'probe-user', String(v3).slice(0, 160));
+    check('  日志里同样不出现令牌原文', readLogFrom(off6).indexOf(TOKEN) < 0);
 
     // 收尾：把探针写进去的配置清干净（自动更新**要还原成 true**，
     // 否则下一轮启动时不会自动检查，第 ⓪ 组就白测了）

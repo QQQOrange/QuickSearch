@@ -5913,6 +5913,30 @@ fn update_pending() -> serde_json::Value {
     }
 }
 
+/// 「验证」按钮：拿输入框里这串令牌去问一次 GitHub。
+///
+/// **不落盘、不查更新** —— 用户可能只是想确认这串东西能不能用。
+/// 成功时把账号名与额度回给前端显示；失败时回一句人话（`Err` 走 invoke 的
+/// reject，前端直接摆到状态行）。
+///
+/// ⚠ 日志里只写结果，**不写令牌**（凭据不进日志）。
+#[tauri::command]
+fn verify_github_token(token: String) -> Result<update::TokenCheck, String> {
+    match update::verify_token(&token) {
+        Ok(info) => {
+            win::log(&format!(
+                "update: 令牌验证通过（账号 {}，额度 {}/小时）",
+                info.login, info.limit
+            ));
+            Ok(info)
+        }
+        Err(e) => {
+            win::log(&format!("update: 令牌验证失败 —— {e}"));
+            Err(e)
+        }
+    }
+}
+
 /// 「下载并安装」：在程序内下好 → 校验 → 替换旧程序。
 ///
 /// 进度通过 `qs://update-progress` 推给设置页（`(已下, 总)`）。
@@ -14476,6 +14500,8 @@ fn main() {
             // v1.2.0：自动更新（查 / 下 / 装 / 重启 / 关于页那颗 GitHub 按钮）
             update_check,
             update_pending,
+            // v1.5.8：令牌「验证」按钮（不落盘，只问一次 GitHub）
+            verify_github_token,
             update_install,
             update_restart,
             open_repo_page,

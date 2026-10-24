@@ -3511,6 +3511,10 @@ function bindSwitches() {
         // 正在输入时不要被广播回来的值打断光标
         if (document.activeElement !== el) {
             el.value = CONF[key] === undefined ? '' : CONF[key];
+            /* v1.5.8：令牌的「保存」按钮要跟着"已落盘的值"走。
+             * 只靠 updInit 里那一次刷新是不够的：updInit 可能在配置回填
+             * **之前**就跑过（那时输入框还是空的，按钮会被误判成"有改动"）。 */
+            if (key === 'githubToken') tokRefreshSave();
         }
         if (bound) continue;
         el.addEventListener('change', () => invoke('set_setting', { key, value: el.value }));
@@ -6657,6 +6661,15 @@ function webviewLabel() {
  *  发新版时**同时**加一条，对不上就是漏了。 */
 const CHANGELOG = [
     {
+        ver: 'v1.5.8',
+        items: [
+            '<b>令牌多了「验证」和「保存」两颗钮</b> —— 你要的。以前填完令牌只能靠"点一次检查更新"来试探它到底能不能用，现在可以先把令牌发给 GitHub 问一句：<b>「验证」会说清这是谁的令牌、是经典还是细粒度、每小时额度多少、本小时还剩多少次</b>。结果直接显示在输入框下面那一行，不会一闪就没了。',
+            '<b>「验证」不会动你的配置</b> —— 它只拿输入框里当前这串去问一次，<b>不落盘</b>。所以你可以先验一个抄来的令牌，确认能用再保存，不用担心把原来好好的那个覆盖掉。输入框一改动，上一次的"✓ 有效"会自动消失（它给的是那串旧值的结论，留着会误导）。',
+            '<b>「保存」给的是明确回执</b> —— 点下去等写入完成才显示"✓ 令牌已保存到本机加密配置，接口额度 5000 次/小时"，存好了按钮就变灰（表示没有待保存的改动），一改又亮起来。在输入框里直接按 <b>Enter</b> 也是保存。原来"失焦自动保存"照旧留着，这颗钮是给"我要确认它真的存进去了"的人用的。',
+            '⚠ 验证失败会说清楚是哪种失败：<b>令牌无效或过期</b>（GitHub 回 401 / Bad credentials，让你重新生成）、<b>令牌没被允许读账号信息</b>（403）、<b>接口限流</b>（会算还要等多久）、或者纯粹<b>网络不通</b> —— 不会一律甩一句"验证失败"。',
+        ],
+    },
+    {
         ver: 'v1.5.7',
         items: [
             '<b>新增：GitHub 个人访问令牌（解决"检查更新老是失败"）</b> —— 更新页多了一个输入框，填上令牌后所有 GitHub 请求都会带上它，接口额度从 <b>60 次/小时</b> 提到 <b>5000 次/小时</b>。不用再靠"少调接口"绕限额：有令牌时一次请求就把版本号、说明、下载地址全拿回来。令牌只存在<b>本机加密配置</b>里，不会上传、也<b>不会写进日志</b>；填错或过期时会自动退回匿名请求，并明确告诉你原因，不会让更新功能整个坏掉。',
@@ -7105,6 +7118,53 @@ function updShowFound(v) {
     updPaintAuthMode();
 }
 
+/* v1.5.8：令牌的「验证 / 保存」两颗钮。
+ *
+ * `TOK_SAVED` = 最后一次**确认落盘**的那一版；`null` = 还没显式存过，
+ * 这时候按 `CONF.githubToken` 算（见 `tokSaved`）。
+ * 不直接只认 `CONF.githubToken`：TEXTS 里的 change 处理器只发 IPC，
+ * **不会回写 CONF** —— 只认它的话，保存完按钮会一直亮着。 
+ *
+ * ⚠ change 处理器会更新 TOK_SAVED，但**不刷新**保存按钮的可用状态：
+ *   点按钮时 change 先于 click 触发，若在那儿把按钮 disable 掉，
+ *   浏览器就不会再派发 click（按钮直接"点不动"）。 */
+let TOK_SAVED = null;
+
+/** 令牌区的状态行（验证结果 / 保存回执）。`kind` = ok | warn | err | busy */
+function tokSay(msg, kind) {
+    const el = $('githubTokenStatus');
+    if (!el) return;
+    el.textContent = msg || '';
+    el.className = 'upd-token-status' + (kind ? ' ' + kind : '');
+}
+
+/** 令牌输入框里"已经存好的那一版"。
+ *
+ *  优先用 `TOK_SAVED`（显式保存 / change 自动落盘时记的），`null` 时退回
+ *  `CONF.githubToken` —— 页面刚打开时就是这个状态，不需要挑时机去初始化
+ *  （挑时机反而会踩"updInit 比配置先跑"的坑，按钮就一直亮着）。 */
+function tokSaved() {
+    if (TOK_SAVED !== null) return String(TOK_SAVED);
+    return String((CONF && CONF.githubToken) || '');
+}
+
+/** 输入框里这版是不是还没（确认）保存过。 */
+function tokDirty() {
+    const el = $('s-githubToken');
+    return !!el && el.value !== tokSaved();
+}
+
+/** 「保存」只在有改动时可按：按不动 = 当前输入已经存好了。 */
+function tokRefreshSave() {
+    const btn = $('btnGithubTokenSave');
+    if (!btn) return;
+    const dirty = tokDirty();
+    btn.disabled = !dirty;
+    btn.title = dirty
+        ? '把令牌保存到本机加密配置（在输入框里按 Enter 也是保存）'
+        : '当前输入已经保存过了';
+}
+
 /** 打开「关于」页时问后端一句"有没有待装的"，并把仓库按钮接上。 */
 function updInit() {
     const repo = $('aboutRepo');
@@ -7116,8 +7176,8 @@ function updInit() {
             invoke('open_repo_page').catch(() => {});
         });
     }
-    /* v1.5.7：令牌相关的三个入口。都不改输入框原有的保存逻辑
-     * （它在 TEXTS 里，change 时自动 set_setting），这里只做加法。 */
+    /* v1.5.7 / v1.5.8：令牌相关的入口。输入框本身仍在 TEXTS 里（change 时
+     * 自动 set_setting），这里只做加法：帮助、验证、保存、清除。 */
     const help = $('btnGithubTokenHelp');
     if (help && !help.dataset.bound) {
         help.dataset.bound = '1';
@@ -7128,6 +7188,79 @@ function updInit() {
                 .catch((e) => toast('打不开帮助文档：' + e));
         });
     }
+    /* 「验证」：把**输入框里当前这串**（可能还没保存）发给 GitHub 问一句。
+     *
+     * 为什么不先落盘再验证：验证是"我想确认这东西能用"，落盘是"我要用它"。
+     * 混在一起的话，用户验一个抄来的坏令牌就把好令牌覆盖掉了。 */
+    const ver = $('btnGithubTokenVerify');
+    if (ver && !ver.dataset.bound) {
+        ver.dataset.bound = '1';
+        ver.addEventListener('click', () => {
+            const el = $('s-githubToken');
+            const saveBtn = $('btnGithubTokenSave');
+            const raw = el ? el.value : '';
+            if (!raw.trim()) {
+                tokSay('先填一个令牌再验证。留空就是匿名请求（每小时 60 次），不需要验证。', 'warn');
+                return;
+            }
+            ver.disabled = true;
+            if (saveBtn) saveBtn.disabled = true;
+            tokSay('正在向 GitHub 验证…', 'busy');
+            /* 结果直接回在状态行里（不走 toast）：账号名、额度这些信息需要
+             * 停留一会儿让人对照，toast 一闪就没了。 */
+            invoke('verify_github_token', { token: raw })
+                .then((r) => {
+                    const info = r || {};
+                    const who = info.name
+                        ? info.name + '（' + info.login + '）'
+                        : (info.login || '未知账号');
+                    const quota = info.limit
+                        ? '额度 ' + info.limit + ' 次/小时'
+                            + (typeof info.remaining === 'number' ? '，本小时还剩 ' + info.remaining + ' 次' : '')
+                        : '';
+                    const parts = ['✓ 令牌有效：' + who];
+                    if (info.kind) parts.push(info.kind);
+                    if (quota) parts.push(quota);
+                    let msg = parts.join(' · ');
+                    if (tokDirty()) msg += ' —— 还没保存，点「保存」写入';
+                    tokSay(msg, 'ok');
+                })
+                .catch((e) => {
+                    tokSay('✗ ' + String(e), 'err');
+                })
+                .then(() => {
+                    ver.disabled = false;
+                    tokRefreshSave();
+                });
+        });
+    }
+    /* 「保存」：显式落盘 + 给回执。
+     *
+     * 输入框失焦时 TEXTS 已经会自动存一次，这颗钮是给"我要确认它真的进去了"
+     * 的人用的：它等 IPC 回来才说"已保存"，不会让人对着一个"看起来存了"
+     * 的界面猜。 */
+    const saveBtn = $('btnGithubTokenSave');
+    if (saveBtn && !saveBtn.dataset.bound) {
+        saveBtn.dataset.bound = '1';
+        saveBtn.addEventListener('click', () => {
+            const el = $('s-githubToken');
+            const v = el ? el.value : '';
+            saveBtn.disabled = true;
+            tokSay('正在保存…', 'busy');
+            invoke('set_setting', { key: 'githubToken', value: v })
+                .then(() => {
+                    TOK_SAVED = v;
+                    if (CONF) CONF.githubToken = v;
+                    // 存完立刻按同一口径重画「下载并安装 / 用浏览器下载」
+                    updSyncCanAuto(v);
+                    tokSay(v.trim()
+                        ? '✓ 令牌已保存到本机加密配置，接口额度 5000 次/小时'
+                        : '✓ 已保存为匿名请求（每小时 60 次）', 'ok');
+                })
+                .catch((e) => tokSay('保存失败：' + e, 'err'))
+                .then(() => tokRefreshSave());
+        });
+    }
     const clr = $('btnGithubTokenClear');
     if (clr && !clr.dataset.bound) {
         clr.dataset.bound = '1';
@@ -7135,25 +7268,50 @@ function updInit() {
             const el = $('s-githubToken');
             if (el) el.value = '';
             if (CONF) CONF.githubToken = '';
+            TOK_SAVED = '';
             updSyncCanAuto('');
             invoke('set_setting', { key: 'githubToken', value: '' })
-                .then(() => toast('已清空令牌，改回匿名请求（每小时 60 次）'))
-                .catch((e) => toast('清空失败：' + e));
+                .then(() => {
+                    tokSay('已清空令牌，改回匿名请求（每小时 60 次）', 'warn');
+                    toast('已清空令牌，改回匿名请求（每小时 60 次）');
+                })
+                .catch((e) => tokSay('清空失败：' + e, 'err'))
+                .then(() => tokRefreshSave());
         });
     }
-    /* 输入框一改，按钮立刻跟着变。
+    /* 输入框一改，按钮立刻跟着变 + 该亮的「保存」亮起来。
      *
-     * 为什么要这一步：如果这会儿已经摆着"发现新版本"，而用户就地填上令牌，
+     * 为什么重画按钮：如果这会儿已经摆着"发现新版本"，而用户就地填上令牌，
      * 按钮还写着「用浏览器下载」就说不通了（他明明已经填了）。这里不联网、
      * 不问后端 —— 只是按同一个口径（有没有令牌）重画一次，省掉"再点一次
-     * 检查更新"的动作。真正拦下载的仍是后端。 */
+     * 检查更新"的动作。真正拦下载的仍是后端。
+     *
+     * ⚠ 输入一变就把上一轮验证的结论清掉：那是**旧**输入的结论，
+     *   留着会让人拿"✓ 有效"去给一串改过的令牌背书。 */
     const tokEl0 = $('s-githubToken');
     if (tokEl0 && !tokEl0.dataset.canauto) {
         tokEl0.dataset.canauto = '1';
-        const sync = () => updSyncCanAuto(tokEl0.value);
-        tokEl0.addEventListener('input', sync);
-        tokEl0.addEventListener('change', sync);
+        tokEl0.addEventListener('input', () => {
+            updSyncCanAuto(tokEl0.value);
+            tokSay('');
+            tokRefreshSave();
+        });
+        tokEl0.addEventListener('change', () => {
+            /* change 时 TEXTS 已经在落盘了，这里只记账。
+             * 不调 tokRefreshSave()：那会把按钮 disable 掉，而紧接着的 click
+             * 就不会再派发（点「保存」会变成点了个寂寞）。 */
+            TOK_SAVED = tokEl0.value;
+            updSyncCanAuto(tokEl0.value);
+        });
+        /* 在输入框里按 Enter = 点「保存」。密码框回车最常见的期待就是这个。 */
+        tokEl0.addEventListener('keydown', (e) => {
+            if (e.key !== 'Enter') return;
+            e.preventDefault();
+            const b = $('btnGithubTokenSave');
+            if (b && !b.disabled) b.click();
+        });
     }
+    tokRefreshSave();
     const check = $('btnUpdateCheck');
     if (check && !check.dataset.bound) {
         check.dataset.bound = '1';

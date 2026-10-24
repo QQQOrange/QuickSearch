@@ -508,6 +508,144 @@ fn api_latest(token: Option<&str>) -> Result<serde_json::Value, ApiErr> {
     serde_json::from_str(&text).map_err(|e| ApiErr::Other(format!("返回的不是 JSON：{e}")))
 }
 
+/// 一次「验证令牌」的结果（给设置页那个「验证」按钮用）。
+///
+/// 只报"这个令牌是谁的、能拿多少额度"，不含任何凭据 —— 前端要把它显示出来。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TokenCheck {
+    /// 令牌属于哪个账号（`/user` 的 `login`）
+    pub login: String,
+    /// 账号昵称（没设就是空串）
+    pub name: String,
+    /// 这个令牌每小时的接口额度（带令牌正常是 5000）
+    pub limit: u64,
+    /// 本小时还剩多少次
+    pub remaining: u64,
+    /// 「经典令牌」/「细粒度令牌」—— 从响应头推的，只为了把话说清楚
+    pub kind: String,
+}
+
+/// 验证令牌用的接口地址。
+///
+/// `QS_GITHUB_USER_API` 是**仅测试用**的逃生口（和 `QS_UPDATE_API` 同一类）：
+/// 让探针把验证请求也指到本地假服务上，否则"令牌无效"这条分支只能靠手试。
+fn user_api() -> String {
+    if let Ok(b) = std::env::var("QS_GITHUB_USER_API") {
+        if !b.trim().is_empty() {
+            return b;
+        }
+    }
+    "https://api.github.com/user".to_string()
+}
+
+/// 拿这串令牌去问一次 GitHub：「你是谁、额度多少」。
+///
+/// 为什么验证不用 `releases/latest`：那个接口对**没权限的令牌**回的是 404
+/// （不是 401），分不清"令牌坏了"还是"仓库没发布过"；`/user` 只认令牌本身，
+/// 401 = 坏、200 = 好，判据干净。而且 `/user` 需要的是最基本的账号读取权限，
+/// 细粒度令牌默认就能过。
+///
+/// `raw` 是**输入框里的原值**（可能带粘贴垃圾），这里照 [`effective_token`]
+/// 洗一遍再发 —— 和真正查更新/下载时用的是同一个洗法，否则会出现"验证通过、
+/// 用的时候又不认"的怪事。
+pub fn verify_token(raw: &str) -> Result<TokenCheck, String> {
+    let tok = effective_token(raw)
+        .ok_or_else(|| "还没填令牌 —— 把 github_pat_… 或 ghp_… 粘进来再点验证".to_string())?;
+    let a = agent();
+    let resp = a
+        .get(&user_api())
+        .set("Accept", "application/vnd.github+json")
+        .set("Authorization", &format!("Token {tok}"))
+        .call()
+        .map_err(|e| match e {
+            ureq::Error::Status(code, r) => {
+                /* 先抓头再读 body —— 顺序反了头就没了（和 api_latest 同一个坑）。 */
+                let remaining = r.header("x-ratelimit-remaining").map(|s| s.to_string());
+                let reset = r
+                    .header("x-ratelimit-reset")
+                    .and_then(|s| s.parse::<u64>().ok());
+                let body = r.into_string().unwrap_or_default();
+                // 额度用完时 GitHub 也可能回 403，先认限流再认认证（同 api_latest）
+                if remaining.as_deref() == Some("0") {
+                    return rate_limit_message(reset.and_then(minutes_until), true);
+                }
+                if auth_rejection(&body) || code == 401 {
+                    return "令牌无效或已过期（GitHub 回的是 Bad credentials）—— \
+                            到网页上重新生成一个再粘过来"
+                        .to_string();
+                }
+                match code {
+                    403 => {
+                        let head: String = body.chars().take(120).collect();
+                        format!("这个令牌没被允许读账号信息（HTTP 403）：{head}")
+                    }
+                    404 => "验证接口不可达（HTTP 404）—— 检查一下网络或代理".to_string(),
+                    _ => {
+                        let head: String = body.chars().take(120).collect();
+                        format!("GitHub 返回 HTTP {code}：{head}")
+                    }
+                }
+            }
+            other => crate::ocr::explain(&other),
+        })?;
+
+    /* 三个头必须在 into_string() 之前读。 */
+    let scopes = resp.header("x-oauth-scopes").map(|s| s.to_string());
+    let limit = resp
+        .header("x-ratelimit-limit")
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
+    let remaining = resp
+        .header("x-ratelimit-remaining")
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
+    let text = resp
+        .into_string()
+        .map_err(|e| format!("读取响应失败：{e}"))?;
+    token_check_from(&text, scopes.as_deref(), limit, remaining)
+}
+
+/// 把 `/user` 的响应当场拆成 [`TokenCheck`]。
+///
+/// 单独拆出来是为了**能测**：`verify_token` 整条要联网，拆出这一段之后
+/// "GitHub 回了 200 但不是令牌"这类边角就能用纯字符串验。
+fn token_check_from(
+    body: &str,
+    scopes: Option<&str>,
+    limit: u64,
+    remaining: u64,
+) -> Result<TokenCheck, String> {
+    let v: serde_json::Value =
+        serde_json::from_str(body).map_err(|e| format!("返回的不是 JSON：{e}"))?;
+    let login = v
+        .get("login")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if login.is_empty() {
+        return Err("GitHub 没回账号名 —— 这串东西可能不是个人访问令牌".to_string());
+    }
+    Ok(TokenCheck {
+        login,
+        name: v
+            .get("name")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string(),
+        limit,
+        remaining,
+        // 经典令牌一定会带 x-oauth-scopes（哪怕值是空串）；细粒度令牌不带这个头
+        kind: if scopes.is_some() {
+            "经典令牌"
+        } else {
+            "细粒度令牌"
+        }
+        .to_string(),
+    })
+}
+
 /// 从 API 的那份 JSON 里拼出 `UpdateInfo`。
 ///
 /// `authed` = 这次是不是**真的**用了令牌。前端据此决定：有令牌 → 程序内
@@ -1007,5 +1145,40 @@ mod tests {
             .as_secs();
         // 10 分钟后：±几秒的执行误差不会跨过分钟边界
         assert_eq!(minutes_until(now + 600), Some(10));
+    }
+
+    /// 「验证」按钮要的东西：账号名、额度、令牌种类。
+    #[test]
+    fn 验证结果要能拆出账号与额度() {
+        let body = r#"{"login":"QQQOrange","name":"橙子","id":1}"#;
+        // 细粒度令牌不带 x-oauth-scopes
+        let c = token_check_from(body, None, 5000, 4998).unwrap();
+        assert_eq!(c.login, "QQQOrange");
+        assert_eq!(c.name, "橙子");
+        assert_eq!((c.limit, c.remaining), (5000, 4998));
+        assert_eq!(c.kind, "细粒度令牌");
+
+        // 经典令牌一定带这个头（值是空串也算带了）
+        let c = token_check_from(body, Some(""), 5000, 0).unwrap();
+        assert_eq!(c.kind, "经典令牌");
+        assert_eq!(c.remaining, 0, "还剩 0 次要能如实报出来");
+    }
+
+    /// 200 但不是令牌该有的形状 —— 不能假装验证通过。
+    #[test]
+    fn 验证响应不像令牌就报错() {
+        let e = token_check_from(r#"{"message":"Bad credentials"}"#, None, 0, 0).unwrap_err();
+        assert!(e.contains("不是个人访问令牌"), "{e}");
+        let e = token_check_from("not json", None, 0, 0).unwrap_err();
+        assert!(e.contains("不是 JSON"), "{e}");
+    }
+
+    /// 空令牌不去联网，直接告诉用户"先填一个"。
+    #[test]
+    fn 空令牌验证不联网直接报错() {
+        let e = verify_token("   ").unwrap_err();
+        assert!(e.contains("还没填令牌"), "{e}");
+        // 粘贴垃圾要洗掉再判断（否则 "ghp_x\n" 会被当成有效令牌去请求）
+        assert!(effective_token("  \"ghp_x\"\n").is_some());
     }
 }

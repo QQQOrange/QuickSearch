@@ -1370,9 +1370,22 @@
                         <input class="txt" id="s-githubToken" type="password" spellcheck="false"
                                autocomplete="off" aria-describedby="githubTokenTip"
                                placeholder="github_pat_… 或 ghp_…（留空 = 匿名请求，每小时 60 次）">
+                        <!-- v1.5.8：验证 / 保存。
+                             「验证」不落盘 —— 只把当前这串东西发给 GitHub 问一句
+                             "这是谁的令牌、额度多少"，免得存进去才发现是坏的。
+                             「保存」显式落盘并给回执（输入框失焦时也会自动存一次，
+                             这颗钮是给"我要确认它真的存进去了"的人用的）。 -->
+                        <button type="button" class="btn" id="btnGithubTokenVerify"
+                                title="拿这串令牌向 GitHub 问一次：是不是有效、额度多少（不会保存）">验证</button>
+                        <button type="button" class="btn primary" id="btnGithubTokenSave"
+                                title="把令牌保存到本机加密配置（在输入框里按 Enter 也是保存）">保存</button>
                         <button type="button" class="btn" id="btnGithubTokenClear"
                                 title="清空令牌，改回匿名请求">清除</button>
                     </div>
+                    <!-- 验证 / 保存的结果行（role=status + aria-live 让读屏也能听到）。
+                         空的时候由 CSS 的 :empty 收起来，不用 JS 切 hidden。 -->
+                    <div class="upd-token-status" id="githubTokenStatus"
+                         role="status" aria-live="polite"></div>
                     <div class="upd-token-tip" id="githubTokenTip">
                         填了之后所有 GitHub 请求都会带上它：接口额度从 <b>60 次/小时</b> 提到
                         <b>5000 次/小时</b>，也只有填了才走<b>程序内自动下载</b>；留空时

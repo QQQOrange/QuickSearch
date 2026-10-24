@@ -1222,10 +1222,41 @@ body.idx-on .to-top { bottom: 56px; }
     align-items: center;
     gap: 8px;
     margin-top: 8px;
+    /* 窗口窄的时候让按钮整颗掉到下一行，不把输入框挤成一条缝 */
+    flex-wrap: wrap;
 }
-.upd-token-row .txt { flex: 1; min-width: 0; }
+.upd-token-row .txt { flex: 1 1 220px; min-width: 0; }
 /* 按钮跟输入框等高：.btn 是固定 32px，.txt 由字号撑出来会略高一点 */
 .upd-token-row .btn { align-self: stretch; height: auto; padding: 0 12px; }
+/* 验证 / 保存的结果行。空的时候靠 :empty 自己收起来，JS 不用管 hidden。 */
+.upd-token-status {
+    margin-top: 7px;
+    padding: 6px 9px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--hover);
+    color: var(--fg-dim);
+    font-size: 11.5px;
+    line-height: 1.55;
+    word-break: break-word;
+}
+.upd-token-status:empty { display: none; }
+.upd-token-status.busy { color: var(--fg-dim); }
+.upd-token-status.ok {
+    color: var(--ok);
+    border-color: color-mix(in srgb, var(--ok) 38%, transparent);
+    background: var(--ok-bg);
+}
+.upd-token-status.warn {
+    color: var(--warn);
+    border-color: color-mix(in srgb, var(--warn) 40%, transparent);
+    background: var(--warn-bg);
+}
+.upd-token-status.err {
+    color: var(--danger);
+    border-color: color-mix(in srgb, var(--danger) 36%, transparent);
+    background: color-mix(in srgb, var(--danger) 10%, transparent);
+}
 .upd-token-tip {
     margin-top: 7px;
     font-size: 11.5px;

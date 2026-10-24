@@ -62,6 +62,17 @@ function makeEnv(htmlFile, conf) {
      * 测两种情况：has=false（常态）/ has=true + canAuto=false（查到了但没令牌）。 */
     let PENDING = { has: false };
     const setPending = (p) => { PENDING = p; };
+    /* `verify_github_token` 的桩（v1.5.8）。形状对齐 Rust 的 TokenCheck；
+     * `VERIFY_FAIL` 非空时改成 reject，用来测"验证失败要说清原因"。 */
+    let VERIFY_OK = {
+        login: 'QQQOrange', name: '橙子', limit: 5000, remaining: 4998,
+        kind: '细粒度令牌',
+    };
+    let VERIFY_FAIL = '';
+    const setVerify = (ok, fail) => {
+        if (ok !== undefined) VERIFY_OK = ok;
+        VERIFY_FAIL = fail || '';
+    };
 
     /* ⚠ 桩必须装进 beforeParse：region.html 这类页面把脚本**内联**写在 HTML 里，
      * jsdom 会在构造函数的那一刻就执行它，等我们再拿到 dom.window 才补 __TAURI__
@@ -184,6 +195,12 @@ function makeEnv(htmlFile, conf) {
                     ]);
                 }
                 if (cmd === 'update_pending') return Promise.resolve(PENDING);
+                /* v1.5.8：「验证」按钮。⚠ 必须**先于**那条 `return null` 兜底，
+                 * 否则 verify 回 null → 前端读 info.login 报错。 */
+                if (cmd === 'verify_github_token') {
+                    if (VERIFY_FAIL) return Promise.reject(VERIFY_FAIL);
+                    return Promise.resolve(Object.assign({}, VERIFY_OK));
+                }
                 // 一键安装 / 教程：真机会去开系统设置页和浏览器，测试里只记调用
                 if (cmd === 'ocr_open_language_settings') return Promise.resolve(null);
                 if (cmd === 'ocr_open_lang_help') return Promise.resolve(null);
@@ -238,6 +255,8 @@ function makeEnv(htmlFile, conf) {
         dom, w, calls, listeners, rejectCmds,
         /** 下一次 `update_pending` 返回什么（模拟"启动时自动检查存下的结果"） */
         setPending,
+        /** 下一次 `verify_github_token` 返回什么 / 怎么失败（v1.5.8） */
+        setVerify,
         /** 换一份配置并触发一次真实的 qs://config 事件（走真实的重渲染路径） */
         pushConfig(next) {
             CONF = next;
@@ -2977,6 +2996,90 @@ async function testUpdateToken() {
     ok('  点问号打开的是 GitHub 官方中文帮助文档',
         docUrl === 'https://docs.github.com/zh/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens',
         String(docUrl));
+
+    /* ---- v1.5.8：令牌的「验证」「保存」---- */
+    const vbtn = $('btnGithubTokenVerify');
+    const sbtn = $('btnGithubTokenSave');
+    ok('令牌旁边有「验证」按钮', !!vbtn && vbtn.textContent.trim() === '验证');
+    ok('  也有「保存」按钮', !!sbtn && sbtn.textContent.trim() === '保存');
+    ok('  当前输入就是已保存的那版 → 保存按钮置灰',
+        sbtn && sbtn.disabled === true);
+
+    // 空输入点验证：不联网，直接说"先填一个"
+    env.calls.length = 0;
+    $('s-githubToken').value = '';
+    $('s-githubToken').dispatchEvent(new w.Event('input', { bubbles: true }));
+    await flush();
+    ok('  一改动，保存按钮就亮起来', sbtn.disabled === false);
+    click(vbtn);
+    await flush();
+    ok('空令牌点验证：不发请求，只提示先填',
+        env.cmd('verify_github_token').length === 0
+        && /先填/.test($('githubTokenStatus').textContent || ''),
+        $('githubTokenStatus').textContent);
+
+    // 验证成功：说清"谁 + 额度"，且**不落盘**
+    env.calls.length = 0;
+    $('s-githubToken').value = 'ghp_live';
+    $('s-githubToken').dispatchEvent(new w.Event('input', { bubbles: true }));
+    await flush();
+    click(vbtn);
+    await flush();
+    const v1 = env.lastCmd('verify_github_token');
+    ok('点验证：把输入框里的令牌发给后端',
+        v1 && v1.args.token === 'ghp_live', JSON.stringify(v1 && v1.args));
+    ok('  验证**不落盘**（一次 set_setting 都没发）',
+        env.cmd('set_setting').length === 0,
+        env.calls.map((c) => c.cmd).join(','));
+    const st1 = $('githubTokenStatus').textContent || '';
+    ok('  状态行说清"谁 + 额度"',
+        /令牌有效/.test(st1) && /QQQOrange/.test(st1) && /5000/.test(st1), st1);
+    ok('  提醒还没保存', /还没保存/.test(st1), st1);
+    ok('  用 ok 样式（绿）',
+        /(^|\s)ok(\s|$)/.test($('githubTokenStatus').className),
+        $('githubTokenStatus').className);
+
+    // 保存：写入配置 + 明确回执
+    env.calls.length = 0;
+    click(sbtn);
+    await flush();
+    const sv = env.cmd('set_setting').find((c) => c.args.key === 'githubToken');
+    ok('点保存：把当前输入写进配置',
+        sv && sv.args.value === 'ghp_live', JSON.stringify(sv && sv.args));
+    ok('  给的是"已保存"回执',
+        /已保存/.test($('githubTokenStatus').textContent || ''),
+        $('githubTokenStatus').textContent);
+    ok('  存好后按钮变灰（没有待保存的改动）', sbtn.disabled === true);
+
+    // 验证失败：后端给的原因要原样露出来
+    env.setVerify(undefined, '令牌无效或已过期（GitHub 回的是 Bad credentials）—— 到网页上重新生成一个再粘过来');
+    $('s-githubToken').value = 'ghp_bad';
+    $('s-githubToken').dispatchEvent(new w.Event('input', { bubbles: true }));
+    await flush();
+    click(vbtn);
+    await flush();
+    const st2 = $('githubTokenStatus').textContent || '';
+    ok('验证失败：把后端给的原因说出来', /令牌无效/.test(st2), st2);
+    ok('  用 err 样式（红）',
+        /(^|\s)err(\s|$)/.test($('githubTokenStatus').className),
+        $('githubTokenStatus').className);
+    env.setVerify(undefined, '');
+    ok('  输入一改就把上一次的验证结论清掉（旧结论不能给新值背书）',
+        (() => {
+            $('s-githubToken').dispatchEvent(new w.Event('input', { bubbles: true }));
+            return !$('githubTokenStatus').textContent;
+        })(), $('githubTokenStatus').textContent);
+
+    // 输入框里按 Enter = 保存
+    env.calls.length = 0;
+    $('s-githubToken').value = 'ghp_enter';
+    $('s-githubToken').dispatchEvent(new w.Event('input', { bubbles: true }));
+    $('s-githubToken').dispatchEvent(new w.KeyboardEvent('keydown',
+        { key: 'Enter', bubbles: true, cancelable: true }));
+    await flush();
+    ok('在输入框里按 Enter 也会保存',
+        env.cmd('set_setting').some((c) => c.args.key === 'githubToken' && c.args.value === 'ghp_enter'),
+        env.calls.map((c) => c.cmd + ':' + ((c.args && c.args.key) || '')).join(','));
 
     // ---- 没令牌：只提示 + 用浏览器下载（用户 2026-10-24 的口径）----
     /* `canAuto` = 后端按**当前配置**现算的"能不能自动下载"。
