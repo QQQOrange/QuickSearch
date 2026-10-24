@@ -1201,7 +1201,15 @@ body.idx-on .to-top { bottom: 56px; }
     margin: 10px 2px 2px;
     flex-wrap: wrap;
 }
-.upd-hint { font-size: 11.5px; color: var(--fg-dim); }
+/* v1.5.11：失败原因会直接写在这行里（可能长到"下载中断（已下 8388608 字节）：
+ * 连接被重置（已自动重试 4 轮）—— …"），所以要允许换行、不能撑破布局。 */
+.upd-hint {
+    font-size: 11.5px;
+    color: var(--fg-dim);
+    line-height: 1.5;
+    word-break: break-word;
+    user-select: text;
+}
 
 /* ---- v1.5.7：GitHub 个人访问令牌 ----
  * 这一块承担两件事：① 让用户把令牌填进来（额度 60 → 5000 次/小时）；

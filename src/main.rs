@@ -15193,6 +15193,7 @@ mod tests {
             current: "1.5.7".into(),
             notes: "说明".into(),
             url: "https://example.com/QuickSearch.exe".into(),
+            asset_api_url: String::new(),
             size: 123,
             sha256: "A".repeat(64),
             page: "https://example.com/release".into(),

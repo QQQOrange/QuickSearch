@@ -56,6 +56,26 @@ pub const REPO_URL: &str = "https://github.com/QQQOrange/QuickSearch";
 /// Releases 页（版本说明里告诉用户"模型在哪下"用的地址）。
 pub const RELEASES_URL: &str = "https://github.com/QQQOrange/QuickSearch/releases";
 
+/// 备用下载源：`api.github.com` 上的资产入口。
+///
+/// 用法是 `GET` 这个地址 **并且** 带 `Accept: application/octet-stream`
+/// （不带就只回一份 JSON 元数据，不是二进制）。
+///
+/// 和 `browser_download_url` 的区别只在**入口域名**：两者最后都 302 到同一个
+/// CDN。但入口这一步恰恰是最容易卡住的 —— 本机实测 `github.com:443` 会
+/// 间歇性 502，而 `api.github.com` 一直通。
+///
+/// ⚠ `QS_GITHUB_ASSET_API` 是测试逃生口（和 `QS_UPDATE_API` 同一类）：
+/// 探针的假服务没法提供真资产 id，不给逃生口就会在测试里打真网。
+fn asset_api(id: u64) -> String {
+    let base = std::env::var("QS_GITHUB_ASSET_API")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| format!("https://api.github.com/repos/{REPO}/releases/assets"));
+    format!("{}/{id}", base.trim_end_matches('/'))
+}
+
 /// 查更新用的 API 入口。
 ///
 /// `/releases/latest` 会**跳过 draft 与 prerelease**，正好是我们要的
@@ -101,8 +121,16 @@ pub struct UpdateInfo {
     pub current: String,
     /// 版本说明（Release body，可能为空）
     pub notes: String,
-    /// 更新包的下载地址（exe 资产）
+    /// 更新包的下载地址（exe 资产，`browser_download_url`）
     pub url: String,
+    /// 同一个资产的**API 入口**：`api.github.com/repos/.../releases/assets/{id}`。
+    ///
+    /// 为什么两条都要：两者最终都 302 到同一个 CDN，但**入口域名不同**。
+    /// 本机实测 `github.com:443` 会间歇性 502（git push 连续 10 轮不通），
+    /// 而同期的 `api.github.com` 一直 200。只留一条路，就变成
+    /// 「能检测到新版、但下载总失败」—— 那正是用户报的现象。
+    /// 空串 = 这次响应里没解析到 id（老数据 / 假服务），那就只有主源。
+    pub asset_api_url: String,
     /// 更新包体积（字节，0 = 远端没给）
     pub size: u64,
     /// 更新包的 SHA256（从 Release 说明里解析；解析不到就是空串）
@@ -290,6 +318,7 @@ fn check_anonymous(current: &str) -> Result<UpdateInfo, String> {
             current: current.to_string(),
             notes: String::new(),
             url: String::new(),
+            asset_api_url: String::new(),
             size: 0,
             sha256: String::new(),
             page: RELEASES_URL.to_string(),
@@ -761,6 +790,7 @@ fn info_from_api(
      * （没新版时 url 空着是正常的，界面根本不会展示下载入口）。 */
     let mut url = String::new();
     let mut size = 0u64;
+    let mut asset_id = 0u64;
     if let Some(assets) = v.get("assets").and_then(|x| x.as_array()) {
         for a in assets {
             let name = a.get("name").and_then(|x| x.as_str()).unwrap_or("");
@@ -771,6 +801,7 @@ fn info_from_api(
                     .unwrap_or("")
                     .to_string();
                 size = a.get("size").and_then(|x| x.as_u64()).unwrap_or(0);
+                asset_id = a.get("id").and_then(|x| x.as_u64()).unwrap_or(0);
                 break;
             }
         }
@@ -778,6 +809,13 @@ fn info_from_api(
     if newer && url.is_empty() {
         return Err(format!("{tag} 这个版本里没有 QuickSearch.exe 更新包"));
     }
+    /* 备用源：拿得到 id 才拼得出来。假服务 / 很老的响应可能没有 id，
+     * 那就只有主源一条路（`download()` 照常工作，只是少了保险）。 */
+    let asset_api_url = if asset_id > 0 {
+        asset_api(asset_id)
+    } else {
+        String::new()
+    };
 
     Ok(UpdateInfo {
         version,
@@ -787,6 +825,7 @@ fn info_from_api(
         sha256: sha_from_notes(&notes),
         notes,
         url,
+        asset_api_url,
         size,
         page,
         authed,
@@ -800,96 +839,232 @@ fn fill_details(current: &str) -> Result<UpdateInfo, String> {
     info_from_api(&v, current, false)
 }
 
-/// 下载请求的失败文案。
+/// 下载重试轮数（每轮依次试所有可用源）。
+///
+/// 3 而不是 5：实测「主源连不上」时要白等一个连接超时，轮数越多用户干等越久。
+/// 而真正的网络抖动通常 1~2 轮内就恢复了。
+const DL_ATTEMPTS: usize = 3;
+/// 第 n 轮失败后的等待（毫秒，线性退避：700 / 1400）。
+const DL_BACKOFF_MS: u64 = 700;
+
+/// 下载请求的失败文案（**不带**"下载失败"前缀 —— 外层会统一加，
+/// 免得出现"下载失败：下载更新包失败：HTTP 404"这种结巴）。
 fn download_error(e: ureq::Error) -> String {
     match e {
         ureq::Error::Status(code, r) => {
             let body = r.into_string().unwrap_or_default();
             let head: String = body.chars().take(120).collect();
-            format!("下载更新包失败：HTTP {code} {head}")
+            format!("HTTP {code} {head}")
         }
-        other => format!("下载更新包失败：{}", crate::ocr::explain(&other)),
+        other => crate::ocr::explain(&other),
     }
 }
 
-/// 打开更新包的下载流。
+/// 下载专用的 agent：**不设总超时**。
 ///
-/// 先按**匿名**请求：本项目的 release 资产是公开的，匿名一定能下 ——
-/// 反过来，填了一个"对这个仓库没权限"的令牌去下载，反而可能被拒。
-/// 只有匿名被拒（401/403/404，私有仓库的表现）且**确实配了令牌**时，
-/// 才带令牌重试一次。
-fn open_update_stream(
-    a: &ureq::Agent,
-    url: &str,
-    token: Option<&str>,
-) -> Result<Box<dyn std::io::Read + Send + Sync + 'static>, String> {
-    match a.get(url).call() {
-        Ok(r) => Ok(r.into_reader()),
-        Err(ureq::Error::Status(code, _)) if matches!(code, 401 | 403 | 404) => match token {
-            Some(t) => {
-                crate::win::log(&format!(
-                    "update: 匿名下载被拒（HTTP {code}），改用配置里的令牌重试"
-                ));
-                a.get(url)
-                    .set("Authorization", &format!("Token {t}"))
-                    .call()
-                    .map(|r| r.into_reader())
-                    .map_err(download_error)
-            }
-            None => Err(format!(
-                "下载更新包失败：HTTP {code} —— 这个包可能不是公开的，\
-                 试试在「更新」里填一个 GitHub 个人访问令牌"
-            )),
-        },
-        Err(e) => Err(download_error(e)),
+/// # 这是「能检测到新版、但下载总失败」的头号原因
+///
+/// `agent()` 用的是 `.timeout(15s)`。在 ureq 里它是**整个调用**的上限：
+/// DNS + 连接 + TLS + **把响应体读完**全算在里面。13 MB 的更新包在 15 MB/s
+/// 下当然够，可 300 KB/s 就要 45 秒 —— 必然被掐断。而且断在 `read()`
+/// 上，报出来是「下载中断」，看着像网络问题，其实是自己设的闸。
+///
+/// 这里只限制**建连接**和**两次读之间的空等**：连不上放弃（真不通就别耗着），
+/// 但只要还在往下走，下多久都行。
+///
+/// 连接超时取 8 秒而不是 15：实测「主源域名不通」是最常见的失败（本机
+/// `github.com` 直连超时、`api.github.com` 正常），一个连不上的源要白白
+/// 等掉一整个超时。8 秒足够正常的 TLS 握手，又不至于让用户对着 0% 干等。
+fn download_agent() -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .resolver(crate::net::ipv4_first)
+        .timeout_connect(std::time::Duration::from_secs(8))
+        .timeout_read(std::time::Duration::from_secs(60))
+        .timeout_write(std::time::Duration::from_secs(60))
+        .user_agent(concat!("QuickSearch/", env!("CARGO_PKG_VERSION")))
+        .build()
+}
+
+/// 一次下载尝试怎么失败的 —— 决定**断点留不留**。
+enum DlFail {
+    /// 传输层中断（连接断、读超时、写盘失败）：**保留断点**，下一轮用 Range 接着下
+    Keep(String),
+    /// 内容层不对（HTTP 4xx / 校验失败 / 大小不符）：**丢掉断点**，下轮从头来
+    Drop(String),
+}
+
+impl DlFail {
+    fn message(&self) -> &str {
+        match self {
+            DlFail::Keep(m) | DlFail::Drop(m) => m,
+        }
+    }
+    fn keep_partial(&self) -> bool {
+        matches!(self, DlFail::Keep(_))
     }
 }
 
-/// 下载更新包到 `<exe 同目录>/QuickSearch.exe.new`，返回落地路径。
+/// 更新包的两个下载源，按尝试顺序。
 ///
-/// `progress(已下, 总)`：给前端画进度条用（和模型下载同一个套路）。
+/// 两个地址最后都 302 到同一个 CDN，但**入口域名不同**。本机实测
+/// `github.com:443` 会间歇性 502（`git push` 连续 10 轮不通），同期的
+/// `api.github.com` 一直 200。只留一条路，就会变成"能检测到、下不下来"。
+fn sources(info: &UpdateInfo) -> Vec<(String, bool)> {
+    let mut v = Vec::new();
+    if !info.url.trim().is_empty() {
+        v.push((info.url.trim().to_string(), false));
+    }
+    if !info.asset_api_url.trim().is_empty() {
+        v.push((info.asset_api_url.trim().to_string(), true));
+    }
+    v
+}
+
+/// 校验落盘的这份是不是我们要的那一份。
 ///
-/// ⚠ 落点**必须在 exe 同目录**：跨盘 `rename` 会失败（EXDEV），
-/// 而后面替换那一步就是同目录内的两次 rename。放 %TEMP% 再搬过来是行不通的
-/// ——实测那样做要么失败、要么得整份复制（多花一份时间与空间）。
-pub fn download(
-    info: &UpdateInfo,
-    progress: &mut dyn FnMut(u64, u64),
-) -> Result<PathBuf, String> {
-    use std::io::{Read, Write};
+/// 从**文件**重算 SHA，而不是复用下载过程里的增量 hash —— 续传时前面那段
+/// 字节不在本次流里，增量 hash 必然对不上。13 MB 重读一遍几十毫秒，
+/// 换来一段不会出错的代码。
+fn verify_file(path: &Path, info: &UpdateInfo) -> Result<(), String> {
+    use std::io::Read;
     use sha2::Digest;
 
-    let exe = std::env::current_exe().map_err(|e| format!("取不到当前程序路径：{e}"))?;
-    let dir = exe
-        .parent()
-        .ok_or_else(|| "程序路径没有父目录？".to_string())?
-        .to_path_buf();
-    let new_path = dir.join("QuickSearch.exe.new");
-
-    // 上一轮留下的半截文件先清掉（大小可能不一样，不能续）
-    let _ = std::fs::remove_file(&new_path);
-
-    let a = agent();
-    let total = if info.size > 0 { info.size } else { 0 };
-    let mut reader = open_update_stream(&a, &info.url, current_token().as_deref())?;
-
-    let mut file =
-        std::fs::File::create(&new_path).map_err(|e| format!("写更新包失败（磁盘满？）：{e}"))?;
+    let mut f = std::fs::File::open(path).map_err(|e| format!("校验时读不到更新包：{e}"))?;
     let mut hasher = sha2::Sha256::new();
     let mut buf = vec![0u8; 64 * 1024];
-    let mut done = 0u64;
-    let mut last_pct = -1i64;
+    let mut len = 0u64;
     loop {
-        let n = reader.read(&mut buf).map_err(|e| format!("下载中断：{e}"))?;
+        let n = f
+            .read(&mut buf)
+            .map_err(|e| format!("校验时读文件失败：{e}"))?;
         if n == 0 {
             break;
         }
-        file.write_all(&buf[..n]).map_err(|e| format!("写文件失败：{e}"))?;
         hasher.update(&buf[..n]);
+        len += n as u64;
+    }
+    if info.size > 0 && len != info.size {
+        return Err(format!("更新包大小不对（期望 {}，实际 {len}）", info.size));
+    }
+    if !info.sha256.is_empty() {
+        let got = format!("{:X}", hasher.finalize());
+        if got != info.sha256 {
+            return Err(format!(
+                "更新包校验失败（SHA256 对不上）：期望 {}，实际 {got}",
+                info.sha256
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// 从一个源往 `path` 里下（或续）。成功 = 文件已完整且校验通过。
+fn fetch_into(
+    a: &ureq::Agent,
+    url: &str,
+    is_api: bool,
+    info: &UpdateInfo,
+    path: &Path,
+    progress: &mut dyn FnMut(u64, u64),
+) -> Result<(), DlFail> {
+    use std::io::{Read, Write};
+
+    let total = info.size;
+    let mut have = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    /* 断点比目标还大 → 一定不是这个包（多半是上一版留下的）。
+     * 不处理的话续传会拼出一份更大的垃圾，校验才报错，白下一轮。 */
+    if total > 0 && have > total {
+        let _ = std::fs::remove_file(path);
+        have = 0;
+    }
+    // 已经下满：一字节都不用读，直接校验（续传的收尾就是这种情况）
+    if total > 0 && have == total {
+        return verify_file(path, info).map_err(DlFail::Drop);
+    }
+
+    let build = |a: &ureq::Agent, token: Option<&str>| {
+        let mut r = a.get(url);
+        if is_api {
+            // 不带这个头，API 只回一份 JSON 元数据，不是二进制
+            r = r.set("Accept", "application/octet-stream");
+        }
+        if have > 0 {
+            r = r.set("Range", &format!("bytes={have}-"));
+        }
+        if let Some(t) = token {
+            r = r.set("Authorization", &format!("Token {t}"));
+        }
+        r
+    };
+
+    /* 匿名优先：公开资产匿名一定能下；拿一个"对这个仓库没权限"的令牌去下，
+     * 反而可能被拒（旧逻辑踩过）。被拒且确实配了令牌时，才带令牌重试一次。 */
+    let resp = match build(a, None).call() {
+        Ok(r) => r,
+        Err(ureq::Error::Status(code, _)) if matches!(code, 401 | 403 | 404) => {
+            match current_token() {
+                Some(t) => {
+                    crate::win::log(&format!(
+                        "update: {url} 匿名被拒（HTTP {code}），带令牌重试"
+                    ));
+                    build(a, Some(&t))
+                        .call()
+                        .map_err(|e| DlFail::Drop(download_error(e)))?
+                }
+                None => {
+                    return Err(DlFail::Drop(format!(
+                        "HTTP {code} —— 这个包可能不是公开的，在「更新」里填个令牌再试"
+                    )))
+                }
+            }
+        }
+        Err(e) => return Err(DlFail::Keep(download_error(e))),
+    };
+
+    let code = resp.status();
+    /* 206 = 服务器接受了 Range；200 = 它忽略了（或我们本来就没发）。
+     * 忽略时必须 `create` 从 0 写，用 append 会把新内容接在旧字节后面。 */
+    let append = code == 206 && have > 0;
+    if code != 200 && code != 206 {
+        return Err(DlFail::Drop(format!("HTTP {code}")));
+    }
+    let mut file = if append {
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(path)
+            .map_err(|e| DlFail::Keep(format!("打开断点文件失败：{e}")))?
+    } else {
+        std::fs::File::create(path)
+            .map_err(|e| DlFail::Keep(format!("写更新包失败（磁盘满？）：{e}")))?
+    };
+
+    let mut reader = resp.into_reader();
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut done = if append { have } else { 0 };
+    let mut last_pct = -1i64;
+    if done > 0 {
+        crate::win::log(&format!("update: 从 {done} 字节处续传 {url}"));
+    }
+    loop {
+        /* ⚠ 这里是"网络断了"最常见的位置。保留断点让下一轮用 Range 接着下 ——
+         *   以前这里直接抛错，13 MB 下到 90% 断一次就全废，用户只能从头再点，
+         *   而且重来还是从 0 开始。这才是"下载不顺利"的真实体感。 */
+        let n = match reader.read(&mut buf) {
+            Ok(n) => n,
+            Err(e) => {
+                return Err(DlFail::Keep(format!(
+                    "下载中断（已下 {done} 字节）：{e}"
+                )))
+            }
+        };
+        if n == 0 {
+            break;
+        }
+        if let Err(e) = file.write_all(&buf[..n]) {
+            return Err(DlFail::Keep(format!("写文件失败：{e}")));
+        }
         done += n as u64;
         if total > 0 {
-            // 已经用 `total > 0` 挡过除零，这里再走一次 `checked_div` 是给
-            // clippy 看的（它认不出上面那句 if）。两者行为完全一致。
             let pct = (done.saturating_mul(100))
                 .checked_div(total)
                 .unwrap_or(0) as i64;
@@ -909,31 +1084,87 @@ pub fn download(
     let _ = file.flush();
     drop(file);
 
-    let got = format!("{:X}", hasher.finalize());
+    if total > 0 && done < total {
+        // 流干净地结束了但没下满 —— 连接被对端关了，属于可续的失败
+        return Err(DlFail::Keep(format!(
+            "下载提前结束（{done}/{total} 字节）"
+        )));
+    }
+    verify_file(path, info).map_err(DlFail::Drop)
+}
 
-    /* 校验：说明里给了 SHA256 就**必须**对上；没给就退回比体积
-     * （用户要求"自动下好换上新的"，那"下到的确实是我们发的那一份"
-     *  必须由程序自己把关，不能指望传输链）。 */
-    if !info.sha256.is_empty() {
-        if got != info.sha256 {
-            let _ = std::fs::remove_file(&new_path);
-            return Err(format!(
-                "更新包校验失败（SHA256 对不上）—— 已删除，请稍后重试。\n期望 {}，实际 {got}",
-                info.sha256
+/// 下载更新包到 `<exe 同目录>/QuickSearch.exe.new`，返回落地路径。
+///
+/// `progress(已下, 总)`：给前端画进度条用（和模型下载同一个套路）。
+///
+/// ⚠ 落点**必须在 exe 同目录**：跨盘 `rename` 会失败（EXDEV），
+/// 而后面替换那一步就是同目录内的两次 rename。放 %TEMP% 再搬过来是行不通的
+/// ——实测那样做要么失败、要么得整份复制（多花一份时间与空间）。
+///
+/// # v1.5.11：这条路上补了三样东西
+///
+/// 用户报「能检测到新版，但下载不下来」。查下来是三个独立的坑叠在一起：
+///
+/// 1. **总超时 15 秒**（`agent()` 的 `.timeout`）—— 慢网络下 13 MB 根本下不完，
+///    断在 `read()` 上却报成"下载中断"。下载改用 [`download_agent`]。
+/// 2. **断了就从 0 重来** —— 没有 Range、没有重试。下到 90% 断一次就全废。
+///    现在按断点续传，失败后自动退避重试。
+/// 3. **只有一条下载链路**（`github.com`）—— 而这条正是本机最不稳的一条。
+///    现在失败会换 `api.github.com` 的资产入口再试。
+///
+/// 失败时**保留断点**：下次用户再点，能接着下完（内容真不对时校验会兜住，
+/// 自动丢弃重来）。
+pub fn download(
+    info: &UpdateInfo,
+    progress: &mut dyn FnMut(u64, u64),
+) -> Result<PathBuf, String> {
+    let exe = std::env::current_exe().map_err(|e| format!("取不到当前程序路径：{e}"))?;
+    let dir = exe
+        .parent()
+        .ok_or_else(|| "程序路径没有父目录？".to_string())?
+        .to_path_buf();
+    let new_path = dir.join("QuickSearch.exe.new");
+
+    let srcs = sources(info);
+    if srcs.is_empty() {
+        return Err("这个版本没有可用的下载地址 —— 请点「用浏览器下载」".to_string());
+    }
+    let a = download_agent();
+    let mut last = String::from("下载失败");
+    for round in 1..=DL_ATTEMPTS {
+        for (url, is_api) in &srcs {
+            match fetch_into(&a, url, *is_api, info, &new_path, progress) {
+                Ok(()) => {
+                    crate::win::log(&format!(
+                        "update: 已下载 {}（第 {round} 轮，源 {url}）",
+                        new_path.display()
+                    ));
+                    return Ok(new_path);
+                }
+                Err(f) => {
+                    let keep = f.keep_partial();
+                    last = f.message().to_string();
+                    if !keep {
+                        /* 内容不对：断点必须作废。留着的话下一轮会接着往上拼，
+                         * 永远拼不出正确的文件。 */
+                        let _ = std::fs::remove_file(&new_path);
+                    }
+                    crate::win::log(&format!(
+                        "update: 第 {round} 轮失败（{}）{url} —— {last}",
+                        if keep { "保留断点" } else { "丢弃断点" }
+                    ));
+                }
+            }
+        }
+        if round < DL_ATTEMPTS {
+            std::thread::sleep(std::time::Duration::from_millis(
+                DL_BACKOFF_MS * round as u64,
             ));
         }
-    } else if info.size > 0 && done != info.size {
-        let _ = std::fs::remove_file(&new_path);
-        return Err(format!("更新包大小不对（期望 {}，实际 {done}）", info.size));
     }
-
-    crate::win::log(&format!(
-        "update: 已下载 {}（{} 字节，sha={}）",
-        new_path.display(),
-        done,
-        &got[..8.min(got.len())]
-    ));
-    Ok(new_path)
+    Err(format!(
+        "{last}（已自动重试 {DL_ATTEMPTS} 轮）—— 网络一直不稳的话，点「用浏览器下载」"
+    ))
 }
 
 /// 把下载好的 `.new` 换成正在运行的 exe。**成功后调用方应立即提示用户重启。**
@@ -1075,6 +1306,298 @@ mod tests {
         assert!(!is_newer("", "1.2.0"));
         assert!(!is_newer("abc", "1.2.0"));
         assert!(!is_newer("????", "1.2.0"));
+    }
+
+    /* ── v1.5.11：下载韧性 ──────────────────────────────────────────
+     *
+     * 用户报「能检测到新版，但下载不下来」。三个坑里有两个能在纯逻辑层
+     * 钉住：**源的选择顺序**、**失败分类**（决定断点留不留）。
+     * 续传本身要真网络，由探针验。 */
+
+    fn dl_info() -> UpdateInfo {
+        UpdateInfo {
+            version: "99.0.0".into(),
+            tag: "v99.0.0".into(),
+            newer: true,
+            current: "1.0.0".into(),
+            notes: String::new(),
+            url: String::new(),
+            asset_api_url: String::new(),
+            size: 0,
+            sha256: String::new(),
+            page: String::new(),
+            authed: false,
+            auth_warning: None,
+        }
+    }
+
+    /// 主源（github.com）在前，备源（api 资产入口）在后，都带"要不要 Accept 头"。
+    #[test]
+    fn 下载源主备顺序() {
+        let mut i = dl_info();
+        i.url = "https://github.com/o/r/releases/download/v1/QuickSearch.exe".into();
+        i.asset_api_url = "https://api.github.com/repos/o/r/releases/assets/42".into();
+        let s = sources(&i);
+        assert_eq!(s.len(), 2, "两条路都要留着");
+        assert_eq!(s[0].1, false, "主源走 browser_download_url，不需要 Accept 头");
+        assert_eq!(s[1].1, true, "备源必须带 Accept: application/octet-stream");
+        assert!(s[0].0.contains("releases/download"));
+
+        // 老响应 / 假服务可能没有 asset id → 只有一条路，仍能下
+        i.asset_api_url = String::new();
+        assert_eq!(sources(&i).len(), 1);
+        assert_eq!(sources(&i)[0].1, false);
+
+        // 连主源都没有 → 空；download() 据此报"没有可用下载地址"
+        i.url = String::new();
+        assert!(sources(&i).is_empty());
+    }
+
+    /// 失败分类决定断点留不留 —— 这条错了会"永远拼不出正确的包"。
+    #[test]
+    fn 传输失败留断点内容失败丢断点() {
+        assert!(
+            DlFail::Keep("网络断了".into()).keep_partial(),
+            "传输中断必须保住已下的部分，否则每次重来都从 0 开始"
+        );
+        assert!(
+            !DlFail::Drop("校验不过".into()).keep_partial(),
+            "内容不对必须丢掉断点，否则下一轮接着往上拼，越拼越错"
+        );
+        assert_eq!(DlFail::Keep("a".into()).message(), "a");
+        assert_eq!(DlFail::Drop("b".into()).message(), "b");
+    }
+
+    /// 备源地址拼得对，并且测试逃生口生效（否则探针会打真网）。
+    #[test]
+    fn 备源地址与逃生口() {
+        // 改进程级环境变量，和 config 那批测试共用一把锁，免得互相看到对方的值
+        let _env = crate::config::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let id = 673_052_494u64;
+        std::env::remove_var("QS_GITHUB_ASSET_API");
+        let real = asset_api(id);
+        assert!(real.starts_with("https://api.github.com/repos/"));
+        assert!(real.ends_with("/releases/assets/673052494"), "{real}");
+
+        std::env::set_var("QS_GITHUB_ASSET_API", "http://127.0.0.1:9/assets/");
+        let local = asset_api(id);
+        assert_eq!(local, "http://127.0.0.1:9/assets/673052494", "尾斜杠要吃掉");
+        std::env::remove_var("QS_GITHUB_ASSET_API");
+    }
+
+    /// 两个下载测试都会写 `<exe 同目录>/QuickSearch.exe.new`，
+    /// 并行跑会互相覆盖 —— 用一把锁串起来。
+    static DL_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// 一个极简 TCP 服务：**第一次只发 40% 就关连接**，之后按 Range 正常续。
+    ///
+    /// # 为什么要自己造这么一个东西
+    ///
+    /// 断点续传的核心风险是**拼接错位**（少拼一段、多拼一段、把旧字节接在
+    /// 新内容后面），这种错误编译期发现不了，真网络也没法稳定复现"恰好断在
+    /// 40%"。所以用本地 socket 精确控制。
+    ///
+    /// 返回 `(端口, 命中计数)`：计数用来断言"第二次请求真的带上了 Range"。
+    fn spawn_flaky_server(
+        body: Vec<u8>,
+        cut_at: usize,
+    ) -> (u16, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let l = TcpListener::bind("127.0.0.1:0").expect("绑不了本地端口");
+        let port = l.local_addr().unwrap().port();
+        let hits = std::sync::Arc::new(AtomicUsize::new(0));
+        let h2 = hits.clone();
+        std::thread::spawn(move || {
+            for s in l.incoming() {
+                let Ok(mut s) = s else { continue };
+                let n = h2.fetch_add(1, Ordering::SeqCst);
+                // 把请求头读出来（只要 Range 那一行）
+                let mut buf = [0u8; 2048];
+                let _ = s.read(&mut buf);
+                let req = String::from_utf8_lossy(&buf).to_string();
+                let range = req
+                    .lines()
+                    .find(|ln| ln.to_ascii_lowercase().starts_with("range:"))
+                    .and_then(|ln| ln.split('=').nth(1))
+                    .and_then(|v| v.split('-').next())
+                    .and_then(|v| v.trim().parse::<usize>().ok());
+                if n == 0 {
+                    // 第一次：**声称**完整长度，只发 40% 就 close
+                    // （客户端会看到 EOF 早于 Content-Length —— 和真网络被掐断一样）
+                    let _ = write!(
+                        s,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = s.write_all(&body[..cut_at]);
+                    let _ = s.flush();
+                } else {
+                    let start = range.unwrap_or(0);
+                    let _ = write!(
+                        s,
+                        "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {}-{}/{}\r\n\
+                         Content-Length: {}\r\nAccept-Ranges: bytes\r\n\r\n",
+                        start,
+                        body.len() - 1,
+                        body.len(),
+                        body.len() - start
+                    );
+                    let _ = s.write_all(&body[start..]);
+                    let _ = s.flush();
+                }
+            }
+        });
+        (port, hits)
+    }
+
+    /// **本轮的旗舰测试**：下到一半断了，第二次要接着下，而不是从 0 重来。
+    ///
+    /// 用户报「能检测到新版，但下载不下来」。旧代码在这里的表现是：
+    /// 断一次 → 整个失败 → 用户再点 → **还是从 0 开始** → 在不稳的网络上
+    /// 永远下不完。这条测试把这个行为钉死。
+    #[test]
+    fn 下载断了能续上而不是从头再来() {
+        use sha2::Digest;
+        use std::sync::atomic::Ordering;
+
+        let _g = DL_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        // 造一份 64KB 的假更新包（内容有规律但不重复，拼错会立刻暴露）
+        let body: Vec<u8> = (0..65_536usize).map(|i| (i % 251) as u8).collect();
+        let want_sha = format!("{:X}", sha2::Sha256::digest(&body));
+        let cut = body.len() * 4 / 10;
+        let (port, hits) = spawn_flaky_server(body.clone(), cut);
+
+        let mut info = dl_info();
+        info.url = format!("http://127.0.0.1:{port}/QuickSearch.exe");
+        info.size = body.len() as u64;
+        info.sha256 = want_sha;
+
+        let p = download(&info, &mut |_, _| {}).expect("断一次之后必须能续上下完");
+        let got = std::fs::read(&p).expect("读不到落盘的更新包");
+
+        assert_eq!(got.len(), body.len(), "最终大小必须是完整的");
+        assert_eq!(got, body, "续传拼接的内容必须一字节不差");
+        assert!(
+            hits.load(Ordering::SeqCst) >= 2,
+            "应当至少请求两次（第一次断、第二次续）"
+        );
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// 断点已经完整时不该再下一遍 —— 直接校验通过就返回。
+    #[test]
+    fn 断点已完整时不用重下() {
+        use sha2::Digest;
+
+        let _g = DL_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let body: Vec<u8> = (0..8_192usize).map(|i| (i % 97) as u8).collect();
+        let mut info = dl_info();
+        info.size = body.len() as u64;
+        info.sha256 = format!("{:X}", sha2::Sha256::digest(&body));
+
+        let exe = std::env::current_exe().unwrap();
+        let p = exe.parent().unwrap().join("QuickSearch.exe.new");
+        std::fs::write(&p, &body).unwrap();
+
+        // 一个**必然连不上**的地址：如果它还去下载，就会失败
+        info.url = "http://127.0.0.1:1/QuickSearch.exe".into();
+        let got = download(&info, &mut |_, _| {});
+        assert!(got.is_ok(), "断点已经完整时应当直接通过，不该真的去下载");
+        assert_eq!(std::fs::read(&p).unwrap(), body);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// 【手动跑，默认 ignore】对**真 GitHub** 下载一次，验证新下载器能下完。
+    ///
+    /// 默认不跑：它要联网、要几秒，CI 上会挂。发版前手动来一次：
+    ///
+    /// ```text
+    /// cargo test 真实下载 -- --ignored --nocapture
+    /// ```
+    ///
+    /// 为什么值得手动跑：本地假服务证明的是"续传逻辑对"，证明不了
+    /// "对着真 GitHub 的 302 → CDN 链路也能下完"。这两件事失败的原因完全不同。
+    #[test]
+    #[ignore]
+    fn 真实下载一次() {
+        let _g = DL_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let mut info = dl_info();
+        info.version = "1.5.10".into();
+        /* ⚠ 这里**必须**填上备源。本机实测：`github.com` 直连超时
+         * （curl 能通是因为它走了系统代理，ureq 不走系统代理），
+         * 而 `api.github.com` 直连是通的 —— 检测更新能用就是证据。
+         * 只留主源，这条测试必然失败；填上备源才下得来。
+         * 这正是「能检测到新版、却下载不下来」的机械原因。 */
+        info.asset_api_url = asset_api(673_052_494);
+        info.url =
+            "https://github.com/QQQOrange/QuickSearch/releases/download/v1.5.10/QuickSearch.exe"
+                .into();
+        info.size = 13_415_936;
+        info.sha256 = "8723CDCFE6F00DFEDC744ADE15973D03FE1D0BA998B883C7FBBA1232F452AF35".into();
+
+        let mut last = 0u64;
+        let p = download(&info, &mut |d, t| {
+            if d >= last + 4 * 1024 * 1024 {
+                last = d;
+                println!("  已下 {d} / {t}");
+            }
+        })
+        .expect("对真 GitHub 的下载应当成功");
+        let n = std::fs::metadata(&p).unwrap().len();
+        println!("  落地 {n} 字节");
+        assert_eq!(n, 13_415_936, "大小必须和 release 资产一致");
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// 【手动跑，默认 ignore】真实下载「先断一次再续」的另一种证明：
+    /// 先用 Range 只取前半段放进 .new，再调 download() 让它续完。
+    ///
+    /// ```text
+    /// cargo test 真实续传 -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore]
+    fn 真实续传从半个文件接着下() {
+        let _g = DL_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let exe = std::env::current_exe().unwrap();
+        let p = exe.parent().unwrap().join("QuickSearch.exe.new");
+        std::fs::write(&p, Vec::<u8>::new()).unwrap();
+
+        // 造一个"已经下了 5MB"的断点（内容用 Range 从真服务取，保证前缀正确）
+        let a = download_agent();
+        let url =
+            "https://github.com/QQQOrange/QuickSearch/releases/download/v1.5.10/QuickSearch.exe";
+        let mut r = a
+            .get(url)
+            .set("Range", "bytes=0-5242879")
+            .call()
+            .expect("取前 5MB 失败")
+            .into_reader();
+        let mut head = Vec::new();
+        use std::io::Read;
+        r.read_to_end(&mut head).expect("读前 5MB 失败");
+        assert_eq!(head.len(), 5_242_880, "前半段大小不对");
+        std::fs::write(&p, &head).unwrap();
+        println!("  造好断点：{} 字节", head.len());
+
+        let mut info = dl_info();
+        info.url = url.into();
+        info.size = 13_415_936;
+        info.sha256 = "8723CDCFE6F00DFEDC744ADE15973D03FE1D0BA998B883C7FBBA1232F452AF35".into();
+        info.asset_api_url = String::new();
+
+        let got = download(&info, &mut |_, _| {}).expect("从断点续传应当成功");
+        let n = std::fs::metadata(&got).unwrap().len();
+        println!("  续传完成 {n} 字节");
+        assert_eq!(n, 13_415_936);
+        let _ = std::fs::remove_file(&got);
     }
 
     #[test]

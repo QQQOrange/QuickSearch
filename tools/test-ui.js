@@ -2732,6 +2732,57 @@ async function testRegion() {
  * 前两条是安全动作：错了不是难看，是数据泄露或自己的文件打不开。
  * 所以"强制"那一条要专门验 —— 用户能取消勾选的话，"强制"就不成立了。
  */
+/* v1.5.11：下载失败时页面该怎么表现
+ *
+ * 用户报「能检测到新版，但下载不下来」。后端已经补了超时/续传/换源，
+ * 但**前端原来只写一句"更新失败"**，真正的原因塞进 toast 一闪就没 ——
+ * 用户不知道断在网络、校验还是被拒，也就没法判断该重试还是换条路。
+ */
+async function testDownloadFailureRoute() {
+    console.log('');
+    console.log('=== 下载失败：原因留在页面上 + 自动切兜底入口（v1.5.11）===');
+    const env = makeEnv('ui/settings.html', baseConf({ githubToken: 'ghp_x' }));
+    runScripts(env, ['ui/shared.js', 'ui/settings.js']);
+    await flush();
+    const { w } = env;
+    const $ = (id) => w.document.getElementById(id);
+
+    // 先摆一个"发现新版本"的状态（按钮应该是「下载并安装」）
+    const upd = env.listeners.get('qs://update');
+    ok('登记了 qs://update', !!upd);
+    upd({
+        payload: {
+            newer: true, version: '99.0.0', notes: '说明', size: 13415936,
+            canAuto: true, authed: true,
+            url: 'https://github.com/o/r/releases/download/v99/QuickSearch.exe',
+            page: 'https://example.com/release',
+        },
+    });
+    await flush();
+    eq('发现新版时按钮是「下载并安装」', $('btnUpdateInstall').textContent, '下载并安装');
+
+    // 然后失败一次（后端给的是"已重试几轮"的完整说法）
+    const fail = env.listeners.get('qs://update-failed');
+    ok('登记了 qs://update-failed', !!fail);
+    fail({
+        payload: '下载中断（已下 8388608 字节）：连接被重置（已自动重试 4 轮）'
+            + '—— 网络一直不稳的话，点「用浏览器下载」',
+    });
+    await flush();
+
+    ok('失败原因**留在页面上**（不是只发一条会消失的 toast）',
+        /已自动重试 4 轮/.test($('updHint').textContent || ''),
+        $('updHint').textContent);
+    ok('  不再是一句干巴巴的「更新失败」',
+        $('updHint').textContent !== '更新失败');
+    eq('主按钮切成兜底入口', $('btnUpdateInstall').textContent, '用浏览器下载');
+    ok('  下载直链一并显示出来（用户能复制/点开）',
+        $('updLinkRow').hidden === false);
+    ok('  进度条收起', $('updProgress').hidden === true);
+    ok('  按钮恢复可点（不是灰着让人以为卡住）',
+        $('btnUpdateInstall').disabled === false);
+}
+
 async function testExportEncryptAndImportPass() {
     console.log('');
     console.log('=== 加密导出勾选框 / 导入密码框 / 额度用量（v1.5.10）===');
@@ -3503,6 +3554,7 @@ async function testUpdateToken() {
         await testBackupPage();
         await testBackupSecurity();
         await testExportEncryptAndImportPass();
+        await testDownloadFailureRoute();
         await testFavTools();
         await testCatJump();
     } catch (e) {
