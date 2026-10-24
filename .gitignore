@@ -65,3 +65,20 @@ vendor/ort/lib/*.lib
 # build artifacts: local target_build dir (used when exe is locked)
 /target_build/
 **/target_build/
+
+# 手工验证下载时 curl 到仓库根目录的临时文件
+# （v1.5.11 发版时 `git add -A` 把 13MB 的 _api.exe 一起提交了，amend 才清掉）
+/_*.exe
+/_p1
+/_p2
+/_full
+/_part.bin
+/_hdr.txt
+/_rel_*.json
+/_patch*.json
+/_asset.json
+/_latest.json
+/_c.json
+/_put*.json
+/_f.json
+/_remote.md
