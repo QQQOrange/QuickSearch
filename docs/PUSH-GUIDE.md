@@ -19,7 +19,7 @@
 | 远端配置 | ✅ `origin` = `https://github.com/QQQOrange/QuickSearch.git` |
 | GitHub 凭据 | ✅ 凭据管理器里有（`git credential fill` 能拿到，2026-10-25 验证 200） |
 | 网络 | ⚠️ **间歇性**：`github.com:443` 时通时不通；`api.github.com` 一直可用 |
-| 发布 | ✅ 最新 Release **v1.5.11**（2026-10-25），资产 `QuickSearch.exe` 13,427,200 字节 |
+| 发布 | ✅ 最新 Release **v1.5.12**（2026-10-25），资产 `QuickSearch.exe` 13,427,200 字节 |
 
 ### ⚠ 两条必须记住的环境事实（2026-10-25 实测）
 
@@ -108,6 +108,33 @@ curl -X PUT ... "https://api.github.com/repos/QQQOrange/QuickSearch/contents/<pa
 > ⚠ 附件（exe）**不能**走 Contents API，必须走
 > `POST https://uploads.github.com/repos/<owner>/<repo>/releases/<id>/assets?name=QuickSearch.exe`
 > ，`Content-Type: application/octet-stream`，成功返回 **201**。
+
+### 4. 2026-10-25 发 v1.5.12：代理整段 502，用 Git Data API 推的
+
+那天 `http_proxy`（`127.0.0.1:63546`）对 github.com 一律返 **502**，
+`env -u *_proxy` 直连则 **21 秒超时** —— 两条路都不通，而 `api.github.com` 正常。
+那就不要再用 git 协议，直接拼对象：
+
+```text
+GET  /git/ref/heads/main              → 远端 SHA + tree
+POST /git/blobs        × N            → 每个改过的文件一个 blob（base64）
+POST /git/trees        {base_tree, tree:[…, {path, sha:null} 表示删除]}
+POST /git/commits      {message, tree, parents:[远端SHA], author, committer}
+PATCH /git/refs/heads/main            → {sha: 新 commit, force: false}
+POST /git/tags + /git/refs            → annotated tag
+```
+
+两个实测要点：
+
+- **`base_tree` + 只列 diff**，不要把整棵树重建一遍（仓库几千个 blob，逐个上传不现实）。
+  删除项写成 `{"path": p, "mode": "100644", "type": "blob", "sha": null}`。
+- **commit SHA 会与本地不同**（API 侧的 committer 元数据不完全受控），但
+  **tree SHA 可以完全一致** —— 这就是"内容确实推上去了"的硬证据。
+  v1.5.12 实测：本地 tree `514c00f4b6` / 远端 tree `514c00f4b6` 相同，
+  `git rev-parse HEAD:ui/bar.js` 与 `/contents/ui/bar.js` 的 blob sha 也相同。
+- 本地因此会与远端**分叉**（内容相同、SHA 不同）。等网络恢复后
+  `git fetch` + `git rebase` 即可自愈，Git 会判定 patch already applied。
+
 
 ---
 
