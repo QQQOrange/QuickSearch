@@ -760,6 +760,18 @@ var barGhost = false;
             this.ready = true;
             this.applyConf(conf);                   // 上下文就绪后才该挂 qs-glass
             syncSize();
+            /* 2026-10-25：**横条一露头就让它对抓屏隐身**，不再等 startLive。
+             *
+             * 上面 applyConf 在「没开实时玻璃」时会走 stopLive() → exclSet(false)，
+             * 而 bar_glass_live 默认就是 false —— 结果 excluded 恒为 false，
+             * 之后每一次 refresh() 都退化成「隐藏整个舞台 → 等两帧 → 抓 → 显示」。
+             * 面板开合时 bar.js 的 glassRefit() 会调两次 refresh（250/700ms），
+             * 于是用户看到画面闪两下。这就是「点开更多引擎闪好几次」的来源之一。
+             *
+             * 放在 applyConf **之后**：让它盖住 stopLive 那次关闭。
+             * 收起时 onHidden → stopLive 会再解除（配对），所以只在横条可见
+             * 期间隐身，不影响平时的截图/录屏。 */
+            this.exclSet(true);
             kick();
         },
 
@@ -847,7 +859,17 @@ var barGhost = false;
                 captureOnce(false);
                 return Promise.resolve();
             }
-            return captureOnce(true) || Promise.resolve();
+            /* 2026-10-25：还没隐身 → **先补一次隐身再直抓**，不要退化成"藏舞台"。
+             *
+             * onShow 已经会 exclSet(true)，但那是异步 IPC：用户在横条刚弹出的
+             * 头一两百毫秒里就点开面板的话，这里可能还没落地。以前这种情况
+             * 直接 captureOnce(true) —— 把整个舞台藏两帧，肉眼就是闪一下。
+             * 现在先把隐身补上；补不上（系统 < 19041，WDA_EXCLUDEFROMCAPTURE
+             * 不可用）才退回藏舞台，行为与从前完全一致。 */
+            return this.exclSet(true).then(function () {
+                if (excluded) captureOnce(false);
+                else captureOnce(true);
+            });
         },
 
         /** 实时模式：跟着系统帧率跑，每帧能抓就抓（有在途抓屏则跳过本帧）。

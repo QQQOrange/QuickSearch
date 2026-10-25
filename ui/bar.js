@@ -1602,9 +1602,26 @@ function renderFlatBody(groups, filterKey) {
     }
     /* ⚠ 第一个分类**必须同步建出来**：观察器是异步的（下一帧才回调），
      * 全留给它的话，面板打开瞬间上面那一节是**空的** —— 实测要 350ms 才
-     * 冒出第一批格子，比改之前还难看。先手填一节（约 35 个格子，几毫秒），
-     * 剩下的交给观察器，滚到跟前自然出现。 */
-    if (panelFillers.length) panelFillOne(panelFillers[0]);
+     * 冒出第一批格子，比改之前还难看。
+     *
+     * 2026-10-25：**从"填一节"改成"填够一屏"**。
+     *
+     * 只填一节的问题：一节通常 5~35 个格子，撑不满 .panel-body 那 344px 的
+     * 上限，于是面板先按"矮"的样子被量一次 → 窗口按矮尺寸摆好 → 观察器
+     * 补填下一节 → 面板长高 → 窗口再改一次尺寸。用户看到的就是
+     * 「点开更多引擎，画面跳两三次才稳定」。
+     *
+     * 现在同步填到 scrollHeight 够 344px 为止（每个分类几毫秒，最多多花
+     * 十几毫秒）。高度第一帧就是终值，观察器后面补的全落在滚动区里，
+     * 不再改变整体高度、也就不会再动窗口。
+     *
+     * 344 = bar.css 里 .panel-body 的 max-height，到量就没有继续填的必要
+     * （再填只影响滚动内容，不影响面板高度）。引擎少、填完全部还不到 344
+     * 也无所谓 —— 那种情况下懒填本来就没东西可填。 */
+    for (let i = 0; i < panelFillers.length; i++) {
+        panelFillOne(panelFillers[i]);
+        if (panelBody.scrollHeight >= 344) break;
+    }
     panelWatch();
 }
 
@@ -1691,11 +1708,43 @@ function renderPanel(focusFilter, keepScroll) {
         window.qsIconSigOf ? window.qsIconSigOf(CONF.dirIcons) : '',
         // 收藏树整体（展开/折叠、增删条目都会变）
         JSON.stringify(CONF.favorites || []),
+        /* 2026-10-25：**「最近使用」也算渲染输入**。
+         *
+         * 这一栏画的是 CONF.recentEngines（用过哪些引擎）+ CONF.recentMax（露几个），
+         * 而且会剔掉横条上已经固定的那几个（见 renderRecentSection，用的是
+         * barList() 而不是 CONF.barList 原始数组）。这三样以前都没进指纹 ——
+         * 别处不改，指纹就一直一样，于是"刚用了某个引擎"这一栏要等下一次
+         * 真重画才更新。
+         *
+         * 补进来是为了配合下面那条新口径：缓存必须覆盖**所有**影响 DOM 的输入，
+         * 否则"不重建"就会变成"显示过期内容"。 */
+        (CONF.recentEngines || []).join('\u0001'),
+        Number(CONF.recentMax) || 0,
+        barList().join('\u0001'),
     ].join('\u0002');
-    /* `focusFilter` 非空 = 调用方**要求**换内容（下钻 / 换过滤词），
-     * 那种情况必须重画，不能命中缓存。 */
-    if (!focusFilter && sig === panelRenderSig && panelBody.childElementCount) {
+    /* 指纹一样 + 面板里已经有内容 → **一个节点都不动**。
+     *
+     * ⚠ 这里以前是 `if (!focusFilter && ...)` —— 把 `focusFilter`（= 打开面板）
+     *   当成了"必须重画"的信号。可打开面板恰恰是**最不该重画**的那一次：
+     *   内容跟上次收起时一模一样，重建的收益是零，代价却是一帧白闪 ——
+     *   `panelBody.textContent = ''` 之后要 createElement 几百个格子，这几十
+     *   毫秒里浏览器已经把"空面板"合成到屏幕上了。
+     *
+     *   用户报的「选择一段文字后点开更多引擎，页面要闪好几次才稳定」，
+     *   第一下就是它（第二下见 renderFlatBody 末尾"一次填够一屏"，
+     *   第三下见 togglePanel 里收起时恢复 DOM 过滤状态那一段）。
+     *
+     * 现在只要指纹没变，就只做三件事：复位滚动、把光标送回搜索框、同步分类高亮。
+     * 打开面板变成"啪"的一下 —— 没有中间态，没有白闪。
+     *
+     * `keepScroll` 仍然管住"配置广播引起的重画不该把用户正在看的位置滚回顶部"。 */
+    if (sig === panelRenderSig && panelBody.childElementCount) {
         if (keepScroll) panelBody.scrollTop = prevScroll;
+        else panelBody.scrollTop = 0;
+        if (focusFilter && inputEngFilter && !panelEl.classList.contains('fav-mode')) {
+            try { inputEngFilter.focus(); } catch (_) { }
+        }
+        syncActiveCatNav();
         return;
     }
     panelRenderSig = sig;
@@ -2779,11 +2828,24 @@ function togglePanel(force) {
         // 用户说的"输入框带记忆功能"（下次点引擎会拿上次的词去搜）。
         inputQ.value = '';
         // 引擎过滤词同理：下次打开应该是"全部引擎都在"，而不是上次筛剩的那几个
+        const hadFilter = !!engineFilterText || panelSearchMode;
         if (inputEngFilter) inputEngFilter.value = '';
         engineFilterText = '';
-        // 「最近使用」那一栏在搜索态里被 hidden 掉了，收起时一并还原
-        // （下次打开本来也会重画，但别把 DOM 留成一个"看着正常、其实是脏"的状态）
-        setRecentSectionHidden(false);
+        /* 2026-10-25：**DOM 上的过滤状态也必须撤干净**，不能只清变量。
+         *
+         * 以前这里只把 engineFilterText 置空，被 `cell.hidden = true` 藏掉的
+         * 格子原样留着 —— 反正"下次打开必然重画"，脏状态会被 textContent=''
+         * 抹掉，看不出来。
+         *
+         * 但 renderPanel 现在改成了"指纹没变就不重建"：DOM 不清的话，再打开
+         * 会命中缓存，用户看到的是上次筛剩下的那半截列表 —— 比闪烁更糟。
+         * 所以这里显式翻回来（applyEngineFilter('') 就是干这个的：取消所有
+         * hidden、还原分类标题、还原「最近使用」那一栏）。
+         *
+         * 面板此刻已经 hidden，这几百次 hidden 赋值用户看不见，也不会引发
+         * 额外的重排 —— 只改 class/属性，没有几何变化。 */
+        if (hadFilter && panelBody.childElementCount) applyEngineFilter('');
+        else setRecentSectionHidden(false);
         invoke('focus_bar', { enable: false }).catch(() => {});
     }
     // 面板开合直接决定横条该不该淡（开着 = 用户在里面点东西，横条陪着亮着）

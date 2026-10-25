@@ -3184,6 +3184,72 @@ async function testFavTools() {
 /*  七、更多引擎面板：分类跳转要减掉吸附头高度（轮 21）                  */
 /* ================================================================== */
 
+/* ============================================================================
+ *  更多引擎面板：不该闪的那两下（2026-10-25）
+ *
+ *  用户报「选择一段文字，然后点开更多引擎，页面会闪烁好几次，之后才开始稳定」。
+ *  查下来是三处重绘叠在一起，其中两处在面板自己这边：
+ *
+ *    ① 每次打开都 `panelBody.textContent = ''` 再重建几百个格子 —— 重建的几十
+ *       毫秒里浏览器已经把"空面板"合成上屏，就是一帧白闪。而打开面板时内容
+ *       跟上次收起时**一模一样**，重建收益为 0。
+ *    ② 收起时只清 `engineFilterText` 这个**变量**，DOM 里被 hidden 的格子原样
+ *       留着（以前靠"下次打开必然重画"兜着）。①一旦改成"不重建"，这个脏状态
+ *       就会露出来 —— 再打开看到的是上次筛剩下的那半截列表。
+ *
+ *  （第三处是玻璃抓屏"藏舞台两帧"，在 ui/glass.js 里。jsdom 没有布局引擎
+ *    也没有 WebGL，测不到，只能真机验。）
+ *
+ *  这两条都是"看不出来但会让人以为列表坏了"的类型，钉住。
+ * ========================================================================== */
+async function testPanelNoFlicker() {
+    console.log('');
+    console.log('=== 更多引擎面板：打开不重建 / 收起还原过滤 ===');
+    const env = makeEnv('ui/index.html', baseConf());
+    runScripts(env, ['ui/shared.js', 'ui/bar.js']);
+    await flush();
+    const { w } = env;
+    const $ = (id) => w.document.getElementById(id);
+    const body = $('panelBody');
+
+    $('btnMore').click();
+    await flush();
+
+    const cellsOf = () => [...body.querySelectorAll('.grid > .cell')];
+    const visibleOf = () => cellsOf().filter((c) => !c.hidden);
+    ok('  面板打开后有格子', cellsOf().length > 0, String(cellsOf().length));
+
+    /* ① 收起再打开：格子必须还是**同一批节点**（没走 textContent='' 那条路）。 */
+    const before = cellsOf();
+    const firstCell = before[0];
+    $('btnMore').click();          // 收起
+    await flush();
+    $('btnMore').click();          // 再打开
+    await flush();
+    const after = cellsOf();
+    ok('  再次打开面板不重建 DOM（同一个节点实例）',
+        after.length === before.length && after[0] === firstCell,
+        `${before.length} → ${after.length}`);
+
+    /* ② 搜一下把列表筛窄 → 收起 → 再打开，必须回到"全部都在"。
+     *    以前这里会命中缓存、把上一轮的 hidden 原样端出来。 */
+    const full = visibleOf().length;
+    const engFilter = $('engFilter');
+    engFilter.value = '哔哩';
+    engFilter.dispatchEvent(new w.Event('input'));
+    await flush();
+    const narrowed = visibleOf().length;
+    ok('  输入过滤词后可见格子变少', narrowed > 0 && narrowed < full,
+        `${full} → ${narrowed}`);
+
+    $('btnMore').click();          // 收起（这一步负责把 DOM 的过滤状态也撤掉）
+    await flush();
+    $('btnMore').click();          // 再打开
+    await flush();
+    eq('  收起再打开，列表回到完整状态（DOM 过滤已撤销）', visibleOf().length, full);
+    ok('  搜索框也跟着清空了', String(engFilter.value) === '', JSON.stringify(engFilter.value));
+}
+
 async function testCatJump() {
     console.log('');
     console.log('=== 更多引擎面板：分类跳转的吸附头补偿 ===');
@@ -3556,6 +3622,7 @@ async function testUpdateToken() {
         await testExportEncryptAndImportPass();
         await testDownloadFailureRoute();
         await testFavTools();
+        await testPanelNoFlicker();
         await testCatJump();
     } catch (e) {
         ok('测试过程中不应抛异常', false, e && (e.stack || String(e)));
