@@ -246,6 +246,175 @@ pub fn message_box(title: &str, text: &str) {
     }
 }
 
+/// 带「是 / 否」的原生消息框：**点「是」返回 true**。
+///
+/// 用途见 `main` 里的 WebView2 检查 —— 那里要问"要不要现在去下载"，
+/// 用带链接的窗口做不到（没有 WebView2 就没有任何 HTML 能力，这正是要提示
+/// 的那件事），所以只能靠原生对话框的两个按钮当"可点击的下载入口"。
+pub fn message_box_yes_no(title: &str, text: &str) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        MessageBoxW, IDYES, MB_ICONWARNING, MB_SETFOREGROUND, MB_TOPMOST, MB_YESNO,
+    };
+    let t = wide(title);
+    let m = wide(text);
+    let r = unsafe {
+        MessageBoxW(
+            None,
+            PCWSTR(m.as_ptr()),
+            PCWSTR(t.as_ptr()),
+            MB_YESNO | MB_ICONWARNING | MB_TOPMOST | MB_SETFOREGROUND,
+        )
+    };
+    r == IDYES
+}
+
+/* ------------------------------------------------------------------ */
+/* WebView2 运行时检查                                                  */
+/* ------------------------------------------------------------------ */
+
+/// WebView2 运行时的版本号；没装返回 `None`。
+///
+/// **为什么必须自己查**：整个界面（横条、面板、设置页）都是 WebView2 渲染的。
+/// 机器上没有这个运行时的时候，Tauri 连窗口都建不出来 —— 进程走 panic 路径
+/// 退出，用户看到的只是"双击了，什么都没发生"。日志里也只有一行
+/// `failed to create webview`，看不出是缺组件。
+/// Win11 自带、Win10 多数随 Edge 装好，但 **LTSC / 精简版 / 企业镜像**里
+/// 被移除是常见事，必须给用户一句人话 + 一个下载入口。
+///
+/// **三层证据，任何一层查到就算有。** 这个方向是刻意的：误判成"没装"会把一台
+/// 本来能用的机器挡在门外（用户还以为软件坏了），比漏判严重得多；所以只有
+/// 三层**全都**查不到时才认定缺失。
+///
+///   1. WebView2 自己的接口 `GetAvailableCoreWebView2BrowserVersionString`
+///      —— 程序真正要用的就是它认的那个运行时，也覆盖 fixed-version 与用户级安装；
+///   2. 注册表 EdgeUpdate 客户端 `{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}` 的 `pv`
+///      （系统级 WOW6432Node / 原生视图 + 用户级，各查一遍）；
+///   3. 磁盘上的 `msedgewebview2.exe`（三处标准安装目录，兜"注册表被清理过"）。
+pub fn webview2_version() -> Option<String> {
+    if let Some(v) = webview2_version_api() {
+        return Some(v);
+    }
+    if let Some(v) = webview2_version_registry() {
+        return Some(v);
+    }
+    if let Some(p) = webview2_exe_on_disk() {
+        return Some(format!("(磁盘上找到 {})", p.display()));
+    }
+    None
+}
+
+/// 第 1 层：问 WebView2 自己。`Ok` 且拿到非空版本串 = 可用。
+fn webview2_version_api() -> Option<String> {
+    use webview2_com::Microsoft::Web::WebView2::Win32::GetAvailableCoreWebView2BrowserVersionString;
+    use windows::core::PWSTR;
+    use windows::Win32::System::Com::CoTaskMemFree;
+
+    let mut p = PWSTR::null();
+    let rc = unsafe { GetAvailableCoreWebView2BrowserVersionString(PCWSTR::null(), &mut p) };
+    if rc.is_err() || p.is_null() {
+        return None;
+    }
+    let s = unsafe { p.to_string() }.unwrap_or_default();
+    // 这个串是接口用 CoTaskMemAlloc 分配的，必须还回去（只调一次，但别养成习惯）
+    unsafe { CoTaskMemFree(Some(p.0 as *const core::ffi::c_void)) };
+    let s = s.trim().to_string();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
+}
+
+/// 第 2 层：注册表里 EdgeUpdate 登记的 `pv`。
+fn webview2_version_registry() -> Option<String> {
+    const GUID: &str = "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}";
+    // 我们是 64 位进程，默认读 64 位视图 —— 但 WebView2 是 32 位安装器装的，
+    // 登记在 WOW6432Node 下（本机实测），所以两条都要看。
+    for sub in [
+        format!("SOFTWARE\\WOW6432Node\\Microsoft\\EdgeUpdate\\Clients\\{GUID}"),
+        format!("SOFTWARE\\Microsoft\\EdgeUpdate\\Clients\\{GUID}"),
+    ] {
+        for root in [HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER] {
+            if let Some(v) = reg_read_sz(root, &sub, "pv") {
+                return Some(v);
+            }
+        }
+    }
+    None
+}
+
+/// 第 3 层：磁盘上找 `msedgewebview2.exe`。
+fn webview2_exe_on_disk() -> Option<std::path::PathBuf> {
+    let mut roots: Vec<std::path::PathBuf> = Vec::new();
+    for k in ["ProgramFiles(x86)", "ProgramFiles", "LOCALAPPDATA"] {
+        if let Ok(v) = std::env::var(k) {
+            if !v.trim().is_empty() {
+                roots.push(std::path::PathBuf::from(v));
+            }
+        }
+    }
+    for r in roots {
+        let base = r.join("Microsoft").join("EdgeWebView").join("Application");
+        let Ok(rd) = std::fs::read_dir(&base) else {
+            continue;
+        };
+        for e in rd.flatten() {
+            let exe = e.path().join("msedgewebview2.exe");
+            if exe.is_file() {
+                return Some(exe);
+            }
+        }
+    }
+    None
+}
+
+/// 读一个 REG_SZ 值（空串 / 读不到都算 `None`）。
+fn reg_read_sz(root: HKEY, sub: &str, name: &str) -> Option<String> {
+    unsafe {
+        let subw = wide(sub);
+        let mut hkey = HKEY::default();
+        if RegOpenKeyExW(
+            root,
+            PCWSTR(subw.as_ptr()),
+            None,
+            KEY_QUERY_VALUE,
+            &mut hkey,
+        )
+        .0 != 0
+        {
+            return None;
+        }
+        let namew = wide(name);
+        let mut buf = [0u8; 1024];
+        let mut size = buf.len() as u32;
+        let rc = RegQueryValueExW(
+            hkey,
+            PCWSTR(namew.as_ptr()),
+            None,
+            None,
+            Some(buf.as_mut_ptr()),
+            Some(&mut size),
+        );
+        let _ = RegCloseKey(hkey);
+        if rc.0 != 0 || size < 2 {
+            return None;
+        }
+        let units = (size as usize / 2).min(buf.len() / 2);
+        let mut v: Vec<u16> = (0..units)
+            .map(|i| u16::from_le_bytes([buf[i * 2], buf[i * 2 + 1]]))
+            .collect();
+        while v.last() == Some(&0) {
+            v.pop();
+        }
+        let s = String::from_utf16_lossy(&v).trim().to_string();
+        if s.is_empty() {
+            None
+        } else {
+            Some(s)
+        }
+    }
+}
+
 /* ------------------------------------------------------------------ */
 /* 提权 / 单实例                                                       */
 /* ------------------------------------------------------------------ */

@@ -15117,6 +15117,68 @@ fn main() {
         std::process::exit(0);
     }
 
+    /* 3. WebView2 运行时检查（v1.5.15）。
+     *
+     * 整个界面都靠 WebView2 渲染，缺了它 Tauri 建不出窗口，进程直接走 panic
+     * 路径退出 —— 用户看到的只是"双击了，什么反应都没有"。Win10 起 Edge 会带
+     * 上它，但 LTSC / 精简版 / 企业镜像里没有是常事，所以这里必须先确诊，
+     * 再给一条明确的出路（去微软官方下载），而不是让用户猜。
+     *
+     * 位置有讲究：
+     *   · 在单实例检查**之后** —— 第二个实例本来就该安静退出，不该再弹一次框；
+     *   · 在提权**之前** —— 少弹一次 UAC，用户点完"去下载"就直接退出了。
+     *
+     * 逃生口：`--skip-webview2-check` / `QS_SKIP_WEBVIEW2_CHECK=1`。
+     * 检测是"三层查不到才认定缺失"（见 win::webview2_version），但万一哪台
+     * 机器的安装方式超乎预料被判成缺失，用户还有这条命令可以强行启动。
+     *
+     * 反向的自测开关：`--simulate-no-webview2` —— 在**装了**组件的机器上
+     * 假装没有，用来验证这个提示框本身（不然这条路径永远没人看得见）。
+     * 它只影响这一次的判定，不写配置、不改任何东西。 */
+    let force_no_webview2 = flag("--simulate-no-webview2") || env_on("QS_SIMULATE_NO_WEBVIEW2");
+    if !flag("--skip-webview2-check") && !env_on("QS_SKIP_WEBVIEW2_CHECK") {
+        let found = if force_no_webview2 {
+            None
+        } else {
+            win::webview2_version()
+        };
+        match found {
+            Some(v) => win::log(&format!("webview2: {v}")),
+            None => {
+                win::log_sync("webview2: 未检测到运行时，提示用户去官方下载后退出");
+                let en = config::load().ui_lang == "en";
+                let (title, text) = if en {
+                    (
+                        "Quick Search is missing a runtime component",
+                        "Microsoft Edge WebView2 Runtime is not installed on this PC.\n\n\
+                         Quick Search renders its whole interface with it, so it cannot start \
+                         without it. (This is not .NET — no .NET framework is needed.)\n\n\
+                         Click “Yes” to open the official Microsoft download page \
+                         (a ~2 MB installer), then start Quick Search again.\n\
+                         Click “No” to quit.",
+                    )
+                } else {
+                    (
+                        "Quick Search 缺少运行组件",
+                        "这台电脑上没有 Microsoft Edge WebView2 运行时。\n\n\
+                         Quick Search 的界面完全由它渲染，缺了它程序起不来。\n\
+                         （这不是 .NET，不需要安装任何 .NET 框架。）\n\n\
+                         点「是」打开微软官方下载页（约 2 MB 的安装包），\
+                         装好后重新打开本程序；点「否」退出。",
+                    )
+                };
+                if win::message_box_yes_no(title, text) {
+                    // 首选官方 Evergreen 引导器（点一下就开始下载）；
+                    // 万一 shell 打不开，退到 WebView2 的官方下载页面。
+                    if !win::shell_execute_raw("https://go.microsoft.com/fwlink/p/?LinkId=2124703") {
+                        win::shell_execute_raw("https://developer.microsoft.com/microsoft-edge/webview2/");
+                    }
+                }
+                std::process::exit(0);
+            }
+        }
+    }
+
     /* v1.4.0 的数据迁移已经在 `main` 最开头跑过了（`OnceLock`，只跑一次）——
      * 这里不再重复调用：那时还没做单实例检查，但迁移本身是幂等的，
      * 而且"早于任何一次 config::load()"这条比"等单实例检查"更重要
@@ -15160,7 +15222,13 @@ fn main() {
         );
     }
     let cfg0 = cfg_snapshot();
-    if cfg0.auto_start {
+    /* ⚠ 便携副本 / 测试副本专用逃生口：**别把开机自启改指向"这一份"**。
+     *
+     * 场景很具体：把 exe 复制到桌面或 U 盘试一下，配置是从正式版拷来的
+     * （`autoStart` 还是 true），一启动就会把 `HKCU\...\Run` 里的路径改成
+     * 这个副本 —— 正式版的开机自启就被悄悄顶掉了，用户下次开机看到的
+     * 是桌上那份测试版。带这个环境变量即可避免（测试副本的启动脚本里就有）。 */
+    if cfg0.auto_start && !env_on("QS_SKIP_AUTOSTART") {
         win::set_autostart(true);
     }
 
@@ -15876,6 +15944,27 @@ mod tests {
         // 纯空白同样拒（不然"输个空格"就绕过去了）
         assert!(apply_one_setting(&mut c, "startupPassword", Value::from("   ")).is_err());
         assert!(startup_password_verify("old-one", &c.startup_password_hash));
+    }
+
+    /// WebView2 检测：**不能 panic**，能查到就应该是像 `155.0.4283.62` 的版本串。
+    ///
+    /// 这条测的不是"本机装了没"（没装的机器上跑测试也该过），而是这条链路
+    /// —— COM 接口 + 注册表 + 磁盘三层 —— 在缺组件 / 缺权限时会不会炸。
+    /// 它跑在启动路径上，一旦 panic 就是"所有用户都起不来"，所以值得钉一下。
+    #[test]
+    fn webview2_检测不崩且版本串正常() {
+        // 本机实测：Some("155.0.4283.62")（与注册表 pv 一致）。
+        // 但这里**不断言一定有** —— 在没装 WebView2 的机器上跑测试也必须过得去。
+        match crate::win::webview2_version() {
+            Some(v) => {
+                // 第 3 层的兜底结果形如「(磁盘上找到 …)」，其余都是点分版本号
+                assert!(
+                    v.chars().next().is_some_and(|c| c.is_ascii_digit()) || v.starts_with('('),
+                    "版本串不像版本号: {v}"
+                );
+            }
+            None => { /* 真没装的机器：允许，但要求它安静地返回 None */ }
+        }
     }
 
     /// 拿一个内置引擎名（一定存在于 engines.json 里）

@@ -6911,6 +6911,15 @@ function webviewLabel() {
  *  发新版时**同时**加一条，对不上就是漏了。 */
 const CHANGELOG = [
     {
+        ver: 'v1.5.15',
+        en: 'If the Microsoft Edge WebView2 runtime is missing, the app now says so in plain words and offers a one-click trip to the official Microsoft download page, instead of doing nothing at all when you double-click it.',
+        items: [
+            '<b>缺运行组件时不再"双击没反应"</b> —— 整个界面是靠 Windows 的 <b>Microsoft Edge WebView2</b> 渲染的。Win11 自带、Win10 多数跟着 Edge 装好了，但 LTSC、精简版系统里被移除是常事。以前那种机器上双击图标，<b>进程起来又立刻退出，一个提示都没有</b>；现在会弹一个明确的说明框，点「是」直接打开<b>微软官方下载页</b>，装完再打开就能用。',
+            '<small>顺便说清一件事：本程序<b>不是 .NET 程序</b>，不需要装 .NET Framework 或 .NET 运行时 —— 它由 Rust 编写，只依赖系统自带的组件。所以看到"缺少组件"时，装的是上面那个 WebView2，不是 .NET。</small>',
+            '<small>检测刻意做得"宽松"：<b>三处证据</b>（WebView2 自己的接口、注册表登记、磁盘上的 msedgewebview2.exe）<b>任何一处查到就当作已安装</b>。宁可漏判也不误判 —— 把一台本来能用的电脑挡在门外，比漏掉一次提示糟得多。万一真遇到误判，用 <code>QuickSearch.exe --skip-webview2-check</code> 可以强行启动。</small>',
+        ],
+    },
+    {
         ver: 'v1.5.14',
         en: 'Startup password: setting one now asks for it twice and refuses to save when the two entries differ, turning it off requires re-entering the current password, and the unlock window finally closes the moment the password is accepted — plus a Quit button for when you would rather not unlock.',
         items: [

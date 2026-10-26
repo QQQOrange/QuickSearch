@@ -19,9 +19,9 @@
 | 远端配置 | ✅ `origin` = `https://github.com/QQQOrange/QuickSearch.git` |
 | GitHub 凭据 | ✅ 凭据管理器里有（`git credential fill` 能拿到，2026-10-25 验证 200） |
 | 网络 | ⚠️ **间歇性**：`github.com:443` 时通时不通；`api.github.com` 一直可用 |
-| 发布 | ✅ 最新 Release **v1.5.14**（2026-10-27），资产 `QuickSearch.exe` 13,645,312 字节，`releases/latest` 已指向 |
-| 代码 | ✅ `main` 已推到 **`d716af0`**（2026-10-27，tag `v1.5.14` 即指向它；走 Git Data API） |
-| 待发布 | 无 —— v1.5.13 与 v1.5.14 **合并成一个 Release 发的**（v1.5.13 只推过代码），发布说明是累积的 |
+| 发布 | ✅ 最新 Release **v1.5.15**（2026-10-27），资产 `QuickSearch.exe` 13,657,088 字节，`releases/latest` 已指向 |
+| 代码 | ✅ `main` 已推（2026-10-27），tag `v1.5.15` 指向本次发版提交；v1.5.13 / v1.5.14 / v1.5.15 都是走 Git Data API 推的 |
+| 待发布 | 无 |
 
 ### ⚠ 两条必须记住的环境事实（2026-10-25 实测）
 
