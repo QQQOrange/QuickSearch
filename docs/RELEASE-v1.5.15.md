@@ -4,30 +4,7 @@
 
 ---
 
-## 先澄清一件容易被误会的事：这不是 .NET 程序
-
-有人问过"是不是基于 .NET 10 做的"。**不是，也从来不是。**
-
-把 exe 的 PE 导入表拆开看，30 个依赖 DLL 全部是 Windows 系统组件：
-
-```text
-KERNEL32 / USER32 / ole32 / combase / shell32 / dwmapi / gdi32 / bcrypt
-crypt32 / shlwapi / api-ms-win-core-* / api-ms-win-crt-*（7 个）
-```
-
-`mscoree.dll`（.NET 运行时宿主）、`clr.dll`、`VCRUNTIME140.dll` 的出现次数**都是 0**。
-项目是 Rust + Tauri 2，界面是 WebView2 里的 HTML/JS —— 所以：
-
-- **不需要**装 .NET Framework，也**不需要** .NET 6/8/10 运行时；
-- **不需要**装 VC++ 运行库（通用 C 运行时从 Windows 10 起就是系统自带）；
-- 唯一必须的运行时是 **Microsoft Edge WebView2**。
-
-假如真按"改成 .NET 10"来做，等于把 43,797 行 Rust + 28,677 行前端整体重写，
-换来的却是"用户必须先装一个 60MB 的运行时"—— 比现在更重，没有任何收益。
-
----
-
-## 真正要解决的问题：缺 WebView2 时，程序一声不响地消失
+## 要解决的问题：缺 WebView2 时，程序一声不响地消失
 
 Win11 自带 WebView2；Win10 上它通常跟着 Edge 一起装好了。但在
 **LTSC、精简版、部分企业镜像**里，它是被移除的 —— 这时候双击图标：
@@ -101,7 +78,7 @@ QuickSearch.exe --simulate-no-webview2     # 反方向：假装没装，用来�
 
 ## 更新包校验
 
-SHA256: 3FF5909C1FC2EFF548228819DE8C7849E95D575876ABD3CFE762968F330534F9
+SHA256: D6047F87EF5755DD60536320DCFF7F78D589897514BAC3E1AE8A19AEB6DBF5C5
 
 | 文件 | 大小 | 校验值 |
 |---|---|---|

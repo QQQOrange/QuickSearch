@@ -15152,7 +15152,7 @@ fn main() {
                         "Quick Search is missing a runtime component",
                         "Microsoft Edge WebView2 Runtime is not installed on this PC.\n\n\
                          Quick Search renders its whole interface with it, so it cannot start \
-                         without it. (This is not .NET — no .NET framework is needed.)\n\n\
+                         without it.\n\n\
                          Click “Yes” to open the official Microsoft download page \
                          (a ~2 MB installer), then start Quick Search again.\n\
                          Click “No” to quit.",
@@ -15161,8 +15161,7 @@ fn main() {
                     (
                         "Quick Search 缺少运行组件",
                         "这台电脑上没有 Microsoft Edge WebView2 运行时。\n\n\
-                         Quick Search 的界面完全由它渲染，缺了它程序起不来。\n\
-                         （这不是 .NET，不需要安装任何 .NET 框架。）\n\n\
+                         Quick Search 的界面完全由它渲染，缺了它程序起不来。\n\n\
                          点「是」打开微软官方下载页（约 2 MB 的安装包），\
                          装好后重新打开本程序；点「否」退出。",
                     )
