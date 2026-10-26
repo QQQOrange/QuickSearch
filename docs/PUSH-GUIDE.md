@@ -167,6 +167,24 @@ POST /git/tags + /git/refs            → annotated tag
 - tag 用 annotated（`POST /git/tags` + `POST /git/refs`），别指望
   `POST /releases` 顺手建 —— 那种是轻量 tag，且指向默认分支当时的位置。
 
+> ⚠ **重打 tag 会把它的 Release 降级成草稿**（2026-10-27 实测）。
+>
+> 想让 tag 指向新提交、于是 `DELETE /git/refs/tags/vX.Y.Z` 再重建，
+> 结果 `GET /releases/tags/vX.Y.Z` 直接 404，`releases/latest` 退回上一个版本 ——
+> 因为 GitHub 把那个 Release 标成了 `draft: true`（tag 没了，release 就悬空）。
+>
+> 正确顺序：**先按 release id 操作，最后再 PATCH 回来**
+>
+> ```text
+> GET    /releases?per_page=3          → 拿到 id（tag 查询此时已 404）
+> 重建 tag（POST /git/tags + /git/refs）
+> DELETE /releases/{id}/assets/{aid}   → 换资产
+> POST   uploads.github.com/.../assets?name=QuickSearch.exe
+> PATCH  /releases/{id}  {tag_name, body, draft:false, prerelease:false}
+> ```
+>
+> 换资产前先看 `download_count`：**0 次下载才替换**，有人下过就只能发新版本。
+
 
 ---
 
