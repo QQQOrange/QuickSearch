@@ -1148,6 +1148,52 @@ pub ocr_accurate: bool,
     /// "最近"的意义（用户要的是"刚才那几颗在哪"，不是"所有引擎按时间排"）。
     #[serde(default = "default_recent_max")]
     pub recent_max: usize,
+
+    /* ---------------- v1.5.13：界面语言 ---------------- */
+    /// 界面语言：`"zh"`（简体中文，默认）/ `"en"`（English）。
+    ///
+    /// 用户 2026-10-26 的要求：设置里提供简体中文与英文两种，切换后界面文案
+    /// 完整替换并**持久化生效**。所以它是一个普通的配置项 —— 跟着备份走，
+    /// 换机器恢复之后语言也还在。
+    ///
+    /// ⚠ 只有这两个值。读进来先过 [`normalize_ui_lang`]，脏值一律落回 `zh`
+    ///   （界面找不到字典时退回中文，绝不能变成"满屏英文 key"）。
+    #[serde(default = "default_ui_lang")]
+    pub ui_lang: String,
+
+    /* ---------------- v1.5.13：启动密码 ---------------- */
+    /// 启动密码的 **Argon2id 哈希**（PHC 字符串，形如
+    /// `$argon2id$v=19$m=19456,t=2,p=1$<salt>$<hash>`）。空串 = **没启用**。
+    ///
+    /// # 为什么存哈希，并且和备份密码**完全分开**
+    ///
+    /// 用户明确要求：「启动密码为独立密码，与备份密码互不相同、互不影响」。
+    /// 所以它是**另一个字段、另一套校验**，改一个绝不碰另一个：
+    ///   · 备份密码（`backup_password`）必须原文留着 —— 它要拿去派生加密密钥；
+    ///   · 启动密码只需要"对不对"，没有任何理由留原文，所以只存 Argon2id 哈希。
+    ///
+    /// 即使 config.json 被整个拿走，哈希也不能反推出密码；而 config.json 本身
+    /// 还是 DPAPI + 机器绑定的信封（见 crypto.rs），两层是独立的。
+    #[serde(default)]
+    pub startup_password_hash: String,
+}
+
+/// 默认界面语言：简体中文。
+fn default_ui_lang() -> String {
+    "zh".to_string()
+}
+
+/// 界面语言归一化：只认 `"zh"` / `"en"`，别的一律当 `"zh"`。
+///
+/// 兼容几种常见写法（`zh-CN`、`en-US`、`ZH`、`English`），因为它们很容易
+/// 从系统语言 / 手改配置里混进来。
+pub fn normalize_ui_lang(raw: &str) -> String {
+    let s = raw.trim().to_ascii_lowercase();
+    if s.starts_with("en") || s == "english" {
+        "en".to_string()
+    } else {
+        "zh".to_string()
+    }
 }
 
 /// `recent_max` 的默认值：10 个。设置页给 5/10/15/20 四档。
@@ -1257,6 +1303,8 @@ impl Default for Config {
             img_ai_auto_off_on_multi: true,
             recent_engines: Vec::new(),
             recent_max: default_recent_max(),
+            ui_lang: default_ui_lang(),
+            startup_password_hash: String::new(),
         }
     }
 }
@@ -2220,6 +2268,13 @@ pub fn find_fav_item<'a>(groups: &'a [FavGroup], id: &str) -> Option<&'a FavItem
 }
 
 pub(crate) fn sanitize(mut c: Config) -> Config {
+    // 界面语言：只认 zh / en（见 normalize_ui_lang）。脏值落回中文而不是报错 ——
+    // 语言只是一个显示偏好，不该让整个配置读不进来。
+    let lang = normalize_ui_lang(&c.ui_lang);
+    if c.ui_lang != lang {
+        crate::win::log(&format!("config: 界面语言 {:?} 不认识，归一为 zh", c.ui_lang));
+        c.ui_lang = lang;
+    }
     let want = crate::ocr::normalize_lang(&c.ocr_lang);
     if c.ocr_lang != want {
         crate::win::log(&format!(

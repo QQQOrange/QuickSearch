@@ -1,0 +1,419 @@
+<h2>Help <small>From “how do I call it up” to “where does my data live”, in one go</small></h2>
+<div class="hint">
+    The items below follow the order you'll actually <b>use</b> them in: the first three are enough to get
+    going, the rest are reference details. Every block folds away when you click its title — collapse them
+    all and treat this page as a table of contents.
+</div>
+<div class="help-list">
+
+    <details class="help-item" open>
+        <summary>① How to call it up</summary>
+        <div class="help-body">
+            <p>Two ways, both of them working in <b>any app</b>:</p>
+            <ul>
+                <li><b>Drag-select some text with the mouse</b> and let go — the bar pops up right where the
+                    selection is (this is the main path). Apps differ wildly in how quickly they commit a
+                    selection, so internally it waits a moment for the selection to land and retries the copy
+                    twice if it fails; that keeps fast swipes and large document windows reliable;</li>
+                <li>Select text with the keyboard and press <b>Ctrl+C</b> — the bar appears just the same (the
+                    go-to whenever the mouse is awkward).</li>
+            </ul>
+            <p>How long it waits after you let go is set by “<b>General → Trigger → Show delay</b>”; 100–200 ms
+               avoids the “it pops up while I'm still dragging” feeling.</p>
+            <p>If it gets in the way in some apps (games, remote desktop, an editor while you take notes),
+               add them to the blocklist under “<b>General → Scope</b>”; if you only want it in a handful of
+               apps, switch that to allowlist mode instead.</p>
+        </div>
+    </details>
+
+    <details class="help-item">
+        <summary>② The bar: what it looks like, and why it is that color</summary>
+        <div class="help-body">
+            <p>The bar is a row of <b>icon tiles</b>, and left to right is the engine order you arranged.
+               Clicking a tile = searching / jumping to that engine with the text you currently have selected.</p>
+            <ul>
+                <li><b>Color</b>: the backdrop follows “<b>Appearance theme</b>” — “Follow system” tracks
+                    Windows light / dark mode, and you can also pin it to light or dark;</li>
+                <li><b>Style (pick one)</b>: switch under “<b>General → Bar style</b>”; the page only shows the
+                    options belonging to the current style — <b>Default</b> = a solid plate; <b>Frosted</b> =
+                    blurs the screen behind the bar; <b>Liquid glass</b> = grabs a patch of the desktop behind
+                    it as a texture and does real refraction / chromatic aberration / rim light, and with video
+                    playing behind you can turn on “live refraction” so it follows along. Liquid glass needs
+                    WebGL2; on a GPU that can't do it the bar drops back to frosted automatically, nothing to
+                    manage by hand;</li>
+                <li><b>Glass preset</b>: once liquid glass is selected, two one-click presets (“Light” /
+                    “Standard”) appear at the top; touch any slider below and it becomes “Custom” — a preset is
+                    just a shortcut and never fights your manual tuning;</li>
+                <li><b>Position</b>: by default it pops up hugging the selected text (flipping above when there
+                    is no room below); turn on “<b>Anchor the bar to the pointer</b>” and it always follows the
+                    mouse.</li>
+                <li><b>Size</b>: icon size, padding, opacity and frost strength are all adjustable — change them
+                    under “<b>General → Preview</b>” and the real thing updates immediately.</li>
+                <li>Move the pointer to a tile's edge, or hold Space and drag, to move the bar; press <b>Esc</b>
+                    to put it away.</li>
+            </ul>
+        </div>
+    </details>
+
+    <details class="help-item">
+        <summary>③ Engines: what ships by default, and how to make it yours</summary>
+        <div class="help-body">
+            <p>Over seven hundred common sites are built in, all under “<b>Engines → All engines</b>” — one
+               click adds one to the bar. The order on the bar is the order of the search row; drag to reorder
+               on the “Engines” page.</p>
+            <ul>
+                <li><b>Three groups</b>: engines are split into <b>Web engines</b> (search engines / direct
+                    URLs), <b>App engines</b> (app search / app launch) and <b>Hotkey engines</b>; the bar's
+                    “More engines” panel uses the same structure, so clicking down through it never gets lost
+                    even with 700+ entries;</li>
+                <li><b>App launch = start the local app first</b>: entries in the “Common apps” category
+                    (WeChat / QQ / DingTalk / Feishu / WeCom / Tencent Meeting / Zoom / Teams / Epic Games
+                    Store …) <b>launch whichever of those is installed on your machine</b> when clicked, and
+                    protocols that carry a page even open that page inside the app (DingTalk, for instance,
+                    opens its official site inside the client). It tries the app's own protocol first, then the
+                    shortcut in the Start menu, and only falls back to opening the web page when neither is
+                    installed — machines that have been around a while behave exactly as before;</li>
+                <li><b>Search right inside the panel</b>: type in the search box of the “More engines” panel and
+                    each of the five sub-categories lists its hits; typing at any level searches the whole
+                    table (press <code>win+shift+s</code> to look up hotkey engines by their key);</li>
+                <li><b>Add an engine (three ways)</b>: on “<b>Engines → Add engine</b>” click “+ Add engine”,
+                    then pick <b>Web engine</b> (an address containing <code>%s</code> searches, one without it
+                    opens directly), <b>App engine</b> (an address that launches a local / third-party app), or
+                    <b>Hotkey engine</b> (sends a key combo to the foreground app) — the form starts collapsed
+                    and only opens once you've picked a type;</li>
+                <li><b>Separator</b>: for grouping icons; add as many as you like — leading, trailing and
+                    consecutive duplicates are cleaned up automatically;</li>
+                <li><b>Change icon</b>: right-click that row on the bar → Change icon, then pick a PNG from your
+                    computer; the image stays on this machine only (moving computers means moving your backup
+                    with it);</li>
+                <li><b>Custom engine</b>: for an intranet search or some niche site, paste an address containing
+                    <code>%s</code> and it's in; pick the “AI tools” category and the prompt suffix is filled in
+                    for you;</li>
+                <li><b>Hotkey engine keys</b>: how combos are recorded and which keys are refused — see
+                    <b>⑦ Hotkeys at a glance</b>; how to change the prompt suffix of an AI engine — see
+                    <b>④ AI tools</b>.</li>
+                <li><b>Hotkey engines can “bind an app”</b> (the light panel when adding / editing a hotkey
+                    engine): tick “Make sure this app is running”, click “Choose…” and pick a program
+                    (.exe / shortcut); from then on, clicking that tile <b>first checks whether that program is
+                    running</b> — if it is, the combo goes straight to it; if not, it launches it, waits for the
+                    window and then sends the keys. You can also tick “Open as administrator” (it only affects
+                    <b>the launch we perform</b>, and raises a UAC prompt; if the program is already running its
+                    privileges are left alone). <b>Leaving this switch off is the old behavior</b>: send the
+                    keys to whatever is in the foreground, running or not;</li>
+                <li><b>Search URLs are editable</b>: if an official page changes its parameters one day, you
+                    don't have to wait for a new release — edit the one line yourself.</li>
+                <li><b>The “Recently used” row</b>: the very top of the bar's “More engines” panel (above all
+                    categories) gains this row, listing the engines you just used in <b>most-recent order</b> —
+                    the usual few without digging through categories. <b>How many fit in the row</b> is chosen
+                    on “Engines → More engines panel”: 5 / 10 / 15 / 20. On a fresh install where nothing has
+                    been used yet the row takes no space (better hidden than empty); <b>engines already pinned
+                    to the bar never show up here</b> — they are in plain sight already, and copying them would
+                    only squeeze out the ones that genuinely need fishing back. Engines that no longer exist in
+                    the list are <b>skipped</b> (no dead tile that does nothing when clicked), but your usage
+                    history itself is never deleted — if that engine ever comes back, it's still there.</li>
+            </ul>
+        </div>
+    </details>
+
+    <details class="help-item">
+        <summary>④ AI tools: pick one, click once, the question is already complete</summary>
+        <div class="help-body">
+            <p>Hand an AI a bare paragraph and it tends to ask “what would you like me to do with this?”.
+               On “<b>AI tools</b>” give each AI a suffix (for example “What does this sentence mean?”);
+               clicking its icon appends that suffix to the selected text before sending it along.</p>
+            <ul>
+                <li>An AI without a suffix of its own uses the “<b>Default suffix</b>” above;</li>
+                <li>Some AI sites ignore URL parameters? Turn on “<b>Also copy the prompt to the clipboard</b>”,
+                    switch over, click the input box and press Ctrl+V to fill it in;</li>
+                <li>Select the sentence I'm typing right now → click the DeepSeek icon → a complete prompt in a
+                    new tab.</li>
+            </ul>
+        </div>
+    </details>
+
+    <details class="help-item">
+        <summary>⑤ Text recognition (OCR): lift text off the screen as copyable text</summary>
+        <div class="help-body">
+            <p>Press <b>Ctrl+Alt+O</b> (or the OCR tile on the bar) → the screen dims, drag a box around an
+               area → release and it's recognized. The result window shows the image on top and the text below;
+               when the text contains a link an “Open link” appears. To switch engines, click one in the engine
+               list on the “Text recognition” page (that one becomes the default engine).</p>
+            <p>Dragging a box around an <b>image</b> rather than around text you want to read? That's a
+               different feature — see <b>⑤b Image search</b>.</p>
+            <ul>
+                <li><b>Windows built-in</b> (default): uses the OCR that ships with the system — offline, free,
+                    fastest, and it needs no account. <b>Environment checks are manual</b> — to find out whether
+                    this machine can use it, click “Check local OCR environment” on the “Text recognition” page;
+                    if you never click, nothing is checked and no verdict is volunteered;</li>
+                <li><b>A dozen-plus online engines</b>, and clicking one in the list makes it the default: the
+                    chosen one expands (credentials / test connection / model picker all live inside that
+                    block), the rest fold down to a single name each; the bar button / hotkey / selection
+                    fallback all follow the default engine — there is no such thing as “added but never used”.
+                    Two families:
+                    <br>· <b>LLM-based</b> (SiliconFlow, Kimi, Zhipu, Alibaba Cloud Bailian, Volcano Ark, OpenAI,
+                    Gemini, OpenRouter, custom): OpenAI-compatible APIs — fill in the Key, click
+                    <b>“Fetch models”</b> and pick a model (vision-capable ones first, and you can type a name by
+                    hand);
+                    <br>· <b>Dedicated APIs</b> (Baidu Cloud, Tencent Cloud, Youdao, OCR.space, Mistral OCR):
+                    fill in Key / Secret / endpoint as prompted;</li>
+                <li><b>Test connection</b>: click it once the credentials are filled in and it really sends a
+                    request. Connected, invalid key, no balance, misspelled model name — these are told apart,
+                    and the error carries the other side's <b>actual words</b> instead of just a 403;</li>
+                <li><b>One-click diagnose</b> (<b>every provider has it</b>): measures the time of each step /
+                    sends one real request and lays the other side's <b>actual words</b> next to a
+                    plain-language suggestion; what each step's button does next is up to you, and it
+                    <b>never</b> changes your configuration on its own;</li>
+                <li><b>Pin the result window to the default engine</b> (on by default): when recognizing on
+                    several engines at once, the result window <b>always stays on the default engine's tab</b> —
+                    showing its waiting text until it returns, then filling in right there, and it <b>never</b>
+                    jumps to whichever one answered first; click the pill at the bottom to look at another.
+                    Turning the switch off is “whoever produces text first gets shown”;</li>
+                <li><b>Recognize several at once (multi-select)</b>: inside the expanded default engine, tick the
+                    others you want to run too; one recognition then runs them <b>simultaneously</b> on the same
+                    image, each with its own section and its own label; the “Show” segment control at the bottom
+                    shows one or all (switching does not re-recognize). <b>Anything unticked takes no part</b>
+                    and never shows up in the result window — local recognition included.</li>
+            </ul>
+        </div>
+    </details>
+
+    <details class="help-item">
+        <summary>⑤b Image search: box an area of the screen and let a search engine look at it</summary>
+        <div class="help-body">
+            <p>It is “one image, two readings” alongside OCR: OCR reads the text on it, image search takes it
+               <b>as an image</b> and searches with it. Click the 🖼 on the bar (or use the hotkey if you set
+               one) → the screen dims, drag a box around an area → on release the browser opens as configured.</p>
+            <ul>
+                <li><b>Twelve engines, one row each</b>: on the “Image search” page every engine gets a row of
+                    its own — the checkbox at the start means it takes part, and the three small buttons at the
+                    end (default / change icon / question mark) only affect that row. No more “a dozen crammed
+                    into one pill”;</li>
+                <li><b>Default engine</b>: click <b>“Set as default”</b> at the end of a row and it becomes the
+                    one (it then reads “Current default” and won't fire a second time). With a default set, a
+                    box selection goes <b>straight</b> to the browser without asking which engine to use; with
+                    none set, everything ticked opens;</li>
+                <li><b>Every engine's icon can be changed on its own</b>: the <b>“Change icon”</b> at the end of
+                    a row picks a PNG from your computer and affects only that engine (untouched ones keep the
+                    default icon);</li>
+                <li><b>The question mark ❓ at the end of a row</b>: opens that engine's <b>official page /
+                    how-to</b> directly. All twelve have their own address, each on its own row;</li>
+                <li><b>Multi-select search</b>: tick several and one box selection <b>opens a new tab for each
+                    engine's results</b> (15 at most; beyond that only the first 15 open);</li>
+                <li><b>Three modes, and the small print on each row tells you which one it is</b>:
+                    <br>· <b>Real upload</b> (Yandex / Baidu / SauceNAO / trace.moe): the app POSTs the image
+                    itself, gets the <b>result page URL</b> and then opens the browser — your box selection lands
+                    on the results, nothing left to do. The defaults are the two that passed hands-on testing in
+                    this mode (Yandex + SauceNAO);
+                    <br>· <b>Open the page</b> (Doubao / Tongyi / Kimi / Zhipu / Yuanbao / Ernie): opens that
+                    engine's page with the screenshot placed on the clipboard; these six also send <b>Ctrl+V</b>
+                    for you (since r66 a further Enter follows, so the image goes out and it answers directly);
+                    <br>· <b>By image URL</b> (the URL variant of Yandex / trace.moe): only accepts <b>a public
+                    image link you fill in yourself</b>. The app <b>deliberately does not</b> upload your
+                    screenshot to some third-party image host and then search by that URL — that would amount to
+                    silently agreeing to “hand my screenshot to an image host” on top of agreeing to “search
+                    this image”.</li>
+                <li><b>Use trace.moe for anime screenshots</b>: that row returns data rather than a web page, so
+                    the app renders it into a <b>local result page</b> and opens that — title (Chinese
+                    included), episode, timestamp, similarity and a preview video are all on it. The page lives
+                    in a temp directory and expires once closed;</li>
+                <li><b>Which ones ask you to “pick a file”</b> (the six AI engines): browsers <b>do not
+                    allow</b> pasting into a file input, so a clipboard alone gets you nowhere. These engines
+                    therefore leave a <b>temp image</b> for you; click “Choose file” on the page and pick it (the
+                    AI input boxes also accept dropping the image straight in). That temp image is
+                    <b>overwritten every round and deleted on exit</b>, so at most one exists on disk at any
+                    moment;</li>
+                <li><b>A real upload can still fail</b>: Baidu image search has tightened its anti-bot measures,
+                    so an upload may be refused — when that happens the app falls back to opening its upload
+                    page, and you click “Upload from computer” and pick that temp image; the flow never
+                    dead-ends;</li>
+                <li><b>Whether it appears on the bar</b>: the “Add to selection bar” switch on the “Image
+                    search” page controls that 🖼. Turn it off and image search still works, it just has to be
+                    started from the settings page;</li>
+                <li>The 🖼 only shows on the bar when the feature itself is on <b>and</b> “Add to selection bar”
+                    is on, following the configuration just like the OCR tile.</li>
+                <li><b>The screenshot is gone once used</b>: the image you boxed never enters long-term storage
+                    on disk — it lives in memory and passes through the clipboard. <b>The clipboard copy is
+                    restored immediately</b> to what you had copied before (your clipboard is not replaced by an
+                    image, and no “still there after a restart” trace is left behind). The only thing that
+                    touches disk is the <b>temp image</b> mentioned above, <b>overwritten every round and
+                    deleted on exit</b>, at most one at any moment. The OCR path never touches the clipboard and
+                    leaves no file at all.</li>
+                <li>Selecting a <b>local file path</b> gives you a 📁 on the bar rather than a 🖼 — that's a
+                    different feature, see <b>⑤c File paths</b>.</li>
+            </ul>
+        </div>
+    </details>
+
+    <details class="help-item">
+        <summary>⑤c File paths: select a path and jump straight to it</summary>
+        <div class="help-body">
+            <p>When a local path turns up in a chat, in an error message or in a document, select it — the bar
+               gains an extra 📁 icon, and one click opens that location in File Explorer.</p>
+            <ul>
+                <li><b>These shapes are recognized</b>: drive-letter paths
+                    (<code>C:\Users\me\a.txt</code>), network shares (<code>\\server\share</code>), relative /
+                    absolute paths with forward or back slashes (<code>D:/资料/合同</code>), paths containing
+                    environment variables (<code>%APPDATA%\QuickSearch</code>), and file URLs copied out of a
+                    browser's address bar (<code>file:///C:/Users/me/a.txt</code>);</li>
+                <li><b>Selecting too much is fine</b>: if your selection drags in a leading quote or a trailing
+                    comma (<code>"C:\a\b.docx"，</code> and the like) it still opens — those marks are stripped
+                    off automatically. Windows file names can't end with a dot or a space anyway, so stripping
+                    them only makes it more accurate;</li>
+                <li><b>If it's a file, it gets selected</b>: Explorer <b>highlights</b> that file instead of
+                    merely opening the folder it lives in;</li>
+                <li><b>Failures are reported</b>: a path that doesn't exist, or a drive that isn't plugged in, is
+                    stated plainly on the bar — never a silent no-op;</li>
+                <li><b>Unrecognized is never guessed</b>: a bare <code>bin\tool.exe</code> (no drive letter /
+                    UNC / prefix) produces no icon — a wrong guess costs an extra tile on the bar plus an error
+                    when you click it, which is far more annoying than “not recognized”;</li>
+                <li>URLs (starting with <code>https://</code>, or with <code>//</code>) are not paths and will
+                    not fight with “Open link”.</li>
+                <li>Conversely, selecting a <b>URL</b> gives you the open-in-browser tile (the bar has that built
+                    in); selecting an <b>image</b> because you want to search for it is a different matter — see
+                    <b>⑤b Image search</b>.</li>
+            </ul>
+        </div>
+    </details>
+
+    <details class="help-item">
+        <summary>⑥ Favorites: the text / images you use all day, one click to copy</summary>
+        <div class="help-body">
+            <p>The “<b>Favorites</b>” page allows up to two levels of folders. <b>Add a top-level folder</b> →
+               give it a name → drop in a sentence, an address or an image you use often.</p>
+            <ul>
+                <li><b>Put it on the bar</b>: give the folder an icon and clicking it on the bar lists what's
+                    inside, one click copying one entry;</li>
+                <li><b>Where a click goes</b>: if the app under the pointer happens to have an input box, the text
+                    is typed straight into it; only when there is no usable input box does it fall back to
+                    “copy to clipboard”;</li>
+                <li><b>Dragging</b>: hold the ⋮⋮ handle on the left of a folder to drag it (reorder / nest one
+                    level / move back up), and press-and-hold for half a second on a content row to drag it
+                    (reorder within this folder / move it to another);</li>
+                <li><b>Hotkey</b>: assign a combo to “Open favorites” on this page; clicking “Clear” means no
+                    hotkey at all;</li>
+                <li>Folder names are <b>locked</b> by default; click “Rename” to change one. “Expand all /
+                    Collapse all” only touch the folder levels and never spread the entries into edit mode.</li>
+            </ul>
+        </div>
+    </details>
+
+    <details class="help-item">
+        <summary>⑦ Hotkeys at a glance (all changeable, all removable)</summary>
+        <div class="help-body">
+            <ul>
+                <li><b>Ctrl+C</b> — summon the bar (can be turned off under “General → Trigger”). Popping up as
+                    you copy a selection is its best entry point;</li>
+                <li><b>Ctrl+Alt+O</b> — start a box selection for <b>text recognition</b> (the whole feature can
+                    be turned off on the “Text recognition” page);</li>
+                <li><b>Open favorites key</b> — record your own; “Clear” = no hotkey at all;</li>
+                <li><b>Esc</b> — dismiss the bar / leave hotkey recording.</li>
+            </ul>
+            <p>To record a hotkey, click the button and press the combo you want (it has to include Ctrl / Alt /
+               Shift). Changed your mind halfway? Press Esc, or click somewhere else.</p>
+            <p><b>Image search</b> has no hotkey for now; enter it from the 🖼 on the bar (see ⑤b).
+               When a local file path shows up on screen, select it and the bar gains a 📁;
+               click it to jump to that path (see ⑤c).</p>
+        </div>
+    </details>
+
+    <details class="help-item">
+        <summary>⑧ Backup and restore: land locally first, then go to the cloud</summary>
+        <div class="help-body">
+            <p>One “<b>Back up now</b>” = write a copy into the <b>local backup folder</b>, then upload
+               <b>that same file</b> to the cloud — the local file and the cloud file share <b>the same name and
+               the same content</b> (<code>config(full timestamp).QuickSearch</code>), so the cloud accumulates
+               one per backup and you restore whichever one you want. <b>File names are not your problem</b>:
+               whatever it's called locally is what it's called in the cloud.</p>
+            <ul>
+                <li><b>WebDAV</b>: Nutstore / Nextcloud / Synology all work. Enter only the root address; the app
+                    appends the folder itself and creates it as needed. On Nutstore use an “app password” rather
+                    than your login password;</li>
+                <li><b>Encryption</b>: once a backup password is set, every backup (cloud upload and local
+                    export alike) is AES-256-GCM + Argon2id encrypted and no plaintext is visible inside the
+                    file. <b>Lose the password and it cannot be opened</b>;</li>
+                <li><b>Automatic</b>: you can turn on “Sync on startup” (compare the newest cloud copy with this
+                    machine and take the newer) and “Sync on exit” (push one copy before quitting). Both only
+                    upload when <b>the configuration actually changed</b> — otherwise every launch would add a
+                    cloud file even with not a single character edited;</li>
+                <li><b>Restore</b>: “Restore from cloud” lists every cloud backup; pick one. A snapshot is taken
+                    locally first, so a wrong restore can still be undone;</li>
+                <li><b>Cleanup</b>: “Keep the latest 10 only” clears <b>local and cloud together</b>, keeping the
+                    newest 10; to delete selectively, click “<b>Manage</b>” at the top right of the cloud list and
+                    every backup becomes checkable — tick them and click “Delete selected”;</li>
+                <li><b>What a backup holds</b>: every setting and appearance option, the engines on the bar and
+                    their order, custom icons, the whole favorites tree, OCR keys, WebDAV credentials and
+                    hotkeys — restoring on another computer restores all of it.</li>
+            </ul>
+        </div>
+    </details>
+
+    <details class="help-item">
+        <summary>⑧b Plain-text import / export: hand over only the parts you pick</summary>
+        <div class="help-body">
+            <p>This is a different thing from ⑧ <b>Backup</b>; don't mix the two up:</p>
+            <ul>
+                <li><b>Backup</b> (<code>.QuickSearch</code>) = <b>the whole configuration</b>, encryptable,
+                    restored by <b>overwriting everything</b> — use it for a new computer or a reinstall;</li>
+                <li><b>Plain-text export</b> (<code>.qsconf</code>) = <b>a few chosen items</b>,
+                    <b>unencrypted</b>, imported by <b>overwriting only those items and leaving the rest
+                    alone</b> — use it to hand a colleague a set of settings.</li>
+            </ul>
+            <p>On the “<b>Data</b>” page click “Export”, then tick what you want:</p>
+            <ul>
+                <li><b>Only non-private items are ticked by default</b>: engine configuration, app settings,
+                    icons and image search are on; <b>API keys, favorites and backup settings</b> are
+                    <b>not</b> ticked by default — glance at what's ticked before sharing, and don't send anyone
+                    your keys;</li>
+                <li>The button then reads “Export 3 items…” according to what's ticked; <b>with nothing ticked it
+                    opens no dialog</b> (there's nothing to export, so it doesn't bother you);</li>
+                <li>The exported file is <b>plain JSON</b> that Notepad can open and edit, <b>unencrypted</b> —
+                    which is exactly why it <b>can</b> be sent to someone else to import, and exactly why you
+                    shouldn't move passwords with it;</li>
+                <li><b>Import merges</b>: only the items present in the file are poured back, and your current
+                    favorites and hotkeys are not touched by a single character. The flip side is that using it
+                    to “restore the scene” will not delete what you have extra right now — for a full overwrite
+                    take the ⑧ Backup route;</li>
+                <li><b>Plain-text import only accepts plain-text exports</b>: feeding it an encrypted backup (or
+                    a whole backup file) is rejected outright, with a pointer to the “Backup” page — the two
+                    routes each do one job, and “import” never quietly turns into “full overwrite”.</li>
+            </ul>
+        </div>
+    </details>
+
+    <details class="help-item">
+        <summary>⑨ Tray icon and quitting</summary>
+        <div class="help-body">
+            <p><b>Double-click</b> the tray icon = open the settings window directly (a single click does
+               nothing — the tray sits next to the clock, and a stray click popping a window is annoying).</p>
+            <p><b>Right-click</b> the tray icon = menu: open settings, back up now, start recognition, quit.</p>
+            <p>To quit for good, click “Quit” in the tray menu — closing the settings window does not exit the
+               app, which stays in the background waiting for your next selection.</p>
+        </div>
+    </details>
+
+    <details class="help-item">
+        <summary>⑩ Where all my data lives</summary>
+        <div class="help-body">
+            <ul>
+                <li>Configuration: <code>%APPDATA%\QuickSearch\config.json</code> (the backup folder can be moved
+                    elsewhere);</li>
+                <li>Replaced icons: <code>%APPDATA%\QuickSearch\icons\</code>;</li>
+                <li>Backups: the rolling backup <code>config.auto(timestamp).QuickSearch</code>, the
+                    pre-restore snapshot <code>config.before-webdav(timestamp).QuickSearch</code>, and the one
+                    you drop by clicking “Back up now”, <code>config(timestamp).QuickSearch</code> (same name as
+                    in the cloud).</li>
+                <li>The plain-text configuration you export (<code>.qsconf</code>) goes <b>wherever you choose</b>;
+                    the app never stuffs it into the data folder — how to export selectively and how to share it
+                    is covered in <b>⑧b Plain-text import / export</b>. Whoever you decide to send that file to
+                    is who ends up responsible for it.</li>
+                <li>Image-search screenshots and OCR screenshots are <b>temporary</b>: discarded once used and
+                    never left on the disk (except for the three “image URL” engines in image search — there the
+                    public link is one <b>you</b> supplied and the app merely opens it).</li>
+            </ul>
+            <p><b>Sharing it with someone is safe</b>: the app itself contains no account information — OCR keys
+               and WebDAV credentials are written only into the local <code>config.json</code>, travelling with
+               your configuration rather than with the app. Whoever receives it gets a “clean” program.</p>
+        </div>
+    </details>
+
+</div>

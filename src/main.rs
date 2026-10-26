@@ -2858,6 +2858,17 @@ fn show_bar_at(
     sel: Option<(i32, i32, i32, i32)>,
 ) -> usize {
     let t0 = std::time::Instant::now();
+    /* v1.5.13：锁屏期间横条一律不弹。
+     *
+     * 这是所有弹出路径的**唯一汇合点**（划词钩子 / Ctrl+C / 托盘 / 收藏夹热键
+     * 最后都走到这里），所以门禁放在这一行就够了 —— 但为了不给用户"按了没反应"
+     * 的错觉，顺手把锁屏窗顶到前面来（他大概是在别的窗口里试着划词）。
+     */
+    if app_locked() {
+        win::log("show_bar: 未解锁，忽略");
+        focus_lock_window();
+        return 0;
+    }
     /* ⚠ v1.4.0：**日志里不记用户选中的文字**，只记字数。
      *
      * 用户要求「所有的本地数据都要加密，不能以任何明文方式显示任何的用户数据」。
@@ -3816,6 +3827,12 @@ fn config_view() -> Value {
         // 这里发全量，上限由用户选的那档决定。
         "recentEngines": json!(cfg.recent_engines),
         "recentMax": cfg.recent_max,
+        // v1.5.13：界面语言（"zh" / "en"）。所有页面都靠它决定要不要走英文，
+        // 所以必须随每次广播下发 —— 设置页一改，横条/OCR 窗立刻跟着换。
+        "uiLang": config::normalize_ui_lang(&cfg.ui_lang),
+        // v1.5.13：启动密码**只报"有没有设"**，绝不把哈希发给前端。
+        // 前端据此决定"清除密码"那颗按钮要不要亮。
+        "startupPasswordSet": !cfg.startup_password_hash.is_empty(),
     })
 }
 
@@ -4533,6 +4550,32 @@ fn apply_one_setting(cfg: &mut config::Config, key: &str, value: Value) -> Resul
         "recentMax" => {
             cfg.recent_max = normalize_recent_max(value.as_u64().unwrap_or(10) as usize);
         }
+        // v1.5.13：界面语言。归一只认 zh / en（config::normalize_ui_lang）；
+        // 落盘之后由 broadcast() 把新值带给所有窗口，各页面自己换文案。
+        "uiLang" => {
+            cfg.ui_lang = config::normalize_ui_lang(value.as_str().unwrap_or("zh"));
+        }
+        /* v1.5.13：启动密码。
+         *
+         * 传进来的 `value` 是**明文**（用户刚输的那串），这里立刻算成 Argon2id
+         * 哈希再存；原文不落盘、不进日志、不出这个函数。空串 = 关闭功能。
+         *
+         * ⚠ 这条**只在设置页"设密码 / 改密码"时**由用户显式操作触发。
+         *   它和 backupPassword 是两条完全独立的路（用户要求互不影响）：
+         *   改这里绝不会碰备份密钥，改备份密码也不会碰这里的哈希。 */
+        "startupPassword" => {
+            let plain = value.as_str().unwrap_or("");
+            /* v1.5.14：**空串不再等于"关闭"**。
+             *
+             * 用户要求：「要取消密码，必须要再输一次解锁密码」。清哈希这条路
+             * 因此只留 `startup_password_disable`（先验后清）；从 set_setting
+             * 传空值一律拒绝 —— 否则一句 set_setting 就能把保护卸掉，
+             * "再输一次密码"就成了摆设。 */
+            if plain.trim().is_empty() {
+                return Err("关闭启动密码要先输入当前密码".to_string());
+            }
+            cfg.startup_password_hash = startup_password_make_hash(plain)?;
+        }
         // 名单本身由**后端**在每次引擎被点时自己追加（note_recent_engine），
         // 不接受前端直接写 —— 否则"最近使用"的语义就没了（前端可以随便塞）。
         _ => return Err(format!("未知设置键：{key}")),
@@ -4601,6 +4644,257 @@ fn set_settings(pairs: Vec<(String, Value)>) {
     if theme_key {
         reemit_theme_to_bar();
     }
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+ * v1.5.13：启动密码（锁屏）
+ *
+ * 用户要求：「在设置中新增可选的启动密码选项，关闭时不影响正常使用；开启后
+ *   启动软件必须先输入正确的启动密码才能使用其功能。该启动密码为独立密码，
+ *   与备份密码互不相同、互不影响。」
+ *
+ * 设计三条：
+ *   ① **只存 Argon2id 哈希**（config.startup_password_hash），不存原文；
+ *      备份密码那条路要原文去派生 AES 密钥，两者是完全不同的字段与代码，
+ *      改一个绝不影响另一个。
+ *   ② 进程一起来就把 `LOCKED` 置 true（前提是配了密码），横条/快捷键/设置/
+ *      OCR/识图全部在入口处看这个标志 —— 解锁之前**任何功能都用不了**。
+ *   ③ 锁屏窗是独立窗口（lock.html），关不掉（CloseRequested 直接拦），
+ *      Alt+F4 也不行；解锁成功时由后端用 `destroy()` 关掉它 —— 注意**不是**
+ *      `close()`，那会再走一遍被拦的关闭请求，窗口就永远关不掉了。
+ *      不想输密码的用户可以从这一窗「退出程序」（`quit_locked_app`）。
+ * ══════════════════════════════════════════════════════════════════════ */
+
+/// 当前进程是否处于「未解锁」状态。
+///
+/// 启动时由 `setup` 按配置置位；密码正确后翻 false，此后一直是 false。
+/// 放在原子量里而不是塞进 Mutex：每个热键回调都要读它，读的地方远多于写。
+static LOCKED: AtomicBool = AtomicBool::new(false);
+
+/// 现在锁着吗？（所有"需要先解锁才能用"的入口都问这一句）
+fn app_locked() -> bool {
+    LOCKED.load(Ordering::SeqCst)
+}
+
+/// 口令 → Argon2id PHC 哈希。空串 = 清除密码（返回空串）。
+///
+/// 参数用 `Argon2::default()`（Argon2id / m=19456 KiB / t=2 / p=1，OWASP 推荐档）。
+/// 盐每次重新生成 —— 同一个密码两次设置得到两个不同哈希，这是对的。
+fn startup_password_make_hash(plain: &str) -> Result<String, String> {
+    if plain.trim().is_empty() {
+        return Ok(String::new());
+    }
+    use argon2::password_hash::{PasswordHasher, SaltString};
+    use rand::RngCore;
+    let mut salt_bytes = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut salt_bytes);
+    let salt = SaltString::encode_b64(&salt_bytes)
+        .map_err(|e| format!("生成盐失败：{e}"))?;
+    let hash = argon2::Argon2::default()
+        .hash_password(plain.as_bytes(), &salt)
+        .map_err(|e| format!("生成密码哈希失败：{e}"))?
+        .to_string();
+    Ok(hash)
+}
+
+/// 校验口令。哈希串损坏 / 为空一律 false（不放行）。
+fn startup_password_verify(plain: &str, hash: &str) -> bool {
+    use argon2::password_hash::{PasswordHash, PasswordVerifier};
+    let Ok(parsed) = PasswordHash::new(hash) else {
+        return false;
+    };
+    argon2::Argon2::default()
+        .verify_password(plain.as_bytes(), &parsed)
+        .is_ok()
+}
+
+/// 把锁屏窗顶到最前（已经开着就只聚焦，不重建）。
+fn focus_lock_window() {
+    let a = app();
+    match a.get_webview_window("lock") {
+        Some(w) => {
+            let _ = w.unminimize();
+            let _ = w.show();
+            let _ = w.set_focus();
+        }
+        None => open_lock_window(a),
+    }
+}
+
+/// 建锁屏窗。沿用设置窗那套「先隐藏、ready 之后再显示」的做法，避免黑底一闪。
+///
+/// **关不掉**：横条窗那套 WindowEvent 处理器在这里刻意不拦 CloseRequested ——
+/// 真正拦住它的是 `main()` 里的 `on_window_event`（label == "lock" 时直接
+/// prevent_close）。这里建窗不需要额外权限。
+fn open_lock_window(a: &AppHandle) {
+    let a2 = a.clone();
+    let _ = a.run_on_main_thread(move || {
+        if let Some(w) = a2.get_webview_window("lock") {
+            let _ = w.show();
+            let _ = w.set_focus();
+            return;
+        }
+        let mut b = WebviewWindowBuilder::new(&a2, "lock", WebviewUrl::App("lock.html".into()))
+            .title("Quick Search")
+            .inner_size(420.0, 268.0)
+            .resizable(false)
+            .maximizable(false)
+            .minimizable(false)
+            .center()
+            .always_on_top(true)
+            // 锁屏要能在任务栏里找到（用户可能把它最小化，需要点回来）
+            .skip_taskbar(false)
+            .decorations(false)
+            .visible(false)
+            .background_color(tauri::window::Color(23, 24, 28, 255));
+        let wa = wv_args();
+        if !wa.is_empty() {
+            b = b.additional_browser_args(&wa);
+        }
+        match b.build() {
+            Ok(w) => {
+                win::log("lock: 窗口已建，等页面 ready");
+                let w2 = w.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(180));
+                    let _ = w2.show();
+                    let _ = w2.set_focus();
+                });
+            }
+            Err(e) => win::log(&format!("lock: 建窗失败 {e}")),
+        }
+    });
+}
+
+/// 页面问一句「现在锁着吗」——锁屏页自己也是靠它判断要不要画输入框。
+#[tauri::command]
+fn app_is_locked() -> bool {
+    app_locked()
+}
+
+/// 设置页问一句「有没有设过启动密码」（只回布尔，不回哈希）。
+#[tauri::command]
+fn startup_password_configured() -> bool {
+    cfg_with(|c| !c.startup_password_hash.is_empty())
+}
+
+/// 锁屏页提交口令。
+///
+/// 成功 → 清 `LOCKED`、关掉锁屏窗、把启动时的后台动作（更新检查 / 云同步）
+/// 补上；失败 → 返回 `Ok(false)`，由页面自己显示"密码不对"并清空输入框。
+///
+/// 刻意**不做失败次数限制**：这是本机锁屏，不是网络服务；锁死反而会把用户
+/// 关在自己电脑的软件外面（忘记密码时唯一的路是手动删 config.json 里那行哈希）。
+#[tauri::command]
+fn verify_startup_password(password: String) -> Result<bool, String> {
+    /* 没设密码却调到这儿（老页面缓存 / 探针）：直接放行，不制造"卡在锁屏"。 */
+    let hash = cfg_with(|c| c.startup_password_hash.clone());
+    if hash.is_empty() {
+        LOCKED.store(false, Ordering::SeqCst);
+        close_lock_window();
+        return Ok(true);
+    }
+    if !startup_password_verify(&password, &hash) {
+        win::log("lock: 密码不对");
+        return Ok(false);
+    }
+    LOCKED.store(false, Ordering::SeqCst);
+    win::log("lock: 密码正确，解锁");
+    close_lock_window();
+    post_unlock_startup();
+    Ok(true)
+}
+
+/// 关掉锁屏窗 —— **必须 destroy，不能 close**。
+///
+/// `close()` 只是"请求关闭"：它会让 main() 里那个 WindowEvent 处理器先跑一遍，
+/// 而那边为了防 Alt+F4 绕过密码，对 label == "lock" 一律 `prevent_close()`。
+/// 结果连程序自己发的关闭也被拦下 —— 用户输对密码后窗口赖着不动，正是这个
+/// bug（v1.5.13 遗留）。`destroy()` 不走关闭请求，直接销毁窗口，是这里唯一
+/// 正确的做法（设置窗的空闲回收也是这么干的）。
+///
+/// 先 hide 再 destroy：销毁要排到事件循环里，中间那一帧窗口若还可见，会盖在
+/// 刚弹出来的横条上面（锁屏窗是 always_on_top）。
+fn close_lock_window() {
+    let Some(a) = APP.get() else { return };
+    let Some(w) = a.get_webview_window("lock") else { return };
+    let _ = w.hide();
+    if let Err(e) = w.destroy() {
+        win::log(&format!("lock: 销毁锁屏窗失败（{e}）"));
+    }
+}
+
+/// 关闭启动密码：**必须先验一次当前密码**。
+///
+/// 用户口径：「要取消密码，必须要再输一次解锁密码」。所以"清空哈希"没有走
+/// `set_setting`（那条对空串直接拒绝，见 `apply_one_setting`），只能走这里：
+/// 验过 → 清哈希 → 落盘 + 广播；验不过 → `Ok(false)`，前端提示"密码不对"、
+/// 开关弹回打开状态 —— 保护一点没动。
+///
+/// 和 `verify_startup_password` 的分工：那个是"进软件"，会清 LOCKED、销毁锁屏窗；
+/// 这个只是"确认是你"，**不碰锁定状态**（设置页本来就在解锁之后才打得开）。
+#[tauri::command]
+fn startup_password_disable(password: String) -> Result<bool, String> {
+    let hash = cfg_with(|c| c.startup_password_hash.clone());
+    if hash.is_empty() {
+        /* 本来就没设：当作成功，让前端把开关摆回去，不制造"关不掉"的假象。 */
+        return Ok(true);
+    }
+    if !startup_password_verify(&password, &hash) {
+        win::log("lock: 关闭启动密码被拒（密码不对）");
+        return Ok(false);
+    }
+    {
+        let mut cfg = match st().cfg.lock() {
+            Ok(c) => c,
+            Err(_) => return Err("读配置失败".to_string()),
+        };
+        cfg.startup_password_hash.clear();
+        config::save(&cfg);
+    }
+    broadcast();
+    win::log("lock: 启动密码已关闭（验证通过）");
+    Ok(true)
+}
+
+/// 锁屏窗上的「退出程序」。
+///
+/// 和 `quit_app` 只差一件事：**不跑退出同步**。锁着的时候用户还没"进入"这个
+/// 软件，把一份配置推到云端既没必要也不合时宜（`exit_sync_if_needed` 的前提
+/// 是"用户刚用过"）。所以这里只清临时图、记一行日志、退出。
+///
+/// 这是锁屏页唯一能"离开"的口子：窗口关不掉（见 on_window_event），托盘被
+/// 门禁挡着，用户不想输密码时总得有条干净的路走 —— 而不是去任务管理器杀进程。
+#[tauri::command]
+fn quit_locked_app() {
+    win::log("lock: 用户点「退出程序」");
+    img_temp_cleanup();
+    app().exit(0);
+}
+
+/// 解锁之后才该发生的启动动作：亮出主界面 + 自动检查更新 + 启动时的云同步。
+///
+/// ⚠ 后两件事原来无条件在 `setup` 里跑。设了启动密码之后它们必须**等解锁** ——
+///   否则锁屏还摆在那儿，更新窗口或云恢复已经在背后动手了。
+fn post_unlock_startup() {
+    auto_check_on_start();
+    std::thread::spawn(|| {
+        std::thread::sleep(Duration::from_secs(6));
+        webdav_sync_on_start();
+    });
+    /* 解锁后把主界面亮出来。
+     *
+     * 用户口径：「验证成功后立即关闭并进入主界面」。这个软件的主界面就是横条
+     * （平时只活在托盘里，靠快捷键叫出来），所以这里主动弹一次 —— 否则锁屏窗
+     * 一消失，屏幕上什么都不剩，用户会以为"解锁把程序关掉了"。
+     *
+     * 140ms 是给锁屏窗留的销毁时间：`destroy()` 只是投递到事件循环，而锁屏窗
+     * 带 always_on_top，同一瞬间弹横条会被它压住。横条自己失焦 / 按 Esc 就收起，
+     * 不会赖在屏幕上。 */
+    std::thread::spawn(|| {
+        std::thread::sleep(Duration::from_millis(140));
+        show_bar(String::new(), true, false, None);
+    });
 }
 
 /// 把当前主题补发给横条窗。
@@ -6138,7 +6432,96 @@ fn update_payload(
 /// "没令牌不许自动下载"只需要在 [`update_payload`] 里判一次。
 fn emit_update(info: &update::UpdateInfo, manual: bool) {
     let payload = update_payload(info, manual, update::can_auto_download());
-    let _ = APP.get().map(|a| a.emit_to("settings", "qs://update", payload));
+    let Some(a) = APP.get() else { return };
+    let _ = a.emit_to("settings", "qs://update", payload.clone());
+    /* v1.5.13：发现新版就**弹窗**（用户要求：「启动时检测是否存在新版本，
+     * 若有则弹窗提示用户可更新」）。
+     *
+     * 以前只推给设置页 —— 用户没开设置页的话，那条事件压根没有接收方，
+     * 表现就是"检查到了，但没人告诉我"。现在多一个独立窗口（update.html），
+     * 它也收同一条事件。
+     *
+     * 手动检查时不弹：用户此刻正看着设置页「关于」里那一块，再弹一个同样的
+     * 窗口是重复打扰（设置页那条路本身已经能下载/重启）。 */
+    if info.newer && !manual && !app_locked() {
+        let _ = a.emit_to("update", "qs://update", payload);
+        show_update_window(a);
+    }
+}
+
+/// 弹出（或唤到前面）更新窗口。
+///
+/// 窗口**要在任务栏里看得见**（用户明确要求）—— 下载可能要好几分钟，用户会
+/// 切去干别的，得能从任务栏点回来。所以 `skip_taskbar(false)`，并且**不**
+/// always-on-top（浮在所有窗口上会很烦），只在弹出那一刻抢一次焦点。
+fn show_update_window(a: &AppHandle) {
+    let a2 = a.clone();
+    let _ = a.run_on_main_thread(move || {
+        if let Some(w) = a2.get_webview_window("update") {
+            let _ = w.unminimize();
+            let _ = w.show();
+            let _ = w.set_focus();
+            return;
+        }
+        let mut b = WebviewWindowBuilder::new(&a2, "update", WebviewUrl::App("update.html".into()))
+            .title(if cfg_with(|c| c.ui_lang == "en") {
+                "Quick Search Update"
+            } else {
+                "Quick Search 更新"
+            })
+            .inner_size(520.0, 400.0)
+            .min_inner_size(460.0, 340.0)
+            .resizable(true)
+            .center()
+            .skip_taskbar(false)
+            .decorations(false)
+            .visible(false)
+            .background_color(tauri::window::Color(23, 24, 28, 255));
+        let wa = wv_args();
+        if !wa.is_empty() {
+            b = b.additional_browser_args(&wa);
+        }
+        match b.build() {
+            Ok(w) => {
+                win::log("update: 窗口已建");
+                let w2 = w.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(180));
+                    let _ = w2.show();
+                    let _ = w2.set_focus();
+                });
+            }
+            Err(e) => win::log(&format!("update: 建窗失败 {e}")),
+        }
+    });
+}
+
+/// 「取消下载」按钮。
+///
+/// 只置一个标志，真正的收尾在下载线程里（见 `update::request_cancel`）——
+/// 这里如果直接杀线程，`QuickSearch.exe.new` 会停在半截且文件句柄没释放，
+/// 下一次续传反而更容易写坏。
+#[tauri::command]
+fn update_cancel() {
+    win::log("update: 用户点了取消");
+    update::request_cancel();
+}
+
+/// 关闭更新窗口（页面上的 × 调它）。
+///
+/// 下载中关窗 = 同时取消下载：窗口没了，进度和取消按钮也就没了，留着后台继续下
+/// 只会让用户下次打开看到一个"凭空完成"的状态。 */
+#[tauri::command]
+fn update_close_window() {
+    if update::can_auto_download() && UPDATE_PENDING.lock().map(|g| g.is_some()).unwrap_or(false) {
+        // 只有在"确实可能正在下"的时候才顺手取消；没下的时候这个标志无副作用
+        update::request_cancel();
+    }
+    if let Some(a) = APP.get() {
+        if let Some(w) = a.get_webview_window("update") {
+            let _ = w.close();
+        }
+    }
 }
 
 /// 查一次更新并把结果广播出去。
@@ -6197,6 +6580,11 @@ fn do_check_update(manual: bool) {
 
 /// 启动时的那一次（后台，等一会儿再查，别和窗口/钩子抢启动）。
 fn auto_check_on_start() {
+    // v1.5.13：还锁着就不查 —— 等用户输对密码，由 post_unlock_startup() 补这一枪。
+    if app_locked() {
+        win::log("update: 未解锁，启动检查推迟到解锁之后");
+        return;
+    }
     // 用户在设置里取消勾选 → **彻底不检测**（不发任何网络请求）
     if !cfg_with(|c| c.auto_update) {
         win::log("update: 自动更新开关关着，跳过启动检查");
@@ -6337,6 +6725,9 @@ async fn update_install() {
             wd_toast("没填 GitHub 令牌，只提示不自动下载 —— 点下面的下载链接去浏览器装");
             return;
         }
+        /* v1.5.13：取消标志清零必须在**下载开始之前**。
+         * 上一轮被取消过的话它还是 true，不清就会"一点下载立刻取消"。 */
+        update::clear_cancel();
         win::log(&format!("update: 开始下载 {}", info.url));
         let app = APP.get().cloned();
         let mut last_emit = std::time::Instant::now();
@@ -6348,20 +6739,34 @@ async fn update_install() {
             }
             last_emit = std::time::Instant::now();
             if let Some(a) = &app {
-                let _ = a.emit_to(
-                    "settings",
-                    "qs://update-progress",
-                    serde_json::json!({ "done": done, "total": total }),
-                );
+                let payload = serde_json::json!({ "done": done, "total": total });
+                /* v1.5.13：设置页的「关于」和独立的更新窗口都可能在看着这次下载，
+                 * 两边都要喂 —— 只发一个的话，另一个永远停在"正在下载…"的初态。 */
+                let _ = a.emit_to("settings", "qs://update-progress", payload.clone());
+                let _ = a.emit_to("update", "qs://update-progress", payload);
             }
         });
         let new_path = match r {
             Ok(p) => p,
             Err(e) => {
+                /* 取消和失败必须分开报：取消是**用户自己干的**，不该弹"下载失败"，
+                 * 也不该把主按钮切成"去浏览器下载"那种兜底态 —— 他要的是"我点了
+                 * 取消，所以停了"。 */
+                let cancelled = e.contains("已取消");
                 if let Some(a) = &app {
-                    let _ = a.emit_to("settings", "qs://update-failed", e);
+                    let ev = if cancelled {
+                        "qs://update-cancelled"
+                    } else {
+                        "qs://update-failed"
+                    };
+                    let _ = a.emit_to("settings", ev, e.clone());
+                    let _ = a.emit_to("update", ev, e);
                 }
-                win::log("update: 下载失败");
+                win::log(if cancelled {
+                    "update: 已按用户要求取消"
+                } else {
+                    "update: 下载失败"
+                });
                 return;
             }
         };
@@ -6370,12 +6775,14 @@ async fn update_install() {
             Ok(_) => {
                 if let Some(a) = &app {
                     let _ = a.emit_to("settings", "qs://update-done", info.version.clone());
+                    let _ = a.emit_to("update", "qs://update-done", info.version.clone());
                 }
                 win::log("update: 替换完成，等用户重启");
             }
             Err(e) => {
                 if let Some(a) = &app {
-                    let _ = a.emit_to("settings", "qs://update-failed", e);
+                    let _ = a.emit_to("settings", "qs://update-failed", e.clone());
+                    let _ = a.emit_to("update", "qs://update-failed", e);
                 }
                 win::log("update: 替换失败");
             }
@@ -7133,6 +7540,10 @@ fn ocr_plan_with_local_fallback(cfg: &config::Config) -> (Vec<String>, bool) {
 
 /// 进入 OCR 流程（横条上的按钮、Ctrl+Alt+O、托盘菜单都走这里）
 fn ocr_start_flow() {
+    if app_locked() {
+        focus_lock_window();
+        return;
+    }
     let cfg = cfg_snapshot();
     if !cfg.ocr_enable {
         ocr_tell("OCR 功能已在设置里关闭", true);
@@ -7221,6 +7632,10 @@ fn ocr_start_flow() {
 /// （真上传的三家 / 打开页面的几家都不需要任何 API Key）—— 要是这里照 OCR
 /// 那样先查密钥，用户点「识图」就会被拦去设置页填一个根本不需要的东西。
 fn img_start_flow() {
+    if app_locked() {
+        focus_lock_window();
+        return;
+    }
     let cfg = cfg_snapshot();
     if !cfg.img_enable {
         img_tell("识图搜索已在设置里关闭");
@@ -13715,6 +14130,12 @@ fn settings_idle_secs() -> u64 {
 
 fn open_settings_win(focus: Option<String>, tab: Option<String>) {
     let a = app();
+    /* v1.5.13：未解锁不许开设置 —— 否则"密码还没输就能改设置"，锁屏形同虚设。 */
+    if app_locked() {
+        win::log("settings: 未解锁，拒绝打开");
+        focus_lock_window();
+        return;
+    }
     if let Some(w) = a.get_webview_window("settings") {
         win::log("settings: reuse existing window");
         // r75：窗口又露头了 —— 取消"空闲销毁"的计时
@@ -14211,6 +14632,11 @@ fn build_tray(a: &AppHandle) -> tauri::Result<()> {
                 let _ = std::thread::spawn(ocr_start_flow);
             }
             "sync" => {
+                // v1.5.13：未解锁不许同步（它会读配置、写备份、可能恢复配置）
+                if app_locked() {
+                    focus_lock_window();
+                    return;
+                }
                 let cfg = cfg_snapshot();
                 if !wd_opts(&cfg, 15).ready() {
                     wd_toast("还没配置 WebDAV，先在设置里填一下");
@@ -14271,6 +14697,19 @@ fn init_state() {
         sel_url: Mutex::new(None),
         sel_urls: Mutex::new(Vec::new()),
     });
+    /* v1.5.13：置「未解锁」标志。
+     *
+     * 必须在这里（配置刚读进 STATE 之后、任何窗口/钩子起来之前）—— 迟一步，
+     * 启动瞬间的一次 Ctrl+C 就能把横条弹出来。
+     *
+     * `QS_UNLOCK=1` 是**仅调试/自动化用**的逃生口：探针在设了密码的机器上跑
+     * 全套测试时不必每次都输密码（和 QS_NO_ELEVATE 那类开关一个性质）。 */
+    let skipper = std::env::var("QS_UNLOCK").map(|v| v == "1").unwrap_or(false);
+    let has_pwd = cfg_with(|c| !c.startup_password_hash.is_empty());
+    LOCKED.store(has_pwd && !skipper, Ordering::SeqCst);
+    if has_pwd && !skipper {
+        win::log("lock: 已设启动密码，启动即锁定");
+    }
 }
 
 /// WebView2 启动参数。
@@ -14870,6 +15309,15 @@ fn main() {
             github_rate_state,
             update_install,
             update_restart,
+            // v1.5.13：更新窗口的「取消下载」/「关窗」
+            update_cancel,
+            update_close_window,
+            // v1.5.13：启动密码（锁屏）
+            app_is_locked,
+            startup_password_configured,
+            verify_startup_password,
+            startup_password_disable,
+            quit_locked_app,
             open_repo_page,
         ])
         .setup(move |app| {
@@ -15027,10 +15475,16 @@ fn main() {
             // ---- 启动时 WebDAV 同步 ----
             // 故意等一会儿：让窗口、钩子、图标先各就各位，别跟启动抢网络和磁盘。
             // 设置面板早就开着的话，同步结果也能正常显示出来。
-            std::thread::spawn(|| {
-                std::thread::sleep(Duration::from_secs(6));
-                webdav_sync_on_start();
-            });
+            //
+            // v1.5.13：设了启动密码时，这两件事都推到**解锁之后**
+            // （见 post_unlock_startup）—— 锁屏还摆着就同步/检查更新说不通。
+            let locked_at_boot = app_locked();
+            if !locked_at_boot {
+                std::thread::spawn(|| {
+                    std::thread::sleep(Duration::from_secs(6));
+                    webdav_sync_on_start();
+                });
+            }
             /* ---- v1.2.0：清掉上次更新留下的 .old ----
              * 替换那一刻旧 exe 还被本进程占着、删不掉；**现在**（新进程里）
              * 它已经不被占用了，才能删。放在这里既早（不拖启动）又安全
@@ -15044,7 +15498,16 @@ fn main() {
             // ---- v1.2.0：自动检查更新（勾了开关才做）----
             // 用户口径：「每次打开软件，它都会检测当前是不是最新版，如果是最新版，
             // 那就什么都不发生」。所以这里是**静默**的：没新版一条事件都不发。
-            auto_check_on_start();
+            //
+            // v1.5.13：检查结果**有新版就弹窗**（update.html），不再依赖"用户先
+            // 打开设置页"才看得见 —— 用户要求「启动时检测是否存在新版本，若有则
+            // 弹窗提示用户可更新」。窗口的建/推都在 emit_update 里，没新版照旧静默。
+            if locked_at_boot {
+                win::log("startup: 已设启动密码，等解锁后再检查更新");
+                open_lock_window(&handle);
+            } else {
+                auto_check_on_start();
+            }
             win::log("hooks + tray ready");
 
             // ---- 内存泄漏压测：反复显示/隐藏横条，观察资源是否单调上涨 ----
@@ -15095,6 +15558,26 @@ fn main() {
         .on_window_event(|window, event| {
             match event {
                 WindowEvent::CloseRequested { api, .. } => {
+                    /* v1.5.13：锁屏窗**不许关**。
+                     *
+                     * 能关掉的后果很直接：Alt+F4 一按，锁屏没了、`LOCKED` 还是
+                     * true —— 软件看起来"消失了"，但钩子还在、托盘还在，用户
+                     * 唯一能做的就是去任务管理器杀进程。这里拦掉之后，用户想
+                     * 绕开密码只能整个退出程序（托盘退出仍然允许），下次启动
+                     * 还是得输密码。
+                     *
+                     * 顺带把输入框重新聚焦：用户点了 X，光标该回到密码框。 */
+                    if window.label() == "lock" {
+                        /* 已经解锁了就不再拦 —— 解锁与 Alt+F4 撞在同一瞬间时，
+                         * `verify_startup_password` 已经把 LOCKED 清掉，这一下
+                         * 该让它顺利关掉（真被拦住的话窗口就"永远关不掉"了）。 */
+                        if !app_locked() {
+                            return;
+                        }
+                        api.prevent_close();
+                        let _ = window.set_focus();
+                        return;
+                    }
                     if window.label() == "settings" {
                         api.prevent_close();
                         let _ = window.hide();
@@ -15357,6 +15840,42 @@ mod tests {
         assert_eq!(clean_space_name(CLEAN_SPACE_FORCE), "force");
         assert_eq!(clean_space_name(CLEAN_SPACE_SMART), "smart");
         assert_eq!(clean_space_name(0), "off");
+    }
+
+    /* v1.5.14：启动密码的两条硬规则 ——
+     *   ① 只存 Argon2id 哈希（盐每次不同，所以只能"验"不能"比"）；
+     *   ② 关闭**必须**先验当前密码：`set_setting("startupPassword", "")` 一律拒绝，
+     *      否则前端一句命令就能把保护卸掉，「再输一次密码」等于摆设。 */
+    #[test]
+    fn startup_password_hash_roundtrip() {
+        let h = startup_password_make_hash("橙子-1234").expect("hash");
+        assert!(h.starts_with("$argon2id$"));
+        assert!(startup_password_verify("橙子-1234", &h));
+        assert!(!startup_password_verify("橙子-1235", &h));
+        assert!(!startup_password_verify("", &h));
+        // 空哈希 = 没设密码 → 谁都不放行（比较函数本身不做"放行"判断）
+        assert!(!startup_password_verify("随便", ""));
+        // 同一个密码两次得到不同哈希（新盐），但都能验过
+        let h2 = startup_password_make_hash("橙子-1234").expect("hash");
+        assert_ne!(h, h2);
+        assert!(startup_password_verify("橙子-1234", &h2));
+        // 空白 = 清除（返回空哈希，不报错）
+        assert_eq!(startup_password_make_hash("   ").unwrap(), "");
+    }
+
+    #[test]
+    fn clearing_startup_password_requires_the_old_one() {
+        let mut c = empty_cfg();
+        // 设：非空值 → 落哈希（原文不留在配置里）
+        apply_one_setting(&mut c, "startupPassword", Value::from("old-one")).expect("set");
+        assert!(startup_password_verify("old-one", &c.startup_password_hash));
+        assert!(!c.startup_password_hash.contains("old-one"));
+        // 清：空值 → **拒绝**，哈希一个字节都没动
+        assert!(apply_one_setting(&mut c, "startupPassword", Value::from("")).is_err());
+        assert!(startup_password_verify("old-one", &c.startup_password_hash));
+        // 纯空白同样拒（不然"输个空格"就绕过去了）
+        assert!(apply_one_setting(&mut c, "startupPassword", Value::from("   ")).is_err());
+        assert!(startup_password_verify("old-one", &c.startup_password_hash));
     }
 
     /// 拿一个内置引擎名（一定存在于 engines.json 里）

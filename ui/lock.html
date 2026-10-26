@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="color-scheme" content="dark light">
+<title>Quick Search 解锁</title>
+<style>
+/* 锁屏窗是**独立窗口**（420×268，无边框、常驻置顶、任务栏可见），
+ * 所以样式全在这里，不引 settings.css —— 那个文件 3800 行、绝大多数是设置页
+ * 面板的规则，引进来只会拖慢首帧（用户在等一个"马上就能输密码"的小窗）。 */
+* { box-sizing: border-box; }
+:root {
+    --bg: #17181c;
+    --fg: #e9eaee;
+    --dim: #9aa0ac;
+    --line: rgba(255,255,255,.10);
+    --accent: #4E6EF2;
+    --err: #ff6b6b;
+    --ok: #3ddc97;
+}
+@media (prefers-color-scheme: light) {
+    :root {
+        --bg: #f5f6f8;
+        --fg: #1b1c20;
+        --dim: #6b7280;
+        --line: rgba(0,0,0,.10);
+    }
+}
+html, body { height: 100%; margin: 0; }
+body {
+    background: var(--bg);
+    color: var(--fg);
+    font: 13px/1.5 "Microsoft YaHei UI", "Segoe UI", system-ui, sans-serif;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    overflow: hidden;
+    user-select: none;
+}
+.wrap { width: 100%; padding: 22px 26px 18px; }
+.brand { display: flex; align-items: center; gap: 9px; margin-bottom: 16px; }
+.dot {
+    width: 9px; height: 9px; border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 10px rgba(78,110,242,.75);
+}
+.brand b { font-size: 14px; letter-spacing: .2px; }
+.brand span { color: var(--dim); font-size: 11.5px; }
+h1 { font-size: 15px; margin: 0 0 4px; font-weight: 600; }
+p.sub { margin: 0 0 14px; color: var(--dim); font-size: 11.5px; }
+.field { display: flex; gap: 8px; }
+input[type="password"] {
+    flex: 1;
+    height: 36px;
+    padding: 0 11px;
+    font-size: 13px;
+    color: var(--fg);
+    background: rgba(127,127,127,.10);
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    outline: none;
+    transition: border-color .15s, box-shadow .15s;
+}
+input[type="password"]:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(78,110,242,.18);
+}
+button {
+    height: 36px;
+    padding: 0 16px;
+    font-size: 13px;
+    font-weight: 600;
+    color: #fff;
+    background: var(--accent);
+    border: 0;
+    border-radius: 9px;
+    cursor: pointer;
+    transition: filter .15s, opacity .15s;
+}
+button:hover { filter: brightness(1.08); }
+button:disabled { opacity: .6; cursor: default; }
+.msg { min-height: 18px; margin-top: 10px; font-size: 11.5px; color: var(--dim); }
+.msg.err { color: var(--err); }
+.msg.ok { color: var(--ok); }
+.foot {
+    margin-top: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    color: var(--dim);
+    font-size: 10.5px;
+}
+/* 「退出程序」：次要动作，做成描边小按钮 —— 不能和「解锁」一样抢眼，
+ * 但也不能只是一行灰字（用户点名要"一个退出按钮"）。 */
+button.ghost {
+    height: 26px;
+    padding: 0 10px;
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--dim);
+    background: transparent;
+    border: 1px solid var(--line);
+    border-radius: 7px;
+}
+button.ghost:hover { color: var(--fg); border-color: var(--dim); filter: none; }
+.shake { animation: shake .28s ease-in-out; }
+@keyframes shake {
+    0%,100% { transform: translateX(0); }
+    25% { transform: translateX(-6px); }
+    75% { transform: translateX(6px); }
+}
+</style>
+</head>
+<body>
+<div class="wrap" id="wrap">
+    <div class="brand">
+        <span class="dot"></span>
+        <b>Quick Search</b><span>锁屏</span>
+    </div>
+    <h1>输入启动密码</h1>
+    <p class="sub">这是独立的启动密码，与备份密码无关 · 输对才能使用全部功能</p>
+    <div class="field">
+        <input type="password" id="pwd" autocomplete="current-password" spellcheck="false"
+               placeholder="启动密码">
+        <button type="button" id="btnGo">解锁</button>
+    </div>
+    <div class="msg" id="msg"></div>
+    <div class="foot">
+        <button type="button" class="ghost" id="btnQuit">退出程序</button>
+        <span><span id="hint">回车解锁</span> · <span id="ver"></span></span>
+    </div>
+</div>
+
+<script src="shared.js"></script>
+<script src="i18n.js"></script>
+<script src="i18n.en.js"></script>
+<script>
+/* 锁屏页。**没有"跳过"**，也没有叉号 —— 窗口的 CloseRequested 在 Rust 侧
+ * 直接拦掉了（见 main.rs 的 on_window_event），Alt+F4 也关不掉。
+ * 唯一的"离开"方式是左下角的「退出程序」：走 `quit_locked_app`，不跑退出同步，
+ * 免得锁着的时候把配置推上云。
+ *
+ * 校验一定走后端 `verify_startup_password`：密码哈希只在 Rust 内存/配置里，
+ * 前端拿不到（config_view 只报 startupPasswordSet 这个布尔），所以这里不可能
+ * 被绕过 —— 即使有人打开 devtools 改 JS，也没有可比的哈希。 */
+const invoke = window.__TAURI__.core.invoke;
+const $ = (id) => document.getElementById(id);
+
+const pwd = $('pwd');
+const btn = $('btnGo');
+const msg = $('msg');
+
+function say(text, kind) {
+    msg.textContent = text || '';
+    msg.className = 'msg' + (kind ? ' ' + kind : '');
+}
+
+async function submit() {
+    if (btn.disabled) return;
+    const v = pwd.value;
+    if (!v) {
+        say(window.QS_I18N ? QS_I18N.t('请输入密码') : '请输入密码', 'err');
+        pwd.focus();
+        return;
+    }
+    btn.disabled = true;
+    say(window.QS_I18N ? QS_I18N.t('正在验证…') : '正在验证…');
+    try {
+        const ok = await invoke('verify_startup_password', { password: v });
+        if (ok) {
+            /* 后端会立刻销毁这个窗口（destroy，绕过 CloseRequested）并弹出主界面。
+             * 这里补一刀兜底：万一销毁失败，解锁之后 CloseRequested 已经不再被拦，
+             * 自己 close() 也能正常关掉 —— 窗口绝不能"解锁成功了还赖着"。 */
+            say(window.QS_I18N ? QS_I18N.t('已解锁') : '已解锁', 'ok');
+            setTimeout(() => {
+                try { window.__TAURI__.window.getCurrentWindow().close(); } catch (_) {}
+            }, 700);
+            return;
+        }
+        pwd.value = '';
+        pwd.focus();
+        say(window.QS_I18N ? QS_I18N.t('密码不对，请重新输入') : '密码不对，请重新输入', 'err');
+        $('wrap').classList.remove('shake');
+        void $('wrap').offsetWidth;
+        $('wrap').classList.add('shake');
+    } catch (e) {
+        say(String(e), 'err');
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+btn.addEventListener('click', submit);
+/* 「退出程序」：不输密码也要能干净地离开（进程直接退，不留半锁着的后台）。
+ * 走单独的命令而不是托盘那个 quit_app —— 锁着的时候不该跑「退出时同步」。 */
+const quitBtn = $('btnQuit');
+quitBtn.addEventListener('click', () => {
+    quitBtn.disabled = true;
+    say(window.QS_I18N ? QS_I18N.t('正在退出…') : '正在退出…');
+    invoke('quit_locked_app').catch((e) => {
+        quitBtn.disabled = false;
+        say(String(e), 'err');
+    });
+});
+pwd.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); submit(); }
+});
+// 拖动窗口：无边框窗口只能靠这条（Rust 侧 start_dragging 权限已开）
+document.addEventListener('mousedown', (e) => {
+    if (e.target.closest('input,button')) return;
+    try { window.__TAURI__.window.getCurrentWindow().startDragging(); } catch (_) {}
+});
+// 页面一出来就把光标放进密码框 —— 用户点开就是为了输密码
+setTimeout(() => pwd.focus(), 60);
+// 版本号：出问题时用户能说清"是哪个版本锁住了"
+invoke('get_config').then((c) => { $('ver').textContent = 'v' + (c.version || ''); })
+    .catch(() => {});
+</script>
+</body>
+</html>

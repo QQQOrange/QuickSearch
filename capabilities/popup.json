@@ -1,0 +1,17 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "aux-win",
+  "description": "v1.5.13 新增的两个独立窗口：lock（启动密码锁屏）/ update（更新提示与下载进度）。两个都要能收后端事件（qs://update-* 与解锁结果），也都要能自己关自己（关窗走 Rust 命令，但页面上的 × 需要 close 权限）。刻意不给 core:default —— 它们不需要创建窗口/托盘那套权限。",
+  "windows": ["lock", "update"],
+  "permissions": [
+    "core:event:default",
+    "core:window:default",
+    "core:window:allow-show",
+    "core:window:allow-hide",
+    "core:window:allow-close",
+    "core:window:allow-set-focus",
+    "core:window:allow-start-dragging",
+    "core:window:allow-minimize",
+    "core:window:allow-unminimize"
+  ]
+}

@@ -271,8 +271,20 @@ fn current_token() -> Option<String> {
 /// 用上了令牌"（填了但被 GitHub 拒掉也是 false，用于日志与降级提示）；
 /// 这里是"**现在**有没有令牌"。令牌被拒时下载照样能成 —— 公开仓库的
 /// release 资产匿名就能下，`open_update_stream` 会先匿名、失败再带令牌重试。
+///
+/// # v1.5.13：口径改成「**永远允许在程序内下载**」
+///
+/// 用户 2026-10-26 的新要求是「用户点击下载后开始下载，下载窗口需在任务栏中
+/// 显示，并提供可点击的取消下载按钮」—— 这条要求的前提就是**点了就能下**。
+/// 而"没令牌不许下"是 v1.5.7 为了**省 API 额度**定下的：真正吃额度的是
+/// "查版本"（60 次/小时），而不是下资产（公开 release 匿名就能下，见
+/// `open_update_stream`）。把两件事绑在一起的结果是：绝大多数没填令牌的用户
+/// 永远用不上新的下载窗口，只能被推去浏览器。
+///
+/// 所以这里放开：令牌只影响"查版本时走哪条路"（见 [`check`]），不再影响
+/// "能不能下"。函数保留下来是因为它是全程序唯一口径，未来要收紧只改这一处。
 pub fn can_auto_download() -> bool {
-    current_token().is_some()
+    true
 }
 
 /// 查一次最新版本。
@@ -843,6 +855,32 @@ fn fill_details(current: &str) -> Result<UpdateInfo, String> {
 ///
 /// 3 而不是 5：实测「主源连不上」时要白等一个连接超时，轮数越多用户干等越久。
 /// 而真正的网络抖动通常 1~2 轮内就恢复了。
+/// 「用户点了取消下载」—— 下载线程每读一块就看一眼。
+///
+/// 为什么用全局原子量而不是把 `&AtomicBool` 一路传下去：
+/// `download()` 的进度回调是 `&mut dyn FnMut`，签名里塞不进取消检查；
+/// 而同一时刻**只可能有一次下载**（`UpdateGuard` 保证），所以一个进程级的
+/// 标志不会串台。每次开始下载前 `clear_cancel()` 清零。
+static CANCEL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 请求取消当前下载（`update_cancel` 命令调它）。
+pub fn request_cancel() {
+    CANCEL.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// 开始新一轮下载前清零。
+///
+/// ⚠ 必须清：上一轮被取消之后标志一直是 true，不清的话下一次下载会在
+///   第一块数据之前就自己停掉 —— 用户看到的是"点了下载，立刻就取消了"。
+pub fn clear_cancel() {
+    CANCEL.store(false, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// 现在是否已被要求取消。
+fn cancel_requested() -> bool {
+    CANCEL.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 const DL_ATTEMPTS: usize = 3;
 /// 第 n 轮失败后的等待（毫秒，线性退避：700 / 1400）。
 const DL_BACKOFF_MS: u64 = 700;
@@ -891,16 +929,23 @@ enum DlFail {
     Keep(String),
     /// 内容层不对（HTTP 4xx / 校验失败 / 大小不符）：**丢掉断点**，下轮从头来
     Drop(String),
+    /// 用户点了「取消下载」（v1.5.13）。**保留断点** —— 下次再点能接着下，
+    /// 但**不再重试**，直接把"已取消"交回调用方。
+    Cancelled,
 }
 
 impl DlFail {
     fn message(&self) -> &str {
         match self {
             DlFail::Keep(m) | DlFail::Drop(m) => m,
+            DlFail::Cancelled => "已取消下载",
         }
     }
     fn keep_partial(&self) -> bool {
-        matches!(self, DlFail::Keep(_))
+        matches!(self, DlFail::Keep(_) | DlFail::Cancelled)
+    }
+    fn is_cancel(&self) -> bool {
+        matches!(self, DlFail::Cancelled)
     }
 }
 
@@ -1046,6 +1091,16 @@ fn fetch_into(
         crate::win::log(&format!("update: 从 {done} 字节处续传 {url}"));
     }
     loop {
+        /* v1.5.13：用户点了「取消下载」→ 立刻收手。
+         *
+         * 检查点在**每读一块之前**（64KB 粒度，本地磁盘上不到一毫秒），
+         * 所以按下取消到真的停下几乎无感。断点保留：他下次再点能接着下。 */
+        if cancel_requested() {
+            let _ = file.flush();
+            drop(file);
+            crate::win::log(&format!("update: 用户取消下载（已下 {done} 字节，保留断点）"));
+            return Err(DlFail::Cancelled);
+        }
         /* ⚠ 这里是"网络断了"最常见的位置。保留断点让下一轮用 Range 接着下 ——
          *   以前这里直接抛错，13 MB 下到 90% 断一次就全废，用户只能从头再点，
          *   而且重来还是从 0 开始。这才是"下载不顺利"的真实体感。 */
@@ -1129,6 +1184,8 @@ pub fn download(
     if srcs.is_empty() {
         return Err("这个版本没有可用的下载地址 —— 请点「用浏览器下载」".to_string());
     }
+    // 新一轮开始：把上一轮"取消"留下的标志清掉（见 clear_cancel 的注释）
+    clear_cancel();
     let a = download_agent();
     let mut last = String::from("下载失败");
     for round in 1..=DL_ATTEMPTS {
@@ -1142,6 +1199,11 @@ pub fn download(
                     return Ok(new_path);
                 }
                 Err(f) => {
+                    /* 用户取消 = **终局**：不重试、不换源。否则"点了取消"之后
+                     * 下载线程还在后台换一条链路继续下，取消按钮就是假的。 */
+                    if f.is_cancel() {
+                        return Err(f.message().to_string());
+                    }
                     let keep = f.keep_partial();
                     last = f.message().to_string();
                     if !keep {

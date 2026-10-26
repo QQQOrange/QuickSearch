@@ -1,6 +1,6 @@
 [package]
 name = "quicksearch"
-version = "1.5.12"
+version = "1.5.14"
 edition = "2021"
 description = "Quick Search 桌面版 —— 任意软件里选中文字即可弹出搜索横条"
 build = "build.rs"
@@ -77,7 +77,7 @@ indexmap = { version = "1.9", default-features = false, features = ["std"] }
 # AES-256-GCM：带认证的对称加密，有 AES-NI 硬件加速、速度快；
 # Argon2id：由备份密码派生密钥，内存困难型 KDF，暴力破解成本极高。
 aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc", "rand_core"] }
-argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
+argon2 = { version = "0.5", default-features = false, features = ["alloc", "password-hash"] }
 rand = "0.8"
 
 # 在线 OCR 多引擎（需求 2）要用到 HMAC-SHA256：

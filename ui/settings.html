@@ -85,6 +85,16 @@
 
     <section class="card">
         <h2>系统</h2>
+        <!-- v1.5.13：界面语言。放在「系统」第一行 —— 它影响的是**整个界面**，
+             用户下意识会往"通用/系统"里找。切换即时生效（走 SEGS 泛型通路，
+             值随 set_setting 落盘），不要求重启。 -->
+        <div class="row col">
+            <div class="rt"><b>界面语言</b><small>切换后立刻生效，并写进本机配置（下次启动仍是这个语言）· 简体中文为默认</small></div>
+            <div class="seg" id="s-uiLang">
+                <button type="button" data-v="zh">简体中文</button>
+                <button type="button" data-v="en">English</button>
+            </div>
+        </div>
         <div class="row">
             <div class="rt"><b>开机自动启动</b><small>登录 Windows 后自动在后台待命</small></div>
             <label class="sw"><input type="checkbox" id="s-autoStart"><i></i></label>
@@ -92,6 +102,42 @@
         <div class="row">
             <div class="rt"><b>默认以管理员身份运行</b><small>只有管理员进程才能把 Ctrl+C 送进同样是管理员的软件（任务管理器、部分编辑器）。改完下次启动生效</small></div>
             <label class="sw"><input type="checkbox" id="s-autoElevate"><i></i></label>
+        </div>
+        <!-- v1.5.13：启动密码。
+             刻意**不**做成"勾一下就存"：密码要走一次明文输入 → Argon2id 哈希，
+             所以开关只负责展开/收起输入行，真正的落盘在「保存」那一刻。 -->
+        <div class="row">
+            <div class="rt"><b>启动密码</b><small>开启后启动软件必须先输入密码才能使用 · 与备份密码互不影响（两个密码可以不同，改一个不会动另一个）· 下次启动生效</small></div>
+            <label class="sw"><input type="checkbox" id="s-startupPwd"><i></i></label>
+        </div>
+        <div class="row col" id="rowStartupPwd" hidden>
+            <div class="rt"><b>设置启动密码</b><small>只在本机加密配置里存 <b>Argon2id 哈希</b>，不存原文 · 两次输入必须一致 · 想关掉就把上面的开关关掉</small></div>
+            <div class="upd-token-row">
+                <input class="txt" type="password" id="s-startupPwdVal" autocomplete="new-password"
+                       placeholder="输入启动密码">
+            </div>
+            <!-- 第二个框只做一件事：**防手滑**。
+                 启动密码一旦设错，下次启动就进不去软件（只能手改 config.json 里那行哈希），
+                 所以第一次设密码必须输两遍 —— 单框时代这里是个真能锁死人的坑。 -->
+            <div class="upd-token-row">
+                <input class="txt" type="password" id="s-startupPwdVal2" autocomplete="new-password"
+                       placeholder="再输入一次确认（防止打错把自己锁在外面）">
+                <button class="btn" type="button" id="btnStartupPwdSave">保存密码</button>
+            </div>
+            <div class="upd-token-status" id="startupPwdStatus"></div>
+        </div>
+        <!-- v1.5.14：关闭启动密码要**先验一次当前密码**（用户要求「要取消密码，
+             必须要再输一次解锁密码」）。所以开关一关不会立刻卸掉保护，而是落到
+             这一行：输对了才真的清掉哈希，输错/取消 = 什么都没动。 -->
+        <div class="row col" id="rowStartupPwdOff" hidden>
+            <div class="rt"><b>关闭启动密码</b><small>要先输入当前启动密码，验过才会真的关掉 · 与备份密码无关</small></div>
+            <div class="upd-token-row">
+                <input class="txt" type="password" id="s-startupPwdOff" autocomplete="current-password"
+                       placeholder="输入当前启动密码">
+                <button class="btn" type="button" id="btnStartupPwdOff">确认关闭</button>
+                <button class="btn" type="button" id="btnStartupPwdOffCancel">取消</button>
+            </div>
+            <div class="upd-token-status" id="startupPwdOffStatus"></div>
         </div>
     </section>
     </div>
@@ -1007,7 +1053,10 @@
 
     <!-- ============================ 帮助 ============================ -->
     <div class="pane" data-pane="help" hidden>
-    <section class="card">
+    <!-- ⚠ 这一整张卡有自己的一份英文版（_i18n_parts/helpCard.html），
+         靠 data-i18n-block 整块换掉 —— 三百多句长文拆成句键既难维护，
+         也会因为一个换行差异就失配退回中文。加/改帮助内容时**两边都要动**。 -->
+    <section class="card" data-i18n-block="helpCard">
         <h2>帮助 <small>从「怎么把它叫出来」到「数据存在哪」，一口气讲完</small></h2>
         <div class="hint">
             下面按<b>使用顺序</b>排：先看前三条就能用起来了，后面几条是按需查的细则。
@@ -1437,12 +1486,12 @@
                          空的时候由 CSS 的 :empty 收起来，不用 JS 切 hidden。 -->
                     <div class="upd-token-status" id="githubTokenStatus"
                          role="status" aria-live="polite"></div>
-                    <div class="upd-token-tip" id="githubTokenTip">
-                        填了之后所有 GitHub 请求都会带上它：接口额度从 <b>60 次/小时</b> 提到
-                        <b>5000 次/小时</b>，也只有填了才走<b>程序内自动下载</b>；留空时
-                        —— 不管是启动时自动检查到的，还是点「检查更新」查到的 ——
-                        都只提示有新版本并给出下载链接，不会自动下载。只需要公开仓库的读取权限；
-                        令牌只存在本机加密配置里，不会上传、不会写进日志。
+                    <div class="upd-token-tip" id="githubTokenTip" data-i18n-block="githubTokenTip">
+                        填了之后所有 GitHub 请求都会带上它：查版本时接口额度从 <b>60 次/小时</b> 提到
+                        <b>5000 次/小时</b>，不容易撞上限流。
+                        不管填没填，发现新版本都能直接点「下载」在程序里下好 ——
+                        令牌只影响「查版本」的额度，不影响下载。
+                        只需要公开仓库的读取权限；令牌只存在本机加密配置里，不会上传、不会写进日志。
                     </div>
                 </div>
                 <div class="upd-actions">
@@ -1514,6 +1563,8 @@
 <div class="toast" id="toast" hidden></div>
 
 <script src="shared.js"></script>
+<script src="i18n.js"></script>
+<script src="i18n.en.js"></script>
 <script src="settings.js"></script>
 </body>
 </html>

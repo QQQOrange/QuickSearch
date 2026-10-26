@@ -2904,6 +2904,9 @@ function bindBarStyle() {
 }
 
 const SEGS = [
+    // v1.5.13：界面语言（简体中文 / English）。走泛型通路：值是字符串，
+    // 后端 apply_one_setting 会过 config::normalize_ui_lang。
+    ['s-uiLang', 'uiLang', 'zh'],
     // 「图标风格」已撤：有图标用图标、没有用字母徽标，是唯一逻辑（用户要求）
     ['s-filterMode', 'filterMode', 'off'],
     ['s-sepStyle', 'sepStyle', 'line'],
@@ -3448,6 +3451,16 @@ function bindSwitches() {
                     CONF[key] = v;
                     if (key === 'theme') applyTheme(); else renderPreview();
                 }
+                /* v1.5.13：语言要**当场**换，不能等广播。
+                 *
+                 * 广播会到（后端 save 之后立刻 broadcast），但那段路要先落盘、
+                 * 再跨进程发事件；用户点一下「English」后两百毫秒界面才变，
+                 * 会以为"没点上"，然后反复点。这里直接调 i18n，广播到了
+                 * 再做一次（幂等，setLang 同语言直接返回）。 */
+                if (key === 'uiLang') {
+                    CONF[key] = v;
+                    if (window.QS_I18N) window.QS_I18N.setLang(v);
+                }
                 // ocrEngine 同理：先把本地 CONF 改掉再同步，否则下面这句读到的
                 // 还是旧引擎（切「Windows 本地」时百度专用行不隐藏、环境检测卡
                 // 不刷新），要等广播兜一圈才动 —— 点击 feedback 慢半拍。
@@ -3647,7 +3660,18 @@ async function refreshBackupSec() {
     ];
     /* 令牌单独提一句，但**不显示它的值** —— 这条状态条不需要、也不该出现凭据。 */
     if (st.hasToken) parts.push('含 GitHub 个人访问令牌');
-    sub.textContent = parts.join(' · ');
+    /* 每一截单独一个 `<span>`，只用 ` · ` 连起来。
+     * 拼成一整串的话，多语言那边只能当成一整句去查 —— 而这几截的**组合有
+     *  十几种**（能不能跨机 × 有没有凭据 × 有没有令牌），组合出来的句子永远
+     *  进不了字典。切开之后每截都是固定文案，各自查各自的表就行。
+     *  textContent 和原来的 `parts.join(' · ')` 完全一致，观感不变。 */
+    sub.textContent = '';
+    parts.forEach((p, i) => {
+        if (i) sub.appendChild(document.createTextNode(' · '));
+        const seg = document.createElement('span');
+        seg.textContent = p;
+        sub.appendChild(seg);
+    });
     box.appendChild(sub);
 }
 
@@ -6887,7 +6911,29 @@ function webviewLabel() {
  *  发新版时**同时**加一条，对不上就是漏了。 */
 const CHANGELOG = [
     {
+        ver: 'v1.5.14',
+        en: 'Startup password: setting one now asks for it twice and refuses to save when the two entries differ, turning it off requires re-entering the current password, and the unlock window finally closes the moment the password is accepted — plus a Quit button for when you would rather not unlock.',
+        items: [
+            '<b>设启动密码现在要输两遍</b> —— 第一遍填密码、第二遍确认，<b>两次不一样就不许保存</b>，会红字告诉你「两次输入的密码不一致」并把第二个框清空让你重输。这不是多余的礼貌：启动密码<b>没有找回入口</b>（忘了只能手动删配置文件里那行哈希），单框时代打错一个字母，下次启动就把自己锁在门外了。改密码、第一次设密码都走这一步。',
+            '<b>输对密码后锁屏窗立刻消失</b> —— 以前它会赖在屏幕上不动，明明密码对了却像卡住。原因是这个窗口为了防 Alt+F4 绕过密码，把「关闭」这件事整个拦住了 —— 连程序自己在密码正确后发的那次关闭也一起被拦。现在改成<b>直接销毁窗口</b>（不经过"关闭请求"这道闸），并且解锁之后的关闭请求一律放行，怎么都不会再卡住。',
+            '<b>解锁后会亮出主界面</b> —— 解锁成功不只是"窗口没了"：横条（平时只活在托盘里的那个搜索框）会跟着弹出来，你能直接开始用。',
+            '<b>锁屏窗左下角多了「退出程序」</b> —— 不想输密码、或者只是点错了，可以从这里干净地退出，不用去任务管理器杀进程。这条退出<b>不会</b>触发「退出时同步」：锁着的时候没必要把配置推到云端。',
+            '<b>关掉启动密码要先验一遍原密码</b> —— 开关一拨不会再直接卸掉保护：先让你输当前启动密码，<b>验过才真的清掉</b>；输错或点「取消」，保护一点没动、开关弹回打开。后端也认这一条：绕过界面直接给「设置」传空值会被拒，所以「再输一次密码」不是只摆在界面上看的。',
+        ],
+    },
+    {
+        ver: 'v1.5.13',
+        en: 'Interface language (Simplified Chinese / English) with a full English pass over every page and window, an automatic update prompt at launch with a download window that shows in the taskbar and a working Cancel, and an optional startup password that is separate from the backup password.',
+        items: [
+            '<b>新增：界面语言（简体中文 / English）</b> —— 「通用 → 语言」里切换，<b>当场生效、不用重启</b>，并且跟着配置持久化：换台电脑恢复备份之后还是你选的那种语言。中文是默认值，英文是一整套人工翻译（<b>不只是标签</b>：设置页每一段说明、帮助页整篇、横条面板、OCR 结果窗、更新窗、锁屏窗都在里面），切回中文是<b>还原成原文</b>而不是"再翻一遍"，所以你看到的每个字都和以前完全一样。',
+            '<b>新增：启动时提示新版本</b> —— 每次打开软件自动查一次，有新版就弹一个窗告诉你版本号、更新说明和体积。<b>下载窗口会出现在任务栏里</b>（不再是一个容易被当成后台进程的隐形窗口），下到百分之几、还剩多少都写在上面；<b>「取消下载」随时可点</b> —— 取消之后<b>不会再偷偷换一条链路继续下</b>，已经下好的部分留着，下次点下载接着下。',
+            '<b>新增：启动密码</b> —— 「通用 → 启动密码」可以开一项保护：开启后<b>启动软件必须先输入密码</b>，横条、快捷键 Ctrl+C、Ctrl+Alt+O、设置页、识图、托盘菜单<b>全都进不去</b>，输入正确才解锁。<b>关着的时候完全不影响使用</b>（默认就是关的）。它是<b>独立的一把密码</b>，和备份密码互不相同、互不影响：改这个不会动那个，忘了这个也照样能用备份密码恢复数据。密码本身只存 Argon2id 哈希，配置文件里看不到原文。',
+            '<small>说明：v1.5.7 定下的「没填令牌不许在程序内下载」这条规则去掉了 —— 真正吃 GitHub 额度的是"查版本"，而公开仓库的更新包匿名就能下。现在<b>无论填没填令牌，点了下载就开始下</b>；令牌只影响查版本的额度（60 → 5000 次/小时）。</small>',
+        ],
+    },
+    {
         ver: 'v1.5.11',
+        en: 'Downloads: the 15-second cap is gone, an interrupted download resumes where it stopped, a second entry point is tried automatically, and a failure now states the reason and offers the browser as a fallback.',
         items: [
             '<b>「能检测到新版、却下载不下来」修好了</b> —— 这不是网络问题（虽然看起来很像），是三个自己的毛病叠在一起。① <b>下载被 15 秒总超时掐断</b>：那个超时本来是给"查一下有没有新版"用的，结果连"把 13MB 下完"也算在里头 —— 网速慢一点就必然失败，报出来还是"下载中断"，谁都会以为是网络断了。现在下载只限制"连不上"和"卡住不动"，只要还在往下走，下多久都行。',
             '<b>下载断了能接着下，不用从头来</b> —— 以前网一抖、下到 90% 断了，整份作废，你再点一次还是从 0 开始，在不稳的网络里就永远下不完。现在会记住已经下了多少，断了从那个位置接着下；同一轮还会自动重试几次。',
@@ -6898,6 +6944,7 @@ const CHANGELOG = [
     },
     {
         ver: 'v1.5.10',
+        en: 'New optional “encrypted export” checkbox — forced on (and locked) whenever a private item such as an API key, token, password or favorite is selected.',
         items: [
             '<b>导出旁边多了「加密导出」勾选框</b> —— 你自己决定：勾了这份文件就是加密的（导入时要输密码），不勾就是明文（和以前一样，别人拿到直接就能导入）。',
             '<b>但勾到隐私项时会强制加密</b> —— API Key、个人访问令牌、WebDAV 密码、备份密码、收藏内容，只要选中了其中任何一项带内容，加密就会<b>自动勾上并锁住</b>。锁住不是不让你选，是这件事没得选：这些数据一旦明文落到别人手上，损失不是"打不开"而是"被拿走"。勾选框会明确写着"强制加密"，不会偷偷替你决定。',
@@ -6907,6 +6954,7 @@ const CHANGELOG = [
     },
     {
         ver: 'v1.5.9',
+        en: 'The personal access token can be exported now, and any export that carries it is encrypted automatically.',
         items: [
             '<b>个人访问令牌现在也能导出了</b> —— 以前它不属于任何一个导出分组，勾选界面上根本看不见它，等于"备份里带着、导出时带不走"。现在单列成「个人访问令牌」一项，默认不勾，要带走自己打勾。',
             '<b>带令牌的导出会被自动加密</b> —— 令牌给别人就等于把账号访问权给出去了，所以那份文件不再明文落盘，改用你的<b>备份密码</b>加密；接收方要在「备份」页填上同一个密码才能导入。没设过备份密码时会直接提示你先设一个，<b>绝不会</b>偷偷写成明文。',
@@ -6917,6 +6965,7 @@ const CHANGELOG = [
     },
     {
         ver: 'v1.5.8',
+        en: 'New “Verify” and “Save” buttons beside the token: a precise verdict (whose token, classic or fine-grained, quota, remaining) and an explicit receipt when saving.',
         items: [
             '<b>令牌多了「验证」和「保存」两颗钮</b> —— 你要的。以前填完令牌只能靠"点一次检查更新"来试探它到底能不能用，现在可以先把令牌发给 GitHub 问一句：<b>「验证」会说清这是谁的令牌、是经典还是细粒度、每小时额度多少、本小时还剩多少次</b>。结果直接显示在输入框下面那一行，不会一闪就没了。',
             '<b>「验证」不会动你的配置</b> —— 它只拿输入框里当前这串去问一次，<b>不落盘</b>。所以你可以先验一个抄来的令牌，确认能用再保存，不用担心把原来好好的那个覆盖掉。输入框一改动，上一次的"✓ 有效"会自动消失（它给的是那串旧值的结论，留着会误导）。',
@@ -6926,6 +6975,7 @@ const CHANGELOG = [
     },
     {
         ver: 'v1.5.7',
+        en: 'New: GitHub personal access token, raising the API quota from 60 to 5000 requests per hour and telling you exactly why a verification failed.',
         items: [
             '<b>新增：GitHub 个人访问令牌（解决"检查更新老是失败"）</b> —— 更新页多了一个输入框，填上令牌后所有 GitHub 请求都会带上它，接口额度从 <b>60 次/小时</b> 提到 <b>5000 次/小时</b>。不用再靠"少调接口"绕限额：有令牌时一次请求就把版本号、说明、下载地址全拿回来。令牌只存在<b>本机加密配置</b>里，不会上传、也<b>不会写进日志</b>；填错或过期时会自动退回匿名请求，并明确告诉你原因，不会让更新功能整个坏掉。',
             '<b>没填令牌时：只提示有新版本，不自动下载</b> —— 按你说的加了一条判断：没有令牌时程序<b>不执行自动下载</b>，而是把 GitHub 下载链接<b>完整显示出来</b>，点一下（或点「用浏览器下载」）就在浏览器里下。填了令牌才是原来的「下载并安装」——程序内下好、校验、替换。这条对<b>两种检测方式都成立</b>：启动时自动查到的、手动点「检查更新」查到的，一律只给链接；后端还有一道硬拦，绕不过去。判断按<b>当前</b>配置现算 —— 你当场填上令牌，按钮立刻就变，不用再查一次。',
@@ -6935,6 +6985,7 @@ const CHANGELOG = [
     },
     {
         ver: 'v1.5.6',
+        en: 'Ctrl+C now always shows the bar (even when nothing was copied), the empty bar never carries stale clipboard content, and the reaction time dropped from 500 ms to 120 ms.',
         items: [
             '<b>补一条逻辑：Ctrl+C 哪怕没复制到文本，也一定弹横条</b> —— 你指出的：「现在有两种唤出横条的方式，一种是选中文本，一种是用 Ctrl+C，所以按 Ctrl+C 的时候，哪怕没有复制到文本，那也得换出横条」。以前这条通道其实<b>挂在"剪贴板必须变"这个前提上</b>：在那些"不接受复制"的软件里按 Ctrl+C，你看到的和"没这个功能"一模一样。现在 Ctrl+C <b>无条件弹</b>：复制成功就带文字弹；复制到的是图片就弹「识别图片文字」；什么都没复制到就弹一条<b>空横条</b>（还能点识图 / OCR，至少知道软件在工作）。',
             '<b>空横条不会装上次剪贴板里的旧内容</b> —— 这点特意守住了。以前"按了 Ctrl+C 就读剪贴板"的老毛病，就是在终端按 Ctrl+C（等于中断信号）、对话框里复制空选区、手滑碰一下，都会弹出一条装着你<b>上一次复制的东西</b>的横条，那正是"横条莫名其妙冒出来"的真正来源。现在走"没复制到"这条路时一律是空的，旧内容一个字都不会带出来。',
@@ -6944,6 +6995,7 @@ const CHANGELOG = [
     },
     {
         ver: 'v1.5.5',
+        en: 'Fixed “pop-up position”: when the real caret can\'t be read, the drag start and end points are used instead, so above/below finally works in browsers too.',
         items: [
             '<b>修：「弹出位置」其实没生效（选上方也弹在下面）</b> —— 你报的：「我不管是调文字上方还是文字下方，最后它出现的都是在文字下方」。上一版只做了「怎么选上下侧」的判断，<b>没检查"文字在哪"这个前提拿不拿得到</b>：程序问系统要光标位置用的那套接口，<b>只有记事本、输入框这类原生控件才给</b>；浏览器、Electron 程序里的光标是网页自己画的，系统那层永远报"没有光标"。拿不到 → 只能退回<b>贴鼠标</b>，而鼠标停在选区的右下角 —— 于是看起来永远在文字下方，两个选项完全没差别。现在改成：真光标拿不到时，<b>用你这次划选的两个点（按下 → 抬起）当文字范围</b>，上下各留半个行高再去判断 —— 浏览器、Electron、任何能划选的地方都有效。日志里能直接看出走了哪条路（<code>src=caret</code> / <code>src=drag</code>）。',
             '<b>顺带验证过的边界</b>：贴着屏幕最上沿划词、又选了「文字上方」时，会自动翻到下方，不会被压出屏幕。',
@@ -6952,6 +7004,7 @@ const CHANGELOG = [
     },
     {
         ver: 'v1.5.4',
+        en: 'New: choose whether the bar appears above or below the selected text, with automatic flipping when there is no room.',
         items: [
             '<b>新增：横条可以选「弹在文字上方还是下方」</b> —— 你要的：「还要可以选择横条是在选中文字的上方还是下方」。设置页 <b>外观 → 横条外观 → 弹出位置</b> 里选，默认<b>文字上方</b>（和以前一样：不盖住你刚选中的字）。这只是<b>首选方向</b>：选的那一侧放不下时，照样会自动翻到另一侧，不会出现"选了下却飞到了屏幕外"。打开「横条跟随鼠标位置」时本项无效（那条路一律贴鼠标），控件会置灰。改动<b>下次弹横条就生效</b>，不用重启。',
             '<b>「点横条外面就收起」确认完好</b> —— 你这次也问了这条。其实 v1.3.0 起就有：横条弹着的时候，鼠标左键/右键点到横条外面任何地方（别的窗口、桌面、任务栏都算），横条立刻收起；唯一例外是<b>收藏夹面板被钉住</b>的时候（钉住就是"别被随便点掉"）。从本机运行日志里抽查过：弹条 → 点外面 → 收起，链路是通的。要是你遇到过"点了外面没收起来"，告诉我是哪种情况（比如点在横条半透明的阴影上？），我再复现。',
@@ -6959,6 +7012,7 @@ const CHANGELOG = [
     },
     {
         ver: 'v1.5.3',
+        en: 'Fixed garbled text when selecting in browsers (the selection is verified and corrected), and the huge blank area after maximizing the window.',
         items: [
             '<b>修：划词取到的字不对，拿去搜是一串垃圾</b> —— 你报的：「选中了 马尾辫skill安装，用横条里的谷歌搜索，就变成了《马尾辫 sk 泔安装、」。根因不在引擎，在<b>取词</b>：浏览器和 Electron 程序里我们<b>不用系统无障碍接口</b>（Chromium 那套唤不醒），只能<b>读屏幕上那块像素认字</b>；认中英混排的小字很不稳，于是「马尾辫skill安装」被认成「《马尾辫 sk 泔安装、」（开头多一个《、结尾多一个、、skill 被认断成 sk 泔），再原样喂给谷歌。现在这类程序里取到字之后会<b>再校一遍</b>：模拟一次 Ctrl+C 把选区原文读回来（剪贴板读完立刻还原），拿到精确文字再替换掉认错的那份 —— 所以你看到横条弹出来、半秒内文字被纠正，点了引擎搜的就是对的。别的自绘程序（微信这类）不乱塞按键，改成<b>只在"看起来就像认歪了"时</b>才校：首尾多出落单的标点（如只有《没有》）、中间夹着 sk 这种碎字母片段，两条同时才算。',
             '⚠ 代价说清楚：浏览器里现在每次划词都会多用一次剪贴板（复制选区 → 读 → 立刻还原，约 30~80ms，你看不出来，但 Win+V 剪贴板历史里可能多一条）。要是你觉得这个代价不值，说一声，我可以改成"只在可疑时才校"。',
@@ -6967,18 +7021,21 @@ const CHANGELOG = [
     },
     {
         ver: 'v1.5.2',
+        en: 'Double-clicking the tray icon now opens settings; a single click does nothing.',
         items: [
             '<b>双击托盘图标 = 打开设置</b> —— 你要的那条。同时把<b>单击</b>打开设置这条关掉了：托盘就紧挨着时钟，误点一下弹出一个设置窗太容易（这一版前半段修的就是"误触发"）。现在进设置只有两条<b>明确</b>的路：<b>双击图标</b>，或右键菜单里的「设置…」。<br>⚠ 顺带填了一个底层坑：Tauri 用的托盘库给消息窗注册的窗口类<b>没带 CS_DBLCLKS</b>，系统的"双击"消息根本不会发出来 —— 只写原生双击事件的话，表现就是"双击毫无反应"、日志里也什么都没有。所以现在是两条路一起走：原生双击事件来了就开，没来就按「两次点击落在系统双击时限内」自己判一次。双击速度在 Windows 鼠标设置里调过也跟着走，不用改程序。',
         ],
     },
     {
         ver: 'v1.5.1',
+        en: 'Appearance page reordered to theme → preview → appearance options, so the preview stays in view while you tweak.',
         items: [
             '<b>「外观」页重排：主题 → 预览 → 外观参数</b> —— 你要求的：「在外观面板里面，把预览应该放在最上面，不应该放最下面，放在最下面就不能够有一种即时的观察了。界面主题这一栏应该也放在外观」。现在这一页从上到下就是这三块：<b>界面主题</b>（明暗皮肤，它一变预览整条跟着换皮）→ <b>横条预览</b> → <b>横条外观</b>（样式 / 玻璃 / 图标大小 / 内边距 / 不透明度 / 动画）。这样拖参数时，预览就在上面的视野里，改一下看一眼。',
         ],
     },
     {
         ver: 'v1.5.0',
+        en: 'Fixed the bar appearing out of nowhere, added pointer-distance and idle auto-hide, and split settings into more tabs.',
         items: [
             '<b>修：横条会「莫名其妙地冒出来」（这版的主修）</b> —— 你报的：「有时候横条会莫名其妙的出来，明明我只设置两种出来的方式」。查下来是三处兜底在乱弹：① 以前<b>只要按了 Ctrl+C 就弹</b>，于是 Ctrl+C 在终端里是「中断」、在对话框里是「复制一个空选区」、手滑碰一下……都会弹出一条装着<b>上一次剪贴板内容</b>的横条。现在会先等剪贴板<b>真的变了</b>（最多等 0.5 秒，落地即弹）才弹；② 拖选那条路以前<b>取不到文字也弹</b>（r89"任何情况都要弹"的兜底），于是拖窗口、拖滚动条、拖画布、拖文件都会被当成划选，弹一条空横条。现在<b>没拿到文字就不弹</b>，这条可以在「通用 → 触发 → 没取到文字就不弹」里关掉；③ 取词慢的时候（要试三条通道，几百毫秒），你在这中间点了别处或按了 Esc，它读完<b>照样会弹出来</b>。现在这种情况直接作废。',
             '<b>新增：横条会自己收起来了</b> —— 你要的两条：<b>「鼠标移远就收起」</b>（指针离弹出位置超过 400px，说明这条你不要了，立刻收起）和<b>「无操作自动收起」</b>（弹出后 5 秒没有任何操作就消失）。两个数都能在「通用 → 触发」里用滑块调，<b>0 = 不收起</b>。指针正搁在横条上不动、或者「更多引擎」面板/右键菜单开着的时候<b>不算"没操作"</b>—— 你正指着要点的东西，不能给你收走。',
@@ -6987,6 +7044,7 @@ const CHANGELOG = [
     },
     {
         ver: 'v1.4.4',
+        en: 'Second-level engine categories became pills, the category highlight bug was fixed, and the test suite went green for the first time.',
         items: [
             '<b>「更多引擎」的二级目录也改成胶囊了</b> —— 你要求的：「最好中类也作为胶囊式的，点击中类后，才会展开中类下面的小类」。以前二级（搜索引擎 / 直达网页 / 软件搜索 / 软件直达）是<b>一个胶囊 + 下拉菜单</b>：中类一共就两三个，全铺开也只有一行，却还要多点一次"展开"再选。现在三级一个口径 —— 大类、中类、小类<b>全是平铺胶囊</b>，点谁看谁，「全部中类」恢复全量；下一级只在上一级真的选了一个之后才出现。和设置页「引擎库」的目录长得、用起来也都一样了。',
             '<b>修：点了中类 / 小类，胶囊不高亮</b> —— 顺着这次改动查出来的一个老问题（三级从 r73 起就是胶囊，一直藏着）：面板滚动时那个"高亮当前分类"的逻辑会把<b>所有</b>目录按钮按分类名重画一遍，而二、三级胶囊是筛子、没有分类名，于是点完选中的那颗<b>立刻被熄灭</b>—— 界面看着像"根本没点上"。现在筛选行一律不归它管，点谁谁亮。',
@@ -6995,6 +7053,7 @@ const CHANGELOG = [
     },
     {
         ver: 'v1.4.3',
+        en: 'Changing a setting no longer feels sticky (the encryption key is derived once per session), plus a full optimization review report.',
         items: [
             '<b>提速：改设置不再"发涩"</b> —— 每改一个开关，程序都要把配置重新加密存盘，而那个加密（Argon2id，为了抗暴力破解特意设计得很"重"）每次都要花 <b>120~150 毫秒</b>，还是在你点完开关的那一瞬间花掉的，连点几个就能感觉到卡。现在同一把密码只算一次，后续保存几乎瞬时。<b>加密强度一点没降</b>：参数、算法、每条独立的 nonce 全都保持原样，改动的只是"同一台机器上不必反复重算同一把钥匙"。顺带启动时也不再重复解密同一份配置。',
             '<b>顺带：这版附了一份全盘审视报告</b> —— 把代码结构、健壮性、性能、体积、界面这五个方面过了一遍，按优先级列了 20 条可优化项和一张路线图（`docs/OPTIMIZATION-REVIEW-2026-10-22.md`）。其中最大的一块是<b>图标体积</b>：现在 2.6MB 的图标里有三个文件就占了 500KB，全部压到显示需要的尺寸后，程序本体能小 1.6MB 左右 —— 这一项要逐个目视验收，放在下一版做。',
@@ -7002,6 +7061,7 @@ const CHANGELOG = [
     },
     {
         ver: 'v1.4.2',
+        en: 'Fixed searching inside “More engines” (four bugs at once), flattened the section pills, and added a panel opening animation.',
         items: [
             '<b>修：在「更多引擎」里搜引擎，有时候搜不出来（这一版的主修）</b> —— 你报的：「搜索哔哩哔哩，照理应该搜出它的首页和它的搜索引擎，结果只有首页」。查下来是四个坑叠在一起：① 敲<b>第一个字</b>时面板正好命中"内容没变就不重画"的缓存，于是那一下<b>既没筛选也没填充</b>；② 关面板时只复位了"大类"筛选，<b>中类/小类</b>那两个筛子还留在内存里，而它们的目录按钮是"选了大类才出现"的 —— 于是变成一个<b>既看不见、也点不掉</b>的筛子，搜索永远只在一半引擎里进行；③ 搜索时顶上「最近使用」那一栏没收起来；④ 像「哔哩哔哩」这种<b>横条固定位 + 引擎库</b>里都有的引擎，它的<b>别名</b>（B站 / 小破站 / bilibili）被横条那一份覆盖掉了，按别名一律搜不到。现在四件事都修了：进搜索就清掉三层筛子、第一下输入立刻生效、搜索时收起「最近使用」、别名改成全表合并。实测搜「哔哩哔哩 / B站 / 小破站 / bilibili」都能出齐三颗（哔哩哔哩、哔哩哔哩（首页）、哔哩哔哩漫画（首页））。',
             '<b>新增：小类目录不再藏在下拉菜单里</b> —— 你要求的：「选择完中类之后，小类最好是每一个就都呈现出来，一种胶囊的形式，这样我要哪个我点击就可以了，不用再一个个的找」。横条面板里的第三级（视频 / 音乐 / 购物…）从"一个胶囊 + 下拉菜单"改成<b>一整行平铺胶囊</b>，点谁就只剩谁；设置页「引擎库」的小类胶囊也统一成"<b>点一下 = 只看这一类，再点一次恢复全部</b>"。',
@@ -7011,6 +7071,7 @@ const CHANGELOG = [
     },
     {
         ver: 'v1.3.8',
+        en: 'Selecting a URL now offers “Open link”, and selecting a file path adds 📄 to open it with the default program.',
         items: [
             '<b>修：选中网址却不弹「打开网址」按钮</b> —— 你报的：「我选中了一个网址但横条里并不能够弹出直达网址的按钮，但是如果我把这段网址复制下来了，因此而弹出的横条里面却能有直达网址的按钮」。根因是两条路拿到的<b>文字不一样</b>：复制走剪贴板是干净原文，而划词在浏览器里走 OCR 兜底，OCR 会把网址从中间断开（<code>https:// www.baidu.com</code>）、行尾多一个空格 —— 于是"整串是不是网址"判成 false，按钮不出现。现在判据对这类噪声放宽了（空白/零宽字符会被接回去），而且按钮点下去时会把这段文字一起发给后端重新判一次，不再依赖那个已经判失败的状态。',
             '<b>新增：选中文件路径 → 📄 用默认程序打开</b> —— 你要求的：「还要再增加一个直达文件的功能，就是说我选中了一个文件路径，那这个时候横条上就会弹出一个按钮，点击这个按钮就会自动调用系统默认的相应文件的软件来打开这个文件」。现在选中一个<b>文件</b>路径时横条上出现两颗按钮：📁 在文件管理器里定位（原有）、📄 用系统默认程序打开（.txt → 记事本、.mp4 → 播放器，和你在资源管理器里双击完全一致）。<b>目录只有 📁</b>（目录没有"默认程序"这个概念）。',
@@ -7019,6 +7080,7 @@ const CHANGELOG = [
     },
     {
         ver: 'v1.3.7',
+        en: 'Fixed the “refresh rate” row showing up under the default and frosted styles, and stabilized two flaky tests.',
         items: [
             '<b>修：默认 / 磨砂主题下不该出现的「刷新帧率」</b> —— 你指出的：「液态玻璃里面有一个实时折射，然后就可以设置刷新的帧率，那么在默认和磨砂的横条主题下就没有必要来设置刷新的帧率」。根因是这一行的显隐只看了「实时折射开没开」，没看当前是哪种样式：只要你<b>开过玻璃 + 开过实时折射，再切回默认或磨砂</b>，那一行就凭一个残留的开关值又冒了出来 —— 而这两个样式下玻璃画布根本不跑，四个按钮全是无效的。现在两个条件同时满足才显示（<b>液态玻璃样式</b> + <b>实时折射开着</b>）。',
             '<b>顺手：两条自动化测试的偶发失败</b> —— 跑 300 遍测试时会以约 1/100 的概率红一次，根因是测试之间互相踩（都通过同一个环境变量拿数据目录，谁先改谁影响别人）。这不是功能问题，但"时红时绿"会让人以后不敢信测试结果，所以这一版把它们的隔离做严了：现在<b>连续 300 遍全绿</b>。',
@@ -7026,6 +7088,7 @@ const CHANGELOG = [
     },
     {
         ver: 'v1.3.6',
+        en: 'Baidu image search is about 7× faster (IPv4 first), key presses and uploads run in parallel, and auto-paste behaves correctly with several AI engines ticked.',
         items: [
             '<b>修：百度识图慢的真正原因（快了 7 倍）</b> —— 你报的「用百度引擎搜图，要等好多秒才能打开新标签」，根因不在百度、也不在我们的流程，而在<b>这台机器的 IPv6 是"假的"</b>：系统解析出的地址里 IPv6 排在前面，但这台机器的 IPv6 实际连不通，于是每个网络请求都要先在 IPv6 上白等一次超时（实测 6 秒）才回退到 IPv4。同一个百度上传请求：走 IPv6 白等 <b>6613ms</b>，走 IPv4 <b>627~901ms</b>。现在所有网络请求都改成<b>优先走 IPv4</b>（只有对方真没有 IPv4 地址时才用 IPv6），识图搜索、云端备份同步、检查更新、AI 模型下载<b>一起受益</b>。',
             '<b>识图：按键和上传并行，不再排队</b> —— 以前是"先给 AI 页面按完 Ctrl+V / Enter，再去上传百度"，两件事明明是独立的却排成一队。现在按键线程一启动、上传同时在飞。顺序仍然是「<b>先按完键，再开识图的新标签页</b>」——新标签会抢前台，会把你那张图粘进搜索引擎的搜索框里。',
@@ -7038,6 +7101,7 @@ const CHANGELOG = [
     },
     {
         ver: 'v1.3.5',
+        en: 'Recovered from a settings-wipe incident: encrypted backups are recognized and opened automatically, the backup password gets its own copy, and restores pick the most complete backup.',
         items: [
             '<b>修：这次更新让全部设置丢了（严重）</b> —— 你的 OCR Key、WebDAV 账号密码、收藏夹、两个自定义快捷键引擎、AI 模型选择全被恢复成默认。原因不是"更新会覆盖配置"，而是<b>配置损坏后的自动恢复链断在半路</b>：你设了备份密码，备份是加密的，而程序<b>只会按明文去读</b>，于是所有备份"都读不出来"；退而用默认配置启动，随即又把那份好的加密备份删了。已完整恢复你的数据，并堵死了整条链。',
             '<b>加密备份现在能自动解开了</b> —— 之前程序把密文备份当成"能读但内容是空的"（因为配置结构体对未知字段宽容，密文信封被当成一份全默认配置）。现在先判断它是不是密文，是就只走解密。',
@@ -7051,6 +7115,7 @@ const CHANGELOG = [
     },
     {
         ver: 'v1.3.4',
+        en: 'Cleanup: removed dead code, a failed runtime load no longer kills a background thread, and configuration pruning is written to disk.',
         items: [
             '<b>全盘审视：清理了一批死代码</b> —— 横条前端有 8 个函数写了却从没被调用过（面板导航、收藏布局的旧实现），共约 120 行。删掉它们不影响任何功能，但让代码更好读、更不容易误导后来改它的人。',
             '<b>修：AI 抠图运行库加载失败会打崩一个后台线程</b> —— 当 onnxruntime.dll 缺失或损坏时，底层库会直接 panic。虽然程序没整个崩，但那个线程废了。现在把探测放到一次性线程里跑，失败就安静地当"不可用"，主流程完全无感。',
@@ -7059,6 +7124,7 @@ const CHANGELOG = [
     },
     {
         ver: 'v1.3.3',
+        en: 'Hotkey engines no longer force a background app to the foreground; a new per-engine switch controls it.',
         items: [
             '<b>快捷键引擎：后台挂着的应用不再被强行换到前台</b> —— 你原来就提过这个：微信截图、章鱼速贴这类工具在后台挂着的时候，点横条上那颗图标，<b>没必要把它的主窗口整个弹出来</b>再发快捷键。现在默认就是<b>不动它的窗口</b>，直接把按键发给系统。',
             '<b>每个快捷键引擎多了一个开关</b>：绑定应用那一组里新增「<b>把应用窗口调到前台再发键</b>」。<ul style="margin:4px 0 0 18px;padding:0"><li><b>不勾（默认）</b>：应用已经在后台跑 → 不弹它的窗口，你手上的事不被打断；</li><li><b>勾上</b>：每次触发都先把它的主窗口摆到最前面再按键 —— 适合必须在那个窗口里才生效的程序。</li></ul>应用<b>本来没开</b>时，两种情况都会先把它打开（那时会露出来，这是应该的）。',
@@ -7067,6 +7133,7 @@ const CHANGELOG = [
     },
     {
         ver: 'v1.3.2',
+        en: 'Fixed hotkey engines that would not fire (the bar itself held the foreground) and removed a “post message” path that faked success.',
         items: [
             '<b>修：章鱼速贴这类快捷键点不动（真正的根因）</b> —— 上一版我以为是"按键注入方式"的问题，其实不是。真正的原因是：<b>你点横条上那颗图标的那一瞬间，横条自己占着前台</b>，注入的按键就打在了我们自己身上，目标程序的全局热键根本收不到。现在改成<b>先收起横条、把前台还给你刚才在用的窗口，再发按键</b>。',
             '<b>顺带去掉了一处"自作聪明"的实现</b>：上一版我试过用窗口消息把按键"直接投给目标窗口"（想做<u>不抢焦点</u>），它返回的成功是假的 —— 消息塞进队列就没人管了，程序那头毫无反应。现在只剩一条路：<b>老老实实注入按键</b>，交给系统去分发。',
@@ -7074,6 +7141,7 @@ const CHANGELOG = [
     },
     {
         ver: 'v1.3.1',
+        en: 'Orphaned entries on the bar are cleaned up, tray-only hotkey apps work again, and bound apps stay in the background.',
         items: [
             '<b>修：横条上明明有、引擎库里却找不到</b> —— 横条里如果留着一个"没有定义"的旧名字（删引擎时没清干净、或从旧备份恢复带进来的），引擎库就永远看不到它，搜索也搜不到，可横条上那一格还在。现在打开软件时会自动把这类孤儿条目清掉；另外新加的自定义引擎会<b>自动放进横条</b>。',
             '<b>修：章鱼速贴这类快捷键唤不出来</b> —— 它们常驻在托盘、没有可见窗口，靠"系统级全局热键"响应。上一版换了按键注入方式，恰好对这类热键无效。现在改回能触发全局热键的那种方式，并且<b>不会把它的窗口弹到前台</b>。',
@@ -7085,6 +7153,7 @@ const CHANGELOG = [
     },
     {
         ver: 'v1.3.0',
+        en: 'Adjustable live-refraction frame rate, binding an app automatically adopts its icon, and “restart now” no longer leaves the app closed.',
         items: [
             '<b>横条的"实时折射"可以调刷新率了</b>（新）：上一版把背景刷新限到了 15 帧/秒，<b>滚动网页或放视频时玻璃会慢半拍、看着像卡住</b>。现在改成可调 —— 「液态玻璃」那一组里多了一行「刷新帧率」，默认 <b>30</b>（滚动、放视频都已看不出滞后），嫌费电可以调低，想最跟手就选「跟随显示器」跟着屏幕刷新率跑。每一档后面都标了实测的 CPU 占用，方便你按机器情况挑。',
             '<b>快捷键引擎：选中应用就自动用它的图标</b>（新）：给快捷键引擎「绑定应用」时，选完那个程序，<b>软件会自动把它的图标抠出来当作这个引擎的图标</b>，横条上一眼就能认出来 —— 不用再自己去截图、裁剪、上传。开始菜单里的快捷方式同样管用。<b>如果你已经手动换过图标，它不会覆盖你的选择</b>；想换回应用图标，用「恢复默认图标」清掉后再选一次应用即可。',
@@ -7095,12 +7164,14 @@ const CHANGELOG = [
     },
     {
         ver: 'v1.2.2',
+        en: 'Fixed idle CPU usage caused by two draw loops running at full refresh rate.',
         items: [
             '<b>修：待机时 CPU 占用偏高</b> —— 上一版为了让玻璃更跟手，开了两条各自跟着屏幕刷新率跑的绘制循环，实测每秒被调用 180 多次（本该 60）。对一条静止的横条来说，多出来的那些帧全是白烧的。现在按需绘制，空闲时<b>基本不占 CPU</b>。',
         ],
     },
     {
         ver: 'v1.2.1',
+        en: 'The icon hover outline now shares the bar\'s corner radius, both on the real bar and in the preview.',
         items: [
             '<b>修：图标悬停外框的圆角跟横条对不上</b> —— 鼠标压到图标上时那个外框，圆角一直和横条差着 4px（横条写死了"+4px"这个补偿），圆角调小的时候特别明显，看着很不协调。现在改成<b>同心</b>：横条圆角 = 图标圆角 + 内边距，两者弧线永远平行，滑块滑到哪一格都对得上。',
             '顺带修了同一处的"双胞胎"：设置页右上角的<b>横条预览</b>是另一份实现，原来也写着同样的 +4px。只修真身的话，你在预览里调好了、用到真身上又不对。现在两边用同一套算法。',
@@ -7108,6 +7179,7 @@ const CHANGELOG = [
     },
     {
         ver: 'v1.2.0',
+        en: 'Automatic updates, the repository link on the About page, and custom icons baked in as defaults.',
         items: [
             '<b>自动更新</b>（新）：「关于」页里多了一个勾选框 —— 勾着时每次打开软件都会自动检查新版本，<b>没新版就什么都不发生</b>；有新版会告诉你可以下载。<b>下载不跳浏览器</b>：在软件内部下好、自动校验、自动换掉旧程序，装完点「立即重启」就行。旁边还有一颗「检查更新」按钮，不受那个开关限制，随时可以手动查一次。',
             '<b>关于页加上项目地址</b>：GitHub 仓库地址直接标在「关于」里，点一下用系统默认浏览器打开。',
@@ -7127,6 +7199,7 @@ const CHANGELOG = [
     },
     {
         ver: 'v1.1.1',
+        en: 'Fixed downloads that looked like they ran several times, the stale version number on the About page, and added “clean leftovers”.',
         items: [
             '<b>修：点一次下载却像下了好几遍</b> —— 同时发起多个下载时，它们会抢同一个临时文件、互相把对方下到一半的文件删掉，结果每一轮都失败、界面看着像"重复下载"。现在同一时刻只允许一个下载，重复点会明确提示"已经有一个在进行中"。',
             '<b>修：关于页的版本号不跟着更新</b> —— 之前版本号有两处是手写的，发新版时容易漏改。现在只从一处（构建配置）读取，不可能再对不上。',
@@ -7135,6 +7208,7 @@ const CHANGELOG = [
     },
     {
         ver: 'v1.1.0',
+        en: 'AI-powered icon cutout with four downloadable models, brush touch-ups, model switching, and a configurable model folder.',
         items: [
             '<b>图标抠图换成 AI</b>：用神经网络识别主体，主体和背景颜色接近的图也能抠。四个模型按需下载（<b>4.4MB 的轻量版实测反而最准</b>，另有三档 42/84/168MB 可选），不打开这个功能就一个都不下。',
             '<b>涂抹修饰</b>：抠完直接在结果图上涂 —— 「擦除」把多余的部分涂掉、「保留」把误删的部分补回来；可<b>放大 1~8 倍</b>再涂，涂错能撤销、能重来。',
@@ -7146,6 +7220,7 @@ const CHANGELOG = [
     },
     {
         ver: 'v1.0.0',
+        en: 'First release: image search, file-path shortcuts, plain-text import/export, multi-engine OCR, 777 engines, three bar styles, the icon editor, favorites and backups.',
         items: [
             '<b>识图搜索</b>：横条上多一颗 🖼，框一块屏幕就能以图搜图。十二家引擎可选（Yandex / 百度 / SauceNAO / trace.moe 是框选完直接把图交给它、浏览器落在结果上；六家 AI 是打开页面自动粘贴；另有两家按图片地址搜），默认带上 Yandex 和 SauceNAO；勾多家则一次框选后每家的结果各开一个新标签页。动漫截图可以用 trace.moe —— 番名（含中文）、第几集、几分几秒、相似度直接列在本地结果页上。',
             '<b>文件路径快捷打开</b>：选中一段本地路径（<code>C:\\...</code>、<code>\\\\server\\share</code>、带斜杠的、含 %VAR% 的都认），横条上自动多一颗 📁，点一下就在资源管理器里定位到它。',
@@ -7159,6 +7234,44 @@ const CHANGELOG = [
         ],
     },
 ];
+
+/* 更新日志：**语言切换时要整块重画**。
+ *
+ * 英文版每个版本只有一句摘要 —— 中文那份是一手开发记录（每条都在解释
+ * "你报的现象 → 根因 → 怎么修"，动辄几百字），逐句译成英文既冗长又容易
+ * 走样；用户要看的是"这一版改了什么"，一句话就够。
+ *
+ * 用 `dataset.painted` 记住当前画的是哪种语言，避免每次配置广播都重画。 */
+function paintChangelog() {
+    const cl = $('changelog');
+    if (!cl) return;
+    const lang = (window.QS_I18N && window.QS_I18N.lang === 'en') ? 'en' : 'zh';
+    if (cl.dataset.painted === lang) return;
+    cl.textContent = '';
+    for (const rel of CHANGELOG) {
+        const g = document.createElement('div');
+        g.className = 'cl-ver';
+        g.textContent = rel.ver;
+        const ul = document.createElement('ul');
+        ul.className = 'cl-list';
+        const items = (lang === 'en' && rel.en) ? [rel.en] : rel.items;
+        for (const it of items) {
+            const li = document.createElement('li');
+            // 条目里允许两种行内标记：`<b>粗</b>` 写 HTML、`` `代码` `` 转 <code>。
+            // 都是这份常量自己写的，不是外部输入。先转 <b>（inline markup）
+            // 再把反引号换成 <code> —— 顺序不能反，否则 <b> 里的反引号会被误判。
+            li.innerHTML = it
+                .replace(/`([^`]+)`/g, '<code>$1</code>');
+            ul.appendChild(li);
+        }
+        cl.appendChild(g);
+        cl.appendChild(ul);
+    }
+    cl.dataset.painted = lang;
+}
+
+/* 语言一换就重画一次（i18n.js 在 setLang 之后派发这个事件）。 */
+window.addEventListener('qs:lang', () => { paintChangelog(); });
 
 function fillAbout() {
     qsSetText('aboutDev', CONF.developer || 'QQQOrange');
@@ -7184,28 +7297,7 @@ function fillAbout() {
         box.dataset.done = '1';
     }
 
-    const cl = $('changelog');
-    if (cl && !cl.dataset.done) {
-        for (const rel of CHANGELOG) {
-            const g = document.createElement('div');
-            g.className = 'cl-ver';
-            g.textContent = rel.ver;
-            const ul = document.createElement('ul');
-            ul.className = 'cl-list';
-            for (const it of rel.items) {
-                const li = document.createElement('li');
-                // 条目里允许两种行内标记：`<b>粗</b>` 写 HTML、`` `代码` `` 转 <code>。
-                // 都是这份常量自己写的，不是外部输入。先转 <b>（inline markup）
-                // 再把反引号换成 <code> —— 顺序不能反，否则 <b> 里的反引号会被误判。
-                li.innerHTML = it
-                    .replace(/`([^`]+)`/g, '<code>$1</code>');
-                ul.appendChild(li);
-            }
-            cl.appendChild(g);
-            cl.appendChild(ul);
-        }
-        cl.dataset.done = '1';
-    }
+    paintChangelog();
 
     // 顶栏那行小字也补上悬浮说明（报 bug 时不用再翻到「关于」页去抄版本）
     const ver = $('ver');
@@ -7851,6 +7943,9 @@ function applyConfigBroadcast() {
     clearTimeout(bkInfoTimer);
     bkInfoTimer = setTimeout(refreshBackupInfo, 400);
     bindSwitches();
+    // v1.5.13：启动密码那两行也要跟着广播刷新（别处改了配置 / 恢复备份之后，
+    // 「已设置」状态可能与页面上的开关不一致）。事件只绑一次，这里只回填。
+    bindStartupPassword();
 }
 
 listen('qs://toast', (ev) => toast(String(ev.payload || '')));
@@ -8996,6 +9091,218 @@ requestAnimationFrame(() => requestAnimationFrame(() => {
     invoke('settings_ready').catch(() => {});
 }));
 
+/* ==========================================================================
+ *  v1.5.13：启动密码
+ *
+ *  用户要求：「在设置中新增可选的启动密码选项，关闭时不影响正常使用；开启后
+ *  启动软件必须先输入正确的启动密码才能使用其功能。该启动密码为独立密码，
+ *  与备份密码互不相同、互不影响。」
+ *
+ *  三条约定（都和"独立"有关）：
+ *    · 写的键是 `startupPassword`，与备份密码 `backupPassword` **毫无关系** ——
+ *      后端也是两个字段、两套校验，改一个不会碰另一个；
+ *    · 后端只存 Argon2id 哈希，前端拿不到哈希（config_view 只报
+ *      `startupPasswordSet` 这个布尔）；
+ *    · **下次启动生效**。当前这次会话已经解锁了，改密码不该把人踢回锁屏。
+ * ========================================================================== */
+function startupPwdSay(msg, kind) {
+    const el = $('startupPwdStatus');
+    if (!el) return;
+    el.textContent = msg || '';
+    el.className = 'upd-token-status' + (kind ? ' ' + kind : '');
+}
+
+/** 显隐「设置密码」那一行：开关开着才显示。 */
+function startupPwdSyncRow() {
+    const sw = $('s-startupPwd');
+    const row = $('rowStartupPwd');
+    if (!sw || !row) return;
+    row.hidden = !sw.checked;
+    /* 收起来的时候顺手清空：半截密码没有留在 DOM 里的理由，而且下次展开
+     * 看到旧内容容易误以为"已经填过了"。 */
+    if (row.hidden) startupPwdClear();
+}
+
+/** 清空两个密码框（保存成功 / 关掉开关 / 回填时都要做）。 */
+function startupPwdClear() {
+    const a = $('s-startupPwdVal');
+    const b = $('s-startupPwdVal2');
+    if (a) a.value = '';
+    if (b) b.value = '';
+}
+
+/** 「关闭启动密码」那一行：只在"验证当前密码"这一步进行中才显示。 */
+function startupPwdOffShow(on) {
+    const row = $('rowStartupPwdOff');
+    if (!row) return;
+    row.hidden = !on;
+    if (!on) {
+        const inp = $('s-startupPwdOff');
+        if (inp) inp.value = '';
+        startupPwdOffSay('');
+    }
+}
+
+function startupPwdOffSay(msg, kind) {
+    const el = $('startupPwdOffStatus');
+    if (!el) return;
+    el.textContent = msg || '';
+    el.className = 'upd-token-status' + (kind ? ' ' + kind : '');
+}
+
+function bindStartupPassword() {
+    const sw = $('s-startupPwd');
+    const row = $('rowStartupPwd');
+    const inp = $('s-startupPwdVal');
+    const inp2 = $('s-startupPwdVal2');
+    const btn = $('btnStartupPwdSave');
+    if (!sw || !row || !inp || !btn) return;
+
+    /* 「关闭要先验密码」那一组控件（v1.5.14）。和上面那组分开，是因为它们的
+     * 语义是"确认是你"，不是"设新密码" —— 混在一起用户会以为在改密码。 */
+    const offRow = $('rowStartupPwdOff');
+    const offInp = $('s-startupPwdOff');
+    const offBtn = $('btnStartupPwdOff');
+    const offCancel = $('btnStartupPwdOffCancel');
+    /* 正在验证关闭 的这段窗口里，别让配置广播把开关又拨回去。 */
+    const offPending = () => !!(offRow && !offRow.hidden);
+
+    /* 回填：以后端广播来的 `startupPasswordSet` 为准。
+     * ⚠ 正在这几个输入框里打字时别动它（广播 600ms 就可能来一次，会清掉输入）。 */
+    if (!offPending()
+        && !inp.matches(':focus')
+        && !(inp2 && inp2.matches(':focus'))
+        && !(offInp && offInp.matches(':focus'))) {
+        sw.checked = !!CONF.startupPasswordSet;
+        startupPwdSyncRow();
+        if (!sw.dataset.bound) startupPwdClear();
+    }
+
+    if (!sw.dataset.bound) {
+        sw.dataset.bound = '1';
+        sw.addEventListener('change', () => {
+            startupPwdSyncRow();
+            if (sw.checked) {
+                startupPwdOffShow(false);
+                startupPwdSay('两遍输同样的密码，再点「保存密码」；不保存就还是原来的状态', 'warn');
+                setTimeout(() => inp.focus(), 30);
+                return;
+            }
+            /* 关掉 ≠ 立刻卸掉保护：**要先输一次当前密码**
+             * （用户要求「要取消密码，必须要再输一次解锁密码」）。
+             * 只在"本来就没设过密码"（刚才把开关打开又关掉）时才直接收起来。 */
+            if (!CONF.startupPasswordSet) {
+                startupPwdClear();
+                startupPwdSay('');
+                return;
+            }
+            startupPwdOffShow(true);
+            startupPwdOffSay('要关闭启动密码，请先输入当前密码', 'warn');
+            setTimeout(() => { if (offInp) offInp.focus(); }, 30);
+        });
+
+        btn.addEventListener('click', () => {
+            const v = inp.value;
+            /* 没有第二个框的极老页面缓存：退化成单框行为，但这不是正常路径 —— */
+            const v2 = inp2 ? inp2.value : v;
+            if (!v.trim()) {
+                startupPwdSay('密码不能为空 —— 要关闭这项功能，请把上面的开关关掉', 'warn');
+                inp.focus();
+                return;
+            }
+            /* **两次输入必须一致，否则一个字节都不写**。
+             *
+             * 这是启动密码唯一的一道防手滑闸：它没有"忘记密码"找回入口，设错了
+             * 下次启动就进不来（只能手改 config.json 删掉那行哈希）。单框时代
+             * 打错一个字母就把自己锁在门外，正是用户报的那个问题。 */
+            if (v !== v2) {
+                startupPwdSay('两次输入的密码不一致，请重新输入（第二个框已清空）', 'err');
+                if (inp2) {
+                    inp2.value = '';
+                    inp2.focus();
+                }
+                return;
+            }
+            btn.disabled = true;
+            invoke('set_setting', { key: 'startupPassword', value: v })
+                .then(() => {
+                    CONF.startupPasswordSet = true;
+                    // 密码落盘之后就把它从输入框里抹掉：没有理由继续挂在 DOM 上
+                    startupPwdClear();
+                    startupPwdSay('已保存。下次启动时生效（当前这次不用重新输）', 'ok');
+                })
+                .catch((e) => startupPwdSay('保存失败：' + e, 'err'))
+                .then(() => { btn.disabled = false; });
+        });
+
+        // 回车 = 保存（第一行打完直接回车也能提交，不用先把鼠标挪到按钮上）
+        const enterSave = (e) => {
+            if (e.key !== 'Enter') return;
+            e.preventDefault();
+            if (!btn.disabled) btn.click();
+        };
+        inp.addEventListener('keydown', enterSave);
+        if (inp2) inp2.addEventListener('keydown', enterSave);
+
+        /* 一动手打字就把上次的红字清掉 —— 否则"两次不一致"会一直挂在那儿，
+         * 看起来像这次也错了。 */
+        const clearErr = () => {
+            const el = $('startupPwdStatus');
+            if (el && el.className.indexOf('err') >= 0) startupPwdSay('');
+        };
+        inp.addEventListener('input', clearErr);
+        if (inp2) inp2.addEventListener('input', clearErr);
+
+        /* ---- 「关闭启动密码」：验过当前密码才真的清哈希 ---- */
+        if (offBtn && offInp) {
+            const closeIt = () => {
+                const v = offInp.value;
+                if (!v) {
+                    startupPwdOffSay('请输入当前启动密码', 'warn');
+                    offInp.focus();
+                    return;
+                }
+                offBtn.disabled = true;
+                /* 走后端 `startup_password_disable`：**验和清是一件事**。
+                 * 前端只发一次请求，验不过后端什么都不改 —— 开关弹回去，
+                 * 保护一点没动。 */
+                invoke('startup_password_disable', { password: v })
+                    .then((ok) => {
+                        if (!ok) {
+                            offInp.value = '';
+                            offInp.focus();
+                            startupPwdOffSay('密码不对，启动密码没有被关闭', 'err');
+                            return;
+                        }
+                        CONF.startupPasswordSet = false;
+                        sw.checked = false;
+                        startupPwdOffShow(false);
+                        startupPwdSyncRow();
+                        startupPwdClear();
+                        startupPwdSay('已关闭启动密码（下次启动不再询问）', 'ok');
+                    })
+                    .catch((e) => startupPwdOffSay('关闭失败：' + e, 'err'))
+                    .then(() => { offBtn.disabled = false; });
+            };
+            offBtn.addEventListener('click', closeIt);
+            offInp.addEventListener('keydown', (e) => {
+                if (e.key !== 'Enter') return;
+                e.preventDefault();
+                if (!offBtn.disabled) closeIt();
+            });
+        }
+        if (offCancel) {
+            offCancel.addEventListener('click', () => {
+                /* 取消 = 什么都没发生：开关弹回打开，保护照旧。 */
+                startupPwdOffShow(false);
+                sw.checked = !!CONF.startupPasswordSet;
+                startupPwdSyncRow();
+                startupPwdSay('');
+            });
+        }
+    }
+}
+
 (async function boot() {
     bindTabs();
 
@@ -9042,6 +9349,8 @@ requestAnimationFrame(() => requestAnimationFrame(() => {
     bindOcrDep();
     renderOcrDep();
     bindSwitches();
+    // v1.5.13：启动密码的回填（开关状态 / 输入行显隐）。事件只绑一次。
+    bindStartupPassword();
     bindCeKind();
     bindCeBind();   // r58：快捷键引擎「绑定应用」的联动（开关 → 选应用 → 管理员）
     bindApKind();

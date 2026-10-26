@@ -91,6 +91,11 @@ function makeEnv(htmlFile, conf) {
      * 用来测"密码错了要留在框里让人重输"。 */
     let IMPORT_FAIL = '';
     const setImportFail = (msg) => { IMPORT_FAIL = msg || ''; };
+    /* `startup_password_disable` 的桩（v1.5.14）：设置页关闭启动密码前要先验
+     * 当前密码。默认认 testSettings 里刚设的 `alpha-111`；需要换口令时调
+     * setStartupPwd()。 */
+    let STARTUP_PWD = 'alpha-111';
+    const setStartupPwd = (v) => { STARTUP_PWD = v; };
 
     /* ⚠ 桩必须装进 beforeParse：region.html 这类页面把脚本**内联**写在 HTML 里，
      * jsdom 会在构造函数的那一刻就执行它，等我们再拿到 dom.window 才补 __TAURI__
@@ -112,6 +117,12 @@ function makeEnv(htmlFile, conf) {
                 calls.push({ cmd, args: args || {} });
                 if (rejectCmds.has(cmd)) return Promise.reject('模拟后端失败：' + cmd);
                 if (cmd === 'get_config') return Promise.resolve(CONF);
+                /* v1.5.14：「关闭启动密码」要先验当前密码（用户要求「要取消密码，
+                 * 必须要再输一次解锁密码」）—— 桩按 STARTUP_PWD 判定，和真后端
+                 * 一样"验不过就什么都不改"。 */
+                if (cmd === 'startup_password_disable') {
+                    return Promise.resolve((args && args.password) === STARTUP_PWD);
+                }
                 // backup_info：settings.js **在脚本加载时**就会调一次
                 // （refreshBackupInfo 的顶层调用），不桩的话它拿到的是
                 // 上面那条 `return null` 的兜底值，取 .dir 直接 TypeError。
@@ -971,6 +982,93 @@ async function testSettings() {
         '实际 ' + $('aboutTools').children.length);
     ok('  「关于」从「备份」页里挪出来了（各自独立分页）',
         !w.document.querySelector('.pane[data-pane="backup"]').textContent.includes('开发者'));
+
+    /* ---- v1.5.14：启动密码（两次输入 + 关闭要先验密码） ----
+     * 单框时代打错一个字母就把自己锁在门外（没有找回入口，只能手改
+     * config.json 删掉那行哈希）；而"关开关就清哈希"等于谁都能顺手把保护卸掉。
+     * 所以这里钉住：第二个框真的在、两次不一致时**一个字节都不写**、
+     * 关闭时必须先验当前密码且验不过什么都不改。 */
+    console.log('');
+    console.log('--- 启动密码：两次输入 + 关闭要验密码 ---');
+    {
+        const sw = $('s-startupPwd');
+        const i1 = $('s-startupPwdVal');
+        const i2 = $('s-startupPwdVal2');
+        const save = $('btnStartupPwdSave');
+        ok('设置页有第二个「确认密码」框', !!i2, '没有 #s-startupPwdVal2');
+        ok('  没设密码时开关默认关着、输入行收着',
+            sw.checked === false && $('rowStartupPwd').hidden === true);
+
+        sw.checked = true;
+        sw.dispatchEvent(new w.Event('change', { bubbles: true }));
+        await flush();
+        ok('  打开开关后两行输入都露出来', $('rowStartupPwd').hidden === false);
+
+        env.calls.length = 0;
+        i1.value = 'alpha-111';
+        i2.value = 'alpha-112';
+        save.dispatchEvent(new w.Event('click', { bubbles: true }));
+        await flush();
+        eq('  两次不一致时**不写配置**', env.cmd('set_setting').length, 0);
+        ok('  给出「不一致」的明确提示（不是静默失败）',
+            /不一致/.test($('startupPwdStatus').textContent), $('startupPwdStatus').textContent);
+        ok('  提示用 err 样式（红字，不是灰字）',
+            /\berr\b/.test($('startupPwdStatus').className), $('startupPwdStatus').className);
+        eq('  第二个框被清空，等用户重输', i2.value, '');
+        eq('  第一遍的输入保留（用户能对着核对）', i1.value, 'alpha-111');
+
+        env.calls.length = 0;
+        i2.value = 'alpha-111';
+        save.dispatchEvent(new w.Event('click', { bubbles: true }));
+        await flush();
+        const ss = env.lastCmd('set_setting');
+        ok('  两次一致才落盘，键名 startupPassword',
+            !!ss && ss.args.key === 'startupPassword' && ss.args.value === 'alpha-111',
+            JSON.stringify(ss && ss.args));
+        eq('  保存后两个框都清空（密码不留在 DOM 上）', i1.value + '|' + i2.value, '|');
+        ok('  给出「已保存」提示', /已保存/.test($('startupPwdStatus').textContent),
+            $('startupPwdStatus').textContent);
+
+        /* ④ 关闭密码必须先验一次当前密码（用户要求「要取消密码，必须要再输一次
+         * 解锁密码」）—— 关掉开关**不许**直接清哈希。 */
+        env.calls.length = 0;
+        sw.checked = false;
+        sw.dispatchEvent(new w.Event('change', { bubbles: true }));
+        await flush();
+        eq('  关掉开关不会直接清哈希（一次 set_setting 都没有）', env.cmd('set_setting').length, 0);
+        ok('  弹出了「关闭启动密码」验证行', $('rowStartupPwdOff').hidden === false);
+        ok('  提示要先输当前密码', /先输入当前密码/.test($('startupPwdOffStatus').textContent),
+            $('startupPwdOffStatus').textContent);
+
+        $('s-startupPwdOff').value = 'wrong-one';
+        $('btnStartupPwdOff').dispatchEvent(new w.Event('click', { bubbles: true }));
+        await flush();
+        ok('  密码不对时明确说「没有被关闭」',
+            /密码不对/.test($('startupPwdOffStatus').textContent),
+            $('startupPwdOffStatus').textContent);
+        eq('  密码不对时输入框清空、等重输', $('s-startupPwdOff').value, '');
+        eq('  而且**一次都没调**清哈希的写口', env.cmd('set_setting').length, 0);
+
+        $('btnStartupPwdOffCancel').dispatchEvent(new w.Event('click', { bubbles: true }));
+        await flush();
+        eq('  取消后开关弹回打开（保护一点没动）', sw.checked, true);
+        ok('  验证行收起', $('rowStartupPwdOff').hidden === true);
+
+        // ⑤ 输对了才真的关闭
+        sw.checked = false;
+        sw.dispatchEvent(new w.Event('change', { bubbles: true }));
+        await flush();
+        $('s-startupPwdOff').value = 'alpha-111';
+        $('btnStartupPwdOff').dispatchEvent(new w.Event('click', { bubbles: true }));
+        await flush();
+        const off = env.lastCmd('startup_password_disable');
+        ok('  验证走 startup_password_disable，密码原样带过去',
+            !!off && off.args.password === 'alpha-111', JSON.stringify(off && off.args));
+        eq('  验证通过后开关才真的关掉', sw.checked, false);
+        ok('  验证行收起', $('rowStartupPwdOff').hidden === true);
+        ok('  提示已关闭启动密码', /已关闭启动密码/.test($('startupPwdStatus').textContent),
+            $('startupPwdStatus').textContent);
+    }
 }
 
 /* ================================================================== */

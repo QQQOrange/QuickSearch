@@ -1,0 +1,10 @@
+{
+  "导出明文配置、导入恢复": "export a plain-text config, import one back",
+  "备份密码": "Backup password",
+  "退出前把本机配置推到云端（只上传，不动本机）": "Push this machine's config to the cloud before quitting (upload only, local copy untouched)",
+  "更新": "Updates",
+  "更新日志": "Changelog",
+  "只记大功能，小修小补不占地方": "Only major features are listed; small fixes stay out of the way",
+
+  "@block:githubTokenTip": "With it filled in, every GitHub request carries it: the version-check quota rises from <b>60 requests/hour</b> to <b>5000 requests/hour</b>, so hitting the limit becomes rare.<br>Token or not, once a new version is found you can always click “Download” and let the app fetch it — the token only affects the <i>version-check</i> quota, never the download.<br>It only needs read access to public repositories; the token lives in the local encrypted config and is never uploaded or written to logs."
+}

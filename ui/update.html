@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="color-scheme" content="dark light">
+<title>Quick Search 更新</title>
+<style>
+/* 更新窗（v1.5.13）。
+ *
+ * 用户要求：「软件启动时检测是否存在新版本，若有则弹窗提示用户可更新；用户点击
+ * 下载后开始下载，下载窗口需在任务栏中显示，并提供可点击的取消下载按钮以中断下载。」
+ *
+ * 所以这个窗口同时承担三件事：**提示** → **下载进度** → **装好了/失败了**。
+ * 一个窗口三种状态，而不是弹三个窗 —— 用户不需要在多个窗口之间找"现在到哪一步"。
+ * 任务栏可见由 Rust 侧 skip_taskbar(false) 保证（见 show_update_window）。 */
+* { box-sizing: border-box; }
+:root {
+    --bg: #17181c;
+    --fg: #e9eaee;
+    --dim: #9aa0ac;
+    --line: rgba(255,255,255,.10);
+    --accent: #4E6EF2;
+    --err: #ff6b6b;
+    --ok: #3ddc97;
+    --warn: #f0b429;
+}
+@media (prefers-color-scheme: light) {
+    :root {
+        --bg: #f5f6f8;
+        --fg: #1b1c20;
+        --dim: #6b7280;
+        --line: rgba(0,0,0,.10);
+    }
+}
+html, body { height: 100%; margin: 0; }
+body {
+    background: var(--bg);
+    color: var(--fg);
+    font: 13px/1.55 "Microsoft YaHei UI", "Segoe UI", system-ui, sans-serif;
+    display: flex;
+    flex-direction: column;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    overflow: hidden;
+    user-select: none;
+}
+header {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 14px 18px 0;
+    cursor: default;
+}
+.dot {
+    width: 9px; height: 9px; border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 10px rgba(78,110,242,.75);
+    flex: none;
+}
+header b { font-size: 13.5px; }
+header .grow { flex: 1; }
+.x {
+    width: 26px; height: 26px;
+    display: grid; place-items: center;
+    border: 0; border-radius: 7px;
+    background: transparent;
+    color: var(--dim);
+    font-size: 15px;
+    cursor: pointer;
+}
+.x:hover { background: rgba(127,127,127,.14); color: var(--fg); }
+main { flex: 1; padding: 12px 18px 6px; overflow: auto; }
+h1 { font-size: 16px; margin: 2px 0 6px; font-weight: 600; }
+h1 .ver { color: var(--accent); }
+.sub { color: var(--dim); font-size: 11.5px; margin: 0 0 10px; }
+.notes {
+    max-height: 120px;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-size: 12px;
+    line-height: 1.6;
+    color: var(--dim);
+    background: rgba(127,127,127,.08);
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    padding: 9px 11px;
+    margin-bottom: 12px;
+    user-select: text;
+}
+.notes:empty { display: none; }
+.bar-wrap { margin: 4px 0 8px; }
+.track {
+    height: 8px;
+    border-radius: 99px;
+    background: rgba(127,127,127,.20);
+    overflow: hidden;
+}
+#bar {
+    height: 100%;
+    width: 0%;
+    border-radius: 99px;
+    background: var(--accent);
+    transition: width .18s linear;
+}
+.meta {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 7px;
+    font-size: 11.5px;
+    color: var(--dim);
+}
+.msg { min-height: 18px; font-size: 11.5px; margin: 8px 0 0; color: var(--dim); word-break: break-word; }
+.msg.err { color: var(--err); }
+.msg.ok { color: var(--ok); }
+.msg.warn { color: var(--warn); }
+footer {
+    display: flex;
+    gap: 9px;
+    align-items: center;
+    padding: 10px 18px 16px;
+}
+footer .grow { flex: 1; }
+button.btn {
+    height: 33px;
+    padding: 0 15px;
+    font-size: 12.5px;
+    font-weight: 600;
+    border-radius: 9px;
+    border: 1px solid var(--line);
+    background: transparent;
+    color: var(--fg);
+    cursor: pointer;
+    transition: filter .15s, background .15s, opacity .15s;
+}
+button.btn:hover { background: rgba(127,127,127,.12); }
+button.btn.primary {
+    background: var(--accent);
+    border-color: transparent;
+    color: #fff;
+}
+button.btn.primary:hover { filter: brightness(1.08); }
+button.btn:disabled { opacity: .55; cursor: default; }
+button.btn[hidden] { display: none; }
+.link {
+    color: var(--accent);
+    font-size: 11.5px;
+    text-decoration: none;
+    cursor: pointer;
+    word-break: break-all;
+}
+.link:hover { text-decoration: underline; }
+.hint { font-size: 11.5px; color: var(--dim); }
+</style>
+</head>
+<body>
+<header>
+    <span class="dot"></span>
+    <b>Quick Search</b>
+    <span class="grow"></span>
+    <button class="x" id="btnX" title="关闭">×</button>
+</header>
+
+<main>
+    <h1 id="title">发现新版本 <span class="ver" id="ver"></span></h1>
+    <p class="sub" id="sub">可以现在下载，也可以稍后在「设置 → 关于」里更新</p>
+    <div class="notes" id="notes" data-i18n-skip></div>
+
+    <div class="bar-wrap" id="barWrap" hidden>
+        <div class="track"><div id="bar"></div></div>
+        <div class="meta">
+            <span id="pct">0%</span>
+            <span id="size"></span>
+        </div>
+    </div>
+
+    <div class="msg" id="msg"></div>
+</main>
+
+<footer>
+    <span class="link" id="dlLink" hidden>在浏览器中打开下载页</span>
+    <span class="grow"></span>
+    <button class="btn" id="btnLater">稍后</button>
+    <button class="btn" id="btnBrowser" hidden>用浏览器下载</button>
+    <button class="btn primary" id="btnGo">下载并安装</button>
+    <button class="btn" id="btnCancel" hidden>取消下载</button>
+    <button class="btn primary" id="btnRestart" hidden>立即重启</button>
+</footer>
+
+<script src="shared.js"></script>
+<script src="i18n.js"></script>
+<script src="i18n.en.js"></script>
+<script>
+/* 更新窗的状态机：prompt → downloading → done | error | cancelled
+ *
+ * 所有网络/磁盘动作都在 Rust 里（见 main.rs 的 update_install），这里只负责
+ * 画界面和发命令 —— 页面上没有任何"自己下载"的路径，所以取消一定真的能中断
+ * 下载线程（update_cancel → update::request_cancel）。 */
+const invoke = window.__TAURI__.core.invoke;
+const listen = window.__TAURI__.event.listen;
+const $ = (id) => document.getElementById(id);
+
+/** 当前状态：prompt | downloading | done | error | cancelled */
+let STATE = 'prompt';
+/** 待装版本信息（来自 qs://update / update_pending） */
+let INFO = null;
+
+function t(s) {
+    return window.QS_I18N ? QS_I18N.t(s) : s;
+}
+
+function sizeText(n) {
+    if (!n || n < 0) return '';
+    const mb = 1024 * 1024;
+    return n >= mb ? (n / mb).toFixed(1) + ' MB' : Math.round(n / 1024) + ' KB';
+}
+
+function say(text, kind) {
+    const el = $('msg');
+    el.textContent = text || '';
+    el.className = 'msg' + (kind ? ' ' + kind : '');
+}
+
+/** 按状态摆按钮 / 标题 / 进度条。所有状态切换都走这里 —— 避免"按钮和文案
+ *  各改各的"（那种 bug 的表现是：下载已经完成，界面上还留着「取消下载」）。 */
+function paint() {
+    const prompt = STATE === 'prompt';
+    const dl = STATE === 'downloading';
+    const done = STATE === 'done';
+    const err = STATE === 'error';
+    const cancelled = STATE === 'cancelled';
+
+    $('barWrap').hidden = !(dl || done);
+    $('btnGo').hidden = !(prompt || err || cancelled);
+    $('btnGo').disabled = false;
+    $('btnGo').textContent = prompt ? t('下载并安装') : t('重新下载');
+    $('btnCancel').hidden = !dl;
+    $('btnRestart').hidden = !done;
+    $('btnLater').textContent = done ? t('稍后重启') : t('稍后');
+    $('btnBrowser').hidden = !(prompt || err);
+    $('dlLink').hidden = !(INFO && INFO.url && (prompt || err));
+
+    if (prompt) {
+        /* 版本号来自 GitHub（服务端下发），所以**只用 textContent 拼** ——
+         * 拼进 innerHTML 等于给远端一个注入点（和设置页 release notes 同一条纪律）。 */
+        const title = $('title');
+        title.textContent = t('发现新版本') + ' ';
+        const v = document.createElement('span');
+        v.className = 'ver';
+        v.textContent = INFO ? 'v' + INFO.version : '';
+        title.appendChild(v);
+        $('sub').textContent = INFO && INFO.size
+            ? t('新版本已就绪，共 {size}').replace('{size}', sizeText(INFO.size))
+            : t('可以现在下载，也可以稍后在「设置 → 关于」里更新');
+    } else if (dl) {
+        $('title').textContent = t('正在下载更新…');
+        $('sub').textContent = t('下载期间可以继续用软件，窗口会留在任务栏里');
+    } else if (done) {
+        $('title').textContent = t('已安装完成');
+        $('sub').textContent = t('重启后即为新版本');
+    } else if (err) {
+        $('title').textContent = t('更新失败');
+        $('sub').textContent = t('可以重试，或者用浏览器下载安装包');
+    } else if (cancelled) {
+        $('title').textContent = t('已取消下载');
+        $('sub').textContent = t('断点已保留，下次再点会接着下');
+    }
+}
+
+function paintProgress(done, total) {
+    $('barWrap').hidden = false;
+    const pct = total > 0 ? Math.max(0, Math.min(100, Math.round((done / total) * 100))) : 0;
+    $('bar').style.width = (total > 0 ? pct + '%' : '100%');
+    $('bar').style.opacity = total > 0 ? '1' : '.35';
+    $('pct').textContent = total > 0
+        ? pct + '%  ·  ' + sizeText(done) + ' / ' + sizeText(total)
+        : t('已下载 {size}').replace('{size}', sizeText(done));
+    $('size').textContent = total > 0 ? sizeText(total) : '';
+}
+
+function adopt(p) {
+    if (!p) return;
+    INFO = {
+        version: p.version || '',
+        notes: p.notes || '',
+        size: p.size || 0,
+        page: p.page || '',
+        url: p.url || '',
+    };
+    $('notes').textContent = INFO.notes || t('（这个版本没有写说明）');
+    if (INFO.url) $('dlLink').setAttribute('data-url', INFO.url);
+}
+
+async function startDownload() {
+    STATE = 'downloading';
+    paint();
+    say(t('正在下载…'));
+    $('bar').style.width = '0%';
+    try {
+        await invoke('update_install');
+    } catch (e) {
+        STATE = 'error';
+        paint();
+        say(String(e), 'err');
+    }
+}
+
+async function cancelDownload() {
+    // 先把界面切到"已取消"，再让后端收手 —— 点下去要有立刻的反馈
+    STATE = 'cancelled';
+    paint();
+    say(t('已取消下载'));
+    try { await invoke('update_cancel'); } catch (_) {}
+}
+
+/* ---------------------------------------------------------------- 事件 */
+$('btnGo').addEventListener('click', startDownload);
+$('btnCancel').addEventListener('click', cancelDownload);
+/* 关窗：下载中点 × = **取消并关窗**（后端 update_close_window 里一起处理）。
+ * 不做成"关窗后继续后台下载" —— 窗口没了就看不到进度，也没了取消按钮，
+ * 用户会以为下载已经被中止了。 */
+$('btnLater').addEventListener('click', () => invoke('update_close_window').catch(() => {}));
+$('btnX').addEventListener('click', () => invoke('update_close_window').catch(() => {}));
+$('btnRestart').addEventListener('click', () => invoke('update_restart').catch(() => {}));
+$('btnBrowser').addEventListener('click', () => {
+    const url = (INFO && INFO.url) || '';
+    if (!url) return;
+    invoke('open_links', { links: [url] }).catch((e) => say(String(e), 'err'));
+});
+$('dlLink').addEventListener('click', () => $('btnBrowser').click());
+
+/* 无边框窗口：空白处按下即拖动（和锁屏窗同一套做法） */
+document.addEventListener('mousedown', (e) => {
+    if (e.target.closest('button, a, input, .notes')) return;
+    try { window.__TAURI__.window.getCurrentWindow().startDragging(); } catch (_) {}
+});
+
+listen('qs://update', (ev) => {
+    const p = ev.payload || {};
+    if (!p.newer) return;
+    adopt(p);
+    if (STATE === 'prompt' || STATE === 'error' || STATE === 'cancelled') {
+        STATE = 'prompt';
+        paint();
+    }
+});
+
+listen('qs://update-progress', (ev) => {
+    const p = ev.payload || {};
+    if (STATE !== 'downloading') return;
+    paintProgress(p.done || 0, p.total || 0);
+});
+
+listen('qs://update-done', (ev) => {
+    STATE = 'done';
+    paint();
+    $('bar').style.width = '100%';
+    say(t('v{v} 已装好').replace('{v}', String(ev.payload || '')), 'ok');
+});
+
+listen('qs://update-failed', (ev) => {
+    // 用户已经点了取消的那一次，后端报的"已取消"不该再翻成"失败"
+    if (STATE === 'cancelled') { say(t('已取消下载')); return; }
+    STATE = 'error';
+    paint();
+    say(String(ev.payload || t('未知原因')), 'err');
+});
+
+listen('qs://update-cancelled', () => {
+    STATE = 'cancelled';
+    paint();
+    $('barWrap').hidden = true;
+    say(t('已取消下载'), 'warn');
+});
+
+/* 配置文件（语言）变了就重画一次标题/按钮：现在用的还是切换前那一套文案 */
+listen('qs://config', () => paint());
+
+/* ---------------------------------------------------------------- 初始化 */
+(async function init() {
+    paint();
+    try {
+        const r = await invoke('update_pending');
+        if (r && r.has) {
+            adopt(r);
+            STATE = 'prompt';
+            paint();
+        }
+    } catch (_) {}
+    // 让用户能从窗口本身确认"这是哪个版本在提示"
+    try {
+        const c = await invoke('get_config');
+        document.title = 'Quick Search ' + (c.version || '');
+    } catch (_) {}
+})();
+</script>
+</body>
+</html>
