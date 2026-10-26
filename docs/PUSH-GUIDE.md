@@ -20,7 +20,8 @@
 | GitHub 凭据 | ✅ 凭据管理器里有（`git credential fill` 能拿到，2026-10-25 验证 200） |
 | 网络 | ⚠️ **间歇性**：`github.com:443` 时通时不通；`api.github.com` 一直可用 |
 | 发布 | ✅ 最新 Release **v1.5.12**（2026-10-25），资产 `QuickSearch.exe` 13,427,200 字节 |
-| 本地待发 | 📦 **v1.5.13 已构建未推送**（多语言 / 更新窗 / 启动密码，见 `docs/RELEASE-v1.5.13.md`）；按上面的约定，等用户说了才推 |
+| 代码 | ✅ `main` 已推到 **`b79919e`**（2026-10-26，含 v1.5.13 / v1.5.14，走 Git Data API；tree `5db1472ed7` 与本地逐字节一致） |
+| 待发布 | 📦 **v1.5.13 / v1.5.14 只推了代码，没打 tag、没建 Release** —— 仍在 v1.5.12 的用户拿不到更新提示；`docs/RELEASE-v1.5.14.md` 还没写 |
 
 ### ⚠ 两条必须记住的环境事实（2026-10-25 实测）
 
@@ -135,6 +136,25 @@ POST /git/tags + /git/refs            → annotated tag
   `git rev-parse HEAD:ui/bar.js` 与 `/contents/ui/bar.js` 的 blob sha 也相同。
 - 本地因此会与远端**分叉**（内容相同、SHA 不同）。等网络恢复后
   `git fetch` + `git rebase` 即可自愈，Git 会判定 patch already applied。
+
+### 5. 2026-10-26 推 v1.5.13 + v1.5.14：还是 Git Data API
+
+`git push` 报 `CONNECT tunnel failed, response 502`，`curl` 直连 github.com 超时，
+`api.github.com` 200 —— 和第 4 条同一个状态。按老办法走 API：
+
+```text
+远端 b79919e（父 1a303c6）  本地 0ab0525  →  tree 完全相同 5db1472ed7
+38 个改动文件（21 新增 + 17 修改，0 删除），每个 blob 上传后都回校 SHA
+```
+
+两个只在 API 方案里才会踩的坑：
+
+- **`HEAD^{tree}` 不要放在 `execSync` 的命令串里。** Node 在 Windows 上经
+  `cmd.exe` 执行，`^` 是 cmd 的转义符，会被吃掉 → `fatal: ambiguous argument
+  'HEAD{tree}'`。用 `git show -s --format=%T HEAD` 拿 tree SHA，没有 `^`。
+- **并发上传别给每个 worker 传 `queue.slice()`。** 那是各自一份副本，
+  5 个 worker 会把同样的 N 个文件各传一遍（实测 38 个文件传了 190 次）。
+  共享同一个数组，`while (queue.length) queue.shift()`。
 
 
 ---
