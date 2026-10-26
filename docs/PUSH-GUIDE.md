@@ -19,9 +19,9 @@
 | 远端配置 | ✅ `origin` = `https://github.com/QQQOrange/QuickSearch.git` |
 | GitHub 凭据 | ✅ 凭据管理器里有（`git credential fill` 能拿到，2026-10-25 验证 200） |
 | 网络 | ⚠️ **间歇性**：`github.com:443` 时通时不通；`api.github.com` 一直可用 |
-| 发布 | ✅ 最新 Release **v1.5.12**（2026-10-25），资产 `QuickSearch.exe` 13,427,200 字节 |
-| 代码 | ✅ `main` 已推到 **`b79919e`**（2026-10-26，含 v1.5.13 / v1.5.14，走 Git Data API；tree `5db1472ed7` 与本地逐字节一致） |
-| 待发布 | 📦 **v1.5.13 / v1.5.14 只推了代码，没打 tag、没建 Release** —— 仍在 v1.5.12 的用户拿不到更新提示；`docs/RELEASE-v1.5.14.md` 还没写 |
+| 发布 | ✅ 最新 Release **v1.5.14**（2026-10-27），资产 `QuickSearch.exe` 13,645,312 字节，`releases/latest` 已指向 |
+| 代码 | ✅ `main` 已推到 **`d716af0`**（2026-10-27，tag `v1.5.14` 即指向它；走 Git Data API） |
+| 待发布 | 无 —— v1.5.13 与 v1.5.14 **合并成一个 Release 发的**（v1.5.13 只推过代码），发布说明是累积的 |
 
 ### ⚠ 两条必须记住的环境事实（2026-10-25 实测）
 
@@ -155,6 +155,17 @@ POST /git/tags + /git/refs            → annotated tag
 - **并发上传别给每个 worker 传 `queue.slice()`。** 那是各自一份副本，
   5 个 worker 会把同样的 N 个文件各传一遍（实测 38 个文件传了 190 次）。
   共享同一个数组，`while (queue.length) queue.shift()`。
+
+发版这一步（建 tag → 建 release → 传 exe）在同一天也验证过了：
+
+- **`uploads.github.com` 是通的**，即使 git 协议和 `github.com:443` 全挂。
+  `curl -X OPTIONS https://uploads.github.com/` 返 302 就说明能传。
+  资产上传 `POST /releases/{id}/assets?name=QuickSearch.exe`
+  （`Content-Type: application/octet-stream`）返 **201**。
+- 新版 API 会给资产回一个 `digest`（`sha256:...`），**可以直接和本地
+  `sha256sum` 对比** —— 比"看 size 对不对"硬得多。v1.5.14 实测一致。
+- tag 用 annotated（`POST /git/tags` + `POST /git/refs`），别指望
+  `POST /releases` 顺手建 —— 那种是轻量 tag，且指向默认分支当时的位置。
 
 
 ---
