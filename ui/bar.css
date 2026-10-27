@@ -972,6 +972,28 @@ button.fav-grp-head:focus-visible {
     pointer-events: none;
 }
 
+/* ---------------------------- 翻译按钮（v1.5.16） ----------------------------
+   和 OCR 同一套逻辑：横条一员（可拖 / 可换图标 / 可移出），默认是一枚
+   「译」文字徽标。中文单字比"翻译"两个字更适合 ~28px 的图标格，
+   也用强调色，和 OCR 并排时两颗功能按钮视觉重量一致。 */
+.ico.qs-trans-inbar {
+    font-size: 13px;
+    font-weight: 700;
+    font-family: "Microsoft YaHei", system-ui, sans-serif;
+    color: var(--qs-accent);
+}
+.ico.qs-trans-inbar:hover {
+    color: var(--qs-accent);
+    background-color: color-mix(in srgb, var(--qs-accent) 14%, transparent);
+}
+.qs-trans-tag {
+    font-size: 13px;
+    font-weight: 700;
+    font-family: "Microsoft YaHei", system-ui, sans-serif;
+    color: var(--qs-accent);
+    pointer-events: none;
+}
+
 /* OCR-only 横条上的那颗大按钮：不装图标，直接写「识别图片文字」。
    宽度用 auto，让它按文字长度撑开而不是被 --qs-btn 卡成正方形。 */
 .qs-ocr-big {

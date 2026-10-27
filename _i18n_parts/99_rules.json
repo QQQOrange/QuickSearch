@@ -56,6 +56,12 @@
     ["^(\\d+) 个$", "$1"],
     ["^(.+) （左键搜索 / 右键换图标）$", "$1 (left-click to search · right-click to change the icon)"],
     ["^额度 (.+) 次/小时，本小时还剩 (.+)$", "Quota $1 requests/hour, $2 left this hour"],
-    ["^(.+) 的凭据$", "$1 credentials"]
+    ["^(.+) 的凭据$", "$1 credentials"],
+    ["^翻成「(.+)」$", "Translate into “$1”"],
+
+    ["^取消勾选：下次翻译不再连「(.+)」一起翻$", "Unticked: “$1” is no longer translated together"],
+    ["^勾上：每次翻译都连「(.+)」一起翻$", "Ticked: every translation also runs “$1”"],
+    ["^(\\d+) 个 · (\\d+) 个能对话 · 点一下选用$", "$1 models · $2 that can chat · click to use"],
+    ["^(\\d+) 家没翻出来，第一家是：(.+)$", "$1 engines failed — the first one: $2"]
   ]
 }

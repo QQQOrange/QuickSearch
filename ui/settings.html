@@ -38,6 +38,9 @@
     <button type="button" data-tab="ai"><span class="tb-i" aria-hidden="true">🤖</span>AI 工具</button>
     <button type="button" data-tab="matte"><span class="tb-i" aria-hidden="true">✂️</span>抠图</button>
     <button type="button" data-tab="ocr"><span class="tb-i" aria-hidden="true">🔤</span>文字识别</button>
+    <!-- v1.5.16：翻译。放「文字识别」后面 —— 两者都是"拿到一段文字 → 交给某个
+         引擎处理"，用户心智上会挨着找；OCR 结果窗里也有翻译入口，用的同一份配置。 -->
+    <button type="button" data-tab="trans"><span class="tb-i" aria-hidden="true">🌐</span>翻译</button>
     <!-- r54：识图搜索。放「文字识别」后面 —— 两者是同类动作（框一块屏幕 → 交给某个
          引擎），用户心智上会挨着找。 -->
     <button type="button" data-tab="imgsearch"><span class="tb-i" aria-hidden="true">🖼️</span>识图搜索</button>
@@ -734,6 +737,61 @@
         <div class="ocr-diag" id="ocrDiag" hidden>
             <div class="od-sum" id="ocrDiagSum"></div>
             <div class="od-rows" id="ocrDiagRows"></div>
+        </div>
+    </section>
+    </div>
+
+    <!-- ============================ 翻译（v1.5.16） ============================ -->
+    <!-- v1.5.16 第二轮（用户原话：「翻译不能只有内置一个模型，要跟文字识别的硅基流动
+         部分一样能够拉取模型并选择一个；也要增加其他翻译引擎，像 OCR 识别一样可以
+         同时多选几个，同一个页面同时呈现出来」）。
+         于是这一栏整体改成「识别引擎」那一栏的模样：名单来自后端注册表
+         （trans_engines_list），点一行 = 设为默认引擎并展开它填凭据；
+         「同时翻译」多选 = 额外和默认引擎一起翻的那几家。 -->
+    <div class="pane" data-pane="trans" hidden>
+    <section class="card">
+        <h2>翻译 <small>选中文字点横条上的「译」，或在识别结果窗点「翻译」</small></h2>
+        <div class="hint">走各家的 OpenAI 兼容接口，把一段文字翻成另一种语言。<b>点下面一行 = 设为默认引擎</b>（每次翻译一定用它）；展开那一行填 Key、选模型，「同时翻译」里勾中的几家会<b>和默认引擎一起翻</b>，翻译窗里一家一个文本框同时摆开。各家怎么申请、怎么排查，见<b>帮助 ⑥ 翻译</b>。</div>
+        <div class="row">
+            <div class="rt"><b>启用翻译</b><small>关掉后横条翻译按钮、识别结果窗里的翻译入口一并失效</small></div>
+            <label class="sw"><input type="checkbox" id="s-transEnable"><i></i></label>
+        </div>
+        <div class="row col">
+            <div class="rt"><b>翻译引擎</b><small>点一行 = 设为默认引擎；「?」开官方申请页，「文档」开接口文档。凭据填在展开的那一行里</small></div>
+            <!-- 引擎列表由 JS 按**后端注册表**生成（见 renderTransEngines）：
+                 名单只有 Rust 侧一份，界面不自己维护，免得加一家引擎要改两处 -->
+            <div class="eng-list" id="w-transEngList"><div class="dep-tip">正在读取引擎列表…</div></div>
+            <!-- 展开那一家的"身体"（凭据 + 同时翻译）的**老家**：renderTransEngines 每次
+                 先把它挪回这里，再整块搬进当前展开的那一行 —— 不这么做的话，
+                 下面清空列表时会把搬到行里的那块一起清掉（DOM 只有一份）。
+                 （与 OCR 那一栏的 #w-ocrBodyHome 同一个套路。） -->
+            <div id="w-transBodyHome" hidden>
+                <!-- 当前引擎要填的凭据。⚠ 要填哪几样（Key / base / 模型）由**注册表**
+                     决定（need_key / need_base / need_model），所以这里是空壳、由 JS
+                     按 need* 逐个生成输入框 —— 加一家引擎不用改界面代码。 -->
+                <div class="eng-body" id="w-transBody">
+                    <div class="cred-head">
+                        <b id="w-transCredTitle">凭据</b>
+                        <small id="w-transCredTip"></small>
+                    </div>
+                    <div class="cred-box" id="w-transCredBox"></div>
+                    <!-- 同时翻译：勾上的会**和默认引擎一起翻**同一段文字，翻译窗里
+                         各占一个文本框。默认引擎不在这里 —— 它一定参与。 -->
+                    <div class="multi-head">
+                        <b>同时翻译</b>
+                        <small id="w-transMultiTip"></small>
+                    </div>
+                    <div class="multi-box" id="w-transMultiBox"></div>
+                </div>
+            </div>
+        </div>
+        <div class="row col">
+            <div class="rt"><b>默认目标语言</b><small>翻译窗口打开时默认翻成它；窗口里还能临时切别的</small></div>
+            <select class="txt" id="w-transTarget"></select>
+        </div>
+        <div class="acts">
+            <button class="btn ghost" id="btnTransInBar">把翻译加进横条</button>
+            <span class="grab-hint" id="transHint"></span>
         </div>
     </section>
     </div>

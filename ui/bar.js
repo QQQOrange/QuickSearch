@@ -160,6 +160,18 @@ function ocrIconNode() {
     return span;
 }
 
+/** 横条上翻译按钮的内容节点。
+ *
+ *  v1.5.16：和 ocrIconNode 同一套规矩 —— 用户换过图标（overrideIcons['@trans']）
+ *  就显示那张图，没换就是一枚「译」文字徽标。一个字而不是「翻译」两个字：
+ *  横条图标只有 ~28px，「翻译」两个字缩进去会糊成一团。
+ *  v1.5.17：默认徽标换成用户指定的「翻译.png」（内置在 data/icons/trans.png），
+ *  实现挪到 shared.js 的 qsTransIconNode —— 设置页列表 / 预览也走同一个函数，
+ *  三处才不会一个图一个样。图读不出来时它自己退回「译」字。 */
+function transIconNode() {
+    return window.qsTransIconNode();
+}
+
 /* ------------------------------------------------------------------ */
 /* 收藏夹（横条上的 @fav:<id> 哨兵）                                     */
 /* ------------------------------------------------------------------ */
@@ -727,8 +739,9 @@ function barList() {
     // 外部软件（@app:<id>）同理：软件被删掉时对应哨兵也消失（后端已剪，
     // 这里再兜一层，防配置广播到达前那一帧画出悬空的一格）。
     const kept = raw.filter((n) => {
-        // r72：识图（@img）也是一等成员了，别被后面那条"必须是认识的名字"筛掉
-        if (n === QS_SEP || n === QS_OCR || n === window.QS_IMG) return true;
+        // r72：识图（@img）也是一等成员了，别被后面那条"必须是认识的名字"筛掉。
+        // v1.5.16：翻译（@trans）同理。
+        if (n === QS_SEP || n === QS_OCR || n === window.QS_IMG || n === window.QS_TRANS) return true;
         if (typeof n === 'string' && n.startsWith(QS_FAV_PREFIX)) {
             return !!favGroupBySentinel(n);
         }
@@ -747,9 +760,13 @@ function barList() {
     });
     // OCR 总开关关着时，别把 @ocr 渲染出来（留一条空位毫无意义）。
     // 哨兵仍保留在配置里，用户下次开开关它就回到原位。
-    const vis = (CONF && CONF.ocrEnable !== false)
+    // 翻译总开关关着时 @trans 同理（v1.5.16）。
+    let vis = (CONF && CONF.ocrEnable !== false)
         ? kept
         : kept.filter((n) => n !== QS_OCR);
+    if (!(CONF && CONF.transEnable !== false)) {
+        vis = vis.filter((n) => n !== window.QS_TRANS);
+    }
     // 开头的、结尾的、连着重复的分隔线在这里一次性抹平，
     // 后面渲染就不用再操心「这根竖线怎么贴边上了」。
     return qsNormalizeBarList(vis);
@@ -1047,6 +1064,31 @@ function renderBar(force) {
             b.addEventListener('click', (e) => {
                 e.stopPropagation();
                 invoke('img_start').catch(() => {});
+            });
+            enginesEl.appendChild(b);
+            engines++;
+            continue;
+        }
+        /* v1.5.16：**翻译按钮**。和 @img 同一套地位（bar_list 成员，可拖、
+         * 可换图标、可移出），点下去把横条此刻这段文字送进翻译窗口。
+         *
+         * 为什么带 currentText：用户的使用姿势是「在别处选中/复制一段文字 →
+         * Ctrl+C 叫出横条 → 点翻译」。这段文字就是 currentText（唤起横条时
+         * 那份选区/剪贴板内容），和 open_search 带的口径完全一致。
+         * 没文字也照发（text: null）—— 后端会把窗口开成空的，让用户自己粘贴，
+         * 比弹一句"先选文字"再让他重点一次省事。 */
+        if (name === QS_TRANS) {
+            const b = document.createElement('button');
+            b.className = 'ico engine qs-trans-inbar';
+            b.title = '翻译：把横条此刻这段文字翻成别的语言（默认中文）';
+            b.dataset.trans = '1';
+            // 右键菜单按 .engine + dataset.engine 认人（换图标 / 移出与普通引擎一致）
+            b.dataset.engine = window.QS_TRANS;
+            b.appendChild(transIconNode());
+            b.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const t = (currentText || '').trim();
+                invoke('trans_start', { text: t || null }).catch(() => {});
             });
             enginesEl.appendChild(b);
             engines++;

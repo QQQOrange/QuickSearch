@@ -1,6 +1,6 @@
 [package]
 name = "quicksearch"
-version = "1.5.15"
+version = "1.5.18"
 edition = "2021"
 description = "Quick Search 桌面版 —— 任意软件里选中文字即可弹出搜索横条"
 build = "build.rs"
@@ -93,6 +93,7 @@ hmac = "0.12"
 # `::windows_core::` 绝对路径，外部 crate 必须把 windows-core 提为直接依赖，
 # 否则找不到这个 crate。版本和 windows 内部依赖的对齐（同一个 lock 条目）。
 windows-core = "0.62"
+md5 = "0.8"
 
 # 只开需要的 Windows API 模块，能显著缩短编译时间
 [dependencies.windows]

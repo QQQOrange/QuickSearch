@@ -17,6 +17,12 @@ mod imgsearch;
 mod export;
 mod ocr;
 mod ocr_engines;
+// v1.5.16：翻译（硅基流动 / OpenAI 兼容接口）。纯函数部分可单独单测。
+mod trans;
+mod trans_engines;
+// 老牌翻译厂商的专用协议（百度 / 谷歌 / 有道）—— 协议各不相同，
+// 单独一个模块，见该文件头的说明。
+mod trans_vendor;
 // r54 需求 2：划词是本地路径时，横条弹出文件管理器图标
 mod paths;
 // r55：从 main.rs 拆出来的引擎表（内置 engines.json 解析 / AI 引擎判定 /
@@ -3805,6 +3811,14 @@ fn config_view() -> Value {
         // v1.5.7：GitHub 个人访问令牌。和 webdavPass 一样是"要回显给本人改"的
         // 凭据 —— 页面是本机文件，config.json 整体加密；但它**不进日志**。
         "githubToken": cfg.github_token,
+        // v1.5.16：翻译（多引擎，对齐 OCR 那套）。Key 和 githubToken /
+        // webdavPass 一样"回显给本人改"—— 页面是本机文件、config.json 整体加密，
+        // 但它**不进日志**。
+        "transEnable": cfg.trans_enable,
+        "transEngine": cfg.trans_engine,
+        "transMulti": cfg.trans_multi,
+        "transCreds": trans_creds_view(&cfg),
+        "transTarget": cfg.trans_target,
         "lastEngine": cfg.last_engine,
         // r54 识图搜索。跟设置走（是用户偏好，不是逐机器的东西）——
         // 换电脑恢复之后识图引擎的勾选要还在。
@@ -3995,6 +4009,51 @@ fn apply_view(v: &Value, cfg: &mut config::Config) {
     }
     if let Some(x) = b("webdavOnStart") { cfg.webdav_on_start = x; }
     if let Some(x) = b("webdavOnExit") { cfg.webdav_on_exit = x; }
+    // v1.5.16：翻译跟着备份走（换了电脑不用重填 Key）。口径同 OCR 凭据：
+    // 空值不覆盖 —— 备份可能是在还没配翻译时导出的，照单全收会抹掉已填的 Key。
+    if let Some(x) = b("transEnable") { cfg.trans_enable = x; }
+    if let Some(x) = s("transEngine") {
+        if trans_engines::find(x.trim()).is_some() {
+            cfg.trans_engine = x.trim().to_string();
+        }
+    }
+    if let Some(a) = v.get("transMulti").and_then(|x| x.as_array()) {
+        cfg.trans_multi = a
+            .iter()
+            .filter_map(|x| x.as_str())
+            .filter(|id| trans_engines::find(id).is_some())
+            .map(|s| s.to_string())
+            .collect();
+    }
+    if let Some(o) = v.get("transCreds").and_then(|x| x.as_object()) {
+        for (id, c) in o {
+            if trans_engines::find(id).is_none() {
+                continue; // 不认识的引擎（旧版本 / 手改过的备份）跳过
+            }
+            let g = |f: &str| {
+                c.get(f)
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string()
+            };
+            for (map, val) in [
+                (&mut cfg.trans_keys, g("key")),
+                (&mut cfg.trans_secrets, g("secret")),
+                (&mut cfg.trans_bases, g("base")),
+                (&mut cfg.trans_models, g("model")),
+            ] {
+                if !val.is_empty() {
+                    map.insert(id.clone(), val);
+                }
+            }
+        }
+    }
+    if let Some(x) = s("transTarget") {
+        if !x.trim().is_empty() {
+            cfg.trans_target = crate::trans::normalize_lang(&x);
+        }
+    }
     // v1.2.0：自动更新开关（跟着备份/恢复走 —— 它是用户偏好，不是逐机器的东西）
     if let Some(x) = b("autoUpdate") { cfg.auto_update = x; }
     // GitHub 令牌跟着备份走（换了电脑不用重填）。空值不覆盖：备份里没有这个键
@@ -4420,6 +4479,20 @@ fn apply_one_setting(cfg: &mut config::Config, key: &str, value: Value) -> Resul
          * 这里只做一次 trim（前端可能带空格）。
          * ⚠ 绝不写日志 —— 这是凭据。 */
         "githubToken" => cfg.github_token = value.as_str().unwrap_or("").trim().to_string(),
+        /* v1.5.16：翻译（多引擎）。凭据的四样（Key/模型/base）走
+         * `trans_set_cred` 那个专门命令（和 OCR 的 ocr_set_cred 一样：
+         * 空串 = 删掉这一项，"清空密钥"才能正常工作），这里只留
+         * 开关 / 默认引擎 / 目标语言这三个单值。 */
+        "transEnable" => cfg.trans_enable = value.as_bool().unwrap_or(true),
+        "transEngine" => {
+            let e = value.as_str().unwrap_or("siliconflow").trim().to_string();
+            if trans_engines::find(&e).is_some() {
+                cfg.trans_engine = e;
+            }
+        }
+        "transTarget" => {
+            cfg.trans_target = crate::trans::normalize_lang(value.as_str().unwrap_or(""))
+        }
         "webdavUrl" => {
             // 单键修改走的是设置页实时保存。这里只做「补协议 + 补尾斜杠」，
             // **不**把软件子目录写进配置（用户要求：地址栏只填根地址）。
@@ -4728,13 +4801,31 @@ fn focus_lock_window() {
 /// prevent_close）。这里建窗不需要额外权限。
 fn open_lock_window(a: &AppHandle) {
     let a2 = a.clone();
-    let _ = a.run_on_main_thread(move || {
-        if let Some(w) = a2.get_webview_window("lock") {
-            let _ = w.show();
-            let _ = w.set_focus();
-            return;
-        }
-        let mut b = WebviewWindowBuilder::new(&a2, "lock", WebviewUrl::App("lock.html".into()))
+    /* ⚠ 建窗必须**脱开命令调用栈**（和 `open_trans_window` / `ocr_start` /
+     *   `open_app_picker` 同一个坑，理由一字不差）：
+     *
+     *   同步命令跑在**主线程**上，而 tauri-runtime-wry 的 `run_on_main_thread`
+     *   在主线程上是**当场内联执行**的（`send_user_message` 主线程分支直接调
+     *   `handle_user_message`，不排队）。于是 `WebviewWindowBuilder::build()`
+     *   跑在这次 invoke 的栈里 → 死锁。
+     *
+     *   本函数曾漏了这层保护，导致：
+     *     - `show_bar`（**同步命令**）→ `show_bar_at` → `app_locked()` →
+     *       `focus_lock_window` → 这里 → 主线程内联建窗 → **死锁**；
+     *     - 托盘菜单 "sync" 分支（`on_menu_event` 回调**也在主线程**）→ 同上。
+     *   死锁的表现就是用户报的「托盘图标在、右键菜单弹不出、双击不唤起、
+     *   划词没反应」——主线程事件循环一卡，shell 就没法调我们弹菜单。
+     *
+     *   修法：先 spawn 一个工作线程，再由它去 `run_on_main_thread`。 */
+    std::thread::spawn(move || {
+        let a3 = a2.clone();
+        let _ = a2.run_on_main_thread(move || {
+            if let Some(w) = a3.get_webview_window("lock") {
+                let _ = w.show();
+                let _ = w.set_focus();
+                return;
+            }
+            let mut b = WebviewWindowBuilder::new(&a3, "lock", WebviewUrl::App("lock.html".into()))
             .title("Quick Search")
             .inner_size(420.0, 268.0)
             .resizable(false)
@@ -4747,22 +4838,23 @@ fn open_lock_window(a: &AppHandle) {
             .decorations(false)
             .visible(false)
             .background_color(tauri::window::Color(23, 24, 28, 255));
-        let wa = wv_args();
-        if !wa.is_empty() {
-            b = b.additional_browser_args(&wa);
-        }
-        match b.build() {
-            Ok(w) => {
-                win::log("lock: 窗口已建，等页面 ready");
-                let w2 = w.clone();
-                std::thread::spawn(move || {
-                    std::thread::sleep(Duration::from_millis(180));
-                    let _ = w2.show();
-                    let _ = w2.set_focus();
-                });
+            let wa = wv_args();
+            if !wa.is_empty() {
+                b = b.additional_browser_args(&wa);
             }
-            Err(e) => win::log(&format!("lock: 建窗失败 {e}")),
-        }
+            match b.build() {
+                Ok(w) => {
+                    win::log("lock: 窗口已建，等页面 ready");
+                    let w2 = w.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(Duration::from_millis(180));
+                        let _ = w2.show();
+                        let _ = w2.set_focus();
+                    });
+                }
+                Err(e) => win::log(&format!("lock: 建窗失败 {e}")),
+            }
+        });
     });
 }
 
@@ -6456,14 +6548,22 @@ fn emit_update(info: &update::UpdateInfo, manual: bool) {
 /// always-on-top（浮在所有窗口上会很烦），只在弹出那一刻抢一次焦点。
 fn show_update_window(a: &AppHandle) {
     let a2 = a.clone();
-    let _ = a.run_on_main_thread(move || {
-        if let Some(w) = a2.get_webview_window("update") {
-            let _ = w.unminimize();
-            let _ = w.show();
-            let _ = w.set_focus();
-            return;
-        }
-        let mut b = WebviewWindowBuilder::new(&a2, "update", WebviewUrl::App("update.html".into()))
+    /* ⚠ 建窗必须**脱开命令调用栈**（和 `open_trans_window` 同一个坑）。
+     *   `run_on_main_thread` 在主线程上会**内联执行**闭包（wry `send_user_message`
+     *   主线程分支直接调 `handle_user_message`，不排队），于是 `build()` 跑在
+     *   调用方栈里 → 死锁。当前调用方（`auto_check_on_start` / `update_check`）
+     *   恰好都在 spawn 线程里，所以还没触发；但**任何新的调用方**都可能踩中，
+     *   这里统一加保护，不要去掉。 */
+    std::thread::spawn(move || {
+        let a3 = a2.clone();
+        let _ = a2.run_on_main_thread(move || {
+            if let Some(w) = a3.get_webview_window("update") {
+                let _ = w.unminimize();
+                let _ = w.show();
+                let _ = w.set_focus();
+                return;
+            }
+            let mut b = WebviewWindowBuilder::new(&a3, "update", WebviewUrl::App("update.html".into()))
             .title(if cfg_with(|c| c.ui_lang == "en") {
                 "Quick Search Update"
             } else {
@@ -6477,22 +6577,23 @@ fn show_update_window(a: &AppHandle) {
             .decorations(false)
             .visible(false)
             .background_color(tauri::window::Color(23, 24, 28, 255));
-        let wa = wv_args();
-        if !wa.is_empty() {
-            b = b.additional_browser_args(&wa);
-        }
-        match b.build() {
-            Ok(w) => {
-                win::log("update: 窗口已建");
-                let w2 = w.clone();
-                std::thread::spawn(move || {
-                    std::thread::sleep(Duration::from_millis(180));
-                    let _ = w2.show();
-                    let _ = w2.set_focus();
-                });
+            let wa = wv_args();
+            if !wa.is_empty() {
+                b = b.additional_browser_args(&wa);
             }
-            Err(e) => win::log(&format!("update: 建窗失败 {e}")),
-        }
+            match b.build() {
+                Ok(w) => {
+                    win::log("update: 窗口已建");
+                    let w2 = w.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(Duration::from_millis(180));
+                        let _ = w2.show();
+                        let _ = w2.set_focus();
+                    });
+                }
+                Err(e) => win::log(&format!("update: 建窗失败 {e}")),
+            }
+        });
     });
 }
 
@@ -7362,6 +7463,534 @@ fn demo_png() -> Vec<u8> {
 /// 打开识别结果窗口。
 ///
 /// 复用同一个窗口（第二次识别直接把文字换掉），省得每次弹一个新窗口。
+/* ══════════════════════════════════════════════════════════════════════
+ * v1.5.16：翻译窗口
+ *
+ * 和 OCR 窗口同一套开法（先隐藏建窗、页面 ready 再显示、2.5 秒兜底），
+ * 但内容不是"识别结果"而是"原文 + 译文"。
+ *
+ * 结果为什么不走事件推送：翻译是"一问一答"，页面 `invoke('trans_run')` 的
+ * 返回值就是译文，比"建窗 + 反复 emit + 前端去重"简单得多。事件只在
+ * **窗口已存在、又收到新文本**时用一次，把新内容塞进去。
+ * ══════════════════════════════════════════════════════════════════════ */
+
+#[derive(Clone, Default)]
+struct TransSession {
+    text: String,
+    target: String,
+}
+
+/// 最近一次"要翻译什么"。窗口建好之前就写进来，页面起来第一件事是读它。
+static TRANS_SESSION: std::sync::Mutex<Option<TransSession>> = std::sync::Mutex::new(None);
+
+fn clear_trans_session() {
+    if let Ok(mut g) = TRANS_SESSION.lock() {
+        *g = None;
+    }
+}
+
+fn open_trans_window(text: String, target: String) {
+    if let Ok(mut g) = TRANS_SESSION.lock() {
+        *g = Some(TransSession {
+            text: text.clone(),
+            target: target.clone(),
+        });
+    }
+    let a = app();
+    if let Some(w) = a.get_webview_window("trans") {
+        // 已经开着：把新文本推过去，别重建窗口（会闪、还丢滚动位置）
+        let _ = w.show();
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+        let _ = a.emit_to(
+            "trans",
+            "qs://trans-open",
+            json!({ "text": text, "target": target }),
+        );
+        return;
+    }
+    let a2 = a.clone();
+    let a3 = a.clone();
+    /* ⚠ 建窗必须**脱开命令调用栈**（和 `ocr_start` / `img_start` /
+     *   `open_app_picker` / `open_icon_edit_win` 同一个坑，理由一字不差）：
+     *
+     *   同步命令跑在**主线程**上，而 tauri-runtime-wry 的 `run_on_main_thread`
+     *   在主线程上是**当场内联执行**的 —— `send_user_message` 里
+     *   `current_thread().id() == main_thread_id` 那个分支直接调
+     *   `handle_user_message`，**不排队**。
+     *
+     *   于是 `WebviewWindowBuilder::build()` 会跑在这次 invoke 的栈里：主线程
+     *   建 WebView2 的过程中要回头等一把**命令尚未释放的锁** → 直接死锁。
+     *
+     *   本次症状（用户报的）：横条上点「翻译」→ 横条收了 → **翻译窗永远不
+     *   出现**，不报错、不崩、日志停在开窗那一行。`--trans-demo` 那条路一直
+     *   是好的 —— 因为它是从 spawn 出来的线程调的，任务被排进了事件循环。
+     *
+     *   修法：先 spawn 一个工作线程，再由它去 `run_on_main_thread`。这样任务
+     *   被**排队**，主线程回到事件循环后**下一轮**才建窗，不在命令的栈里。 */
+    std::thread::spawn(move || {
+        let _ = a2.run_on_main_thread(move || {
+            // 双击「翻译」时上一轮可能刚把窗建好 —— 别再建一个同名的。
+            if a3.get_webview_window("trans").is_some() {
+                win::log("trans win: 已经有窗口了，这次不重建");
+                return;
+            }
+            let mut b = WebviewWindowBuilder::new(&a3, "trans", WebviewUrl::App("trans.html".into()))
+            .title("翻译 —— Quick Search")
+            // v1.5.16 第二轮：多家引擎并排之后默认尺寸放宽一点（760 摆两家刚好、
+            // 摆三家就得换行，行高被压一半）。最小尺寸不变。
+            .inner_size(860.0, 600.0)
+            .min_inner_size(520.0, 320.0)
+            .resizable(true)
+            .center()
+            // 同 OCR：先不显示，等页面首帧画完再 show —— 否则深色系统下会先
+            // 闪一块原生黑框（OC​R 那边踩过，注释见 open_ocr_window）。
+            .visible(false)
+            .background_color(if win::apps_use_light_theme().unwrap_or(true) {
+                tauri::window::Color(245, 246, 248, 255)
+            } else {
+                tauri::window::Color(23, 24, 28, 255)
+            });
+        let wa = wv_args();
+        if !wa.is_empty() {
+            b = b.additional_browser_args(&wa);
+        }
+        match b.build() {
+            Ok(w) => {
+                win::log("trans win: built (hidden, 等页面 ready)");
+                // 关掉窗口就把"要翻什么"清掉：下次打开不该看见上一次的文字。
+                w.on_window_event(|e| {
+                    if matches!(
+                        e,
+                        tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed
+                    ) {
+                        clear_trans_session();
+                    }
+                });
+                // 兜底显示：ready 信号没来（页面脚本异常）也不能让窗口挂着不出现
+                let w2 = w.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(2500));
+                    if !w2.is_visible().unwrap_or(false) {
+                        win::log("trans win: ready 超时，兜底显示");
+                        let _ = w2.show();
+                        let _ = w2.set_focus();
+                    }
+                });
+            }
+            Err(e) => win::log(&format!("trans win: build failed: {e}")),
+        }
+        });
+    });
+}
+
+/// 横条上的翻译按钮 / OCR 窗口里的翻译图标，都走这一个入口。
+///
+/// 没给文字也**不报错**：窗口照开，原文框是空的、光标已经落进去 ——
+/// 用户可能是想自己粘贴一段。这比弹一句"先选文字"再让他重来更省事。
+#[tauri::command]
+fn trans_start(text: Option<String>) {
+    if app_locked() {
+        // 锁屏窗也是 WebView2 窗口，同样不能建在命令的栈里（理由见
+        // open_trans_window 那段注释）—— 甩到后台线程去建。
+        std::thread::spawn(focus_lock_window);
+        return;
+    }
+    let cfg = cfg_snapshot();
+    if !cfg.trans_enable {
+        // 按钮在关掉时本来就不渲染，这里只是兜住"前端缓存还没刷新"的那一瞬
+        win::log("trans: 功能已关闭，忽略这次触发");
+        return;
+    }
+    dismiss_bar();
+    open_trans_window(text.unwrap_or_default(), cfg.trans_target);
+}
+
+/// 页面起来后问"这次要翻什么、默认翻成哪种语言、哪几家一起翻"。
+///
+/// `plan` 是**权威的参与名单**（默认引擎 + 同时翻译，口径见
+/// `config::trans_plan`）—— 翻译窗据此建几家文本框，一家发一次 `trans_run`。
+/// 前端不自己从 CONF 拼名单：那份逻辑 Rust 已经有一份了，抄一遍迟早对不上。
+#[tauri::command]
+fn trans_session() -> serde_json::Value {
+    let s = TRANS_SESSION
+        .lock()
+        .ok()
+        .and_then(|g| g.clone())
+        .unwrap_or_default();
+    let cfg = cfg_snapshot();
+    let plan: Vec<Value> = config::trans_plan(&cfg)
+        .iter()
+        .map(|id| {
+            let name = trans_engines::find(id).map(|e| e.name).unwrap_or(id.as_str());
+            let ready = trans_creds_ready(&cfg, id);
+            json!({ "id": id, "name": name, "ready": ready })
+        })
+        .collect();
+    json!({
+        "text": s.text,
+        "target": crate::trans::normalize_lang(&s.target),
+        "plan": plan,
+    })
+}
+
+/// 可选目标语言。语言表只放在 Rust 一份，界面不重复维护。
+#[tauri::command]
+fn trans_langs() -> serde_json::Value {
+    json!(crate::trans::LANGS
+        .iter()
+        .map(|(c, n)| json!({ "code": c, "label": n }))
+        .collect::<Vec<_>>())
+}
+
+#[tauri::command]
+fn trans_ready() {
+    show_after_ready("trans");
+}
+
+#[tauri::command]
+fn close_trans_window() {
+    close_window("trans");
+    clear_trans_session();
+}
+
+/// 把模型的增量译文**节流**后推给翻译窗（事件 `qs://trans-chunk`）。
+///
+/// 为什么要节流：模型是一个 token 一个 token 吐的，一句话也能有几十上百段。
+/// 每段都 emit 一次 = 每秒几十次跨进程 IPC + JSON 序列化，界面反而更卡。
+/// 攒够 ~40ms 或 ~48 字节再发一次，肉眼看仍是"连续在长"，开销只有原来的
+/// 几十分之一。
+///
+/// `round` 是这一轮翻译的编号：界面只认自己当前那一轮，旧轮次的残余增量
+/// （用户手快、重翻了一次）会被丢掉，不会把新译文糊成两份。
+struct ChunkSink {
+    round: String,
+    engine: &'static str,
+    buf: String,
+    last: std::time::Instant,
+    sent_any: bool,
+}
+
+impl ChunkSink {
+    fn new(round: String, engine: &'static str) -> Self {
+        Self {
+            round,
+            engine,
+            buf: String::new(),
+            last: std::time::Instant::now(),
+            sent_any: false,
+        }
+    }
+
+    fn push(&mut self, delta: &str) {
+        self.buf.push_str(delta);
+        /* 第一段**立刻**发出去：用户要的是"点了马上有反应"。攒着等够 48 字节
+         * 再发，短句要等到快翻完才亮 —— 那正是我们想消掉的"空框干等"。 */
+        if !self.sent_any || self.buf.len() >= 48 || self.last.elapsed() >= Duration::from_millis(40)
+        {
+            self.flush();
+        }
+    }
+
+    fn flush(&mut self) {
+        if self.buf.is_empty() {
+            return;
+        }
+        let delta = std::mem::take(&mut self.buf);
+        let _ = app().emit_to(
+            "trans",
+            "qs://trans-chunk",
+            json!({ "round": self.round, "engine": self.engine, "delta": delta }),
+        );
+        self.sent_any = true;
+        self.last = std::time::Instant::now();
+    }
+}
+
+/// 真正去调某一家模型。
+///
+/// `engine` 是注册表 id（`trans_engines::ENGINES`）。翻译窗对**每一家参与
+/// 本轮翻译的引擎各发一次**这个命令（并行），谁先回来先填谁那一格 ——
+/// 和 OCR 的 `ocr_run_engines` 渐进式一个用户体验，只是编排放在前端
+/// （翻译是"一问一答"，不需要 OCR 那套结果缓存 / 合并文本）。
+///
+/// v1.5.18：**流式**。返回值仍是完整译文（界面拿它覆盖流式显示的内容，剥
+/// 围栏、去首尾空白只在拿到全量时才准），中途的增量走 `qs://trans-chunk`。
+/// 这样"第一个字"从 1~3 秒降到几百毫秒，长段落也不再是一个空框转圈。
+///
+/// 用 `spawn_blocking` 包一层：`ureq` 是同步阻塞的，直接丢进异步命令会占着
+/// 一个 tokio worker 干等。翻译期间窗口不能卡住（用户还要切语言）。
+#[tauri::command]
+async fn trans_run(
+    engine: String,
+    text: String,
+    target: Option<String>,
+    round: Option<String>,
+) -> Result<String, String> {
+    let cfg = cfg_snapshot();
+    let tgt = crate::trans::normalize_lang(target.as_deref().unwrap_or(&cfg.trans_target));
+    let rnd = round.unwrap_or_default();
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(info) = trans_engines::find(&engine) else {
+            return Err(format!("不认识的翻译引擎：{engine}"));
+        };
+        let creds = config::trans_creds(&cfg, info.id);
+        let mut sink = ChunkSink::new(rnd, info.id);
+        let out = {
+            let mut on_delta = |d: &str| sink.push(d);
+            crate::trans_vendor::translate_stream(info, &creds, &text, &tgt, &mut on_delta)
+        };
+        // 尾巴上那一小段（不到 40ms 的最后几个字）也要发出去
+        sink.flush();
+        out
+    })
+    .await
+    .map_err(|e| format!("翻译任务出错：{e}"))?
+}
+
+/// 设置页「测试连接」：拿一句固定的话真翻一次（当前展开的那一家）。
+///
+/// 为什么不在前端拼：Key 对不对、模型可不可用、额度够不够，只有真发一次请求
+/// 才知道；这句话短（几个 token），限流也吃得下。失败时把 Rust 归类好的
+/// 人话原样带回界面（缺 Key / 401 / 429 / 网络不通各有各的说法）。
+#[tauri::command]
+async fn trans_test(engine: String) -> Result<String, String> {
+    let cfg = cfg_snapshot();
+    let tgt = crate::trans::normalize_lang(&cfg.trans_target);
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(info) = trans_engines::find(&engine) else {
+            return Err(format!("不认识的翻译引擎：{engine}"));
+        };
+        trans_engines::test_engine(info, &config::trans_creds(&cfg, info.id), &tgt)
+    })
+    .await
+    .map_err(|e| format!("翻译任务出错：{e}"))?
+}
+
+/* ------------------------------------------------------------------ */
+/* 翻译引擎注册表（对齐 OCR 那一套：名单只有 Rust 一份，界面不自己维护）  */
+/* ------------------------------------------------------------------ */
+
+/// 这家翻译引擎的凭据齐了吗 —— 要填哪几样由**注册表**决定（need_key /
+/// need_model / need_base），不在代码里写死。
+fn trans_creds_ready(cfg: &config::Config, id: &str) -> bool {
+    let Some(info) = trans_engines::find(id) else {
+        return false;
+    };
+    let c = config::trans_creds(cfg, id);
+    if info.need_key && c.key.trim().is_empty() {
+        return false;
+    }
+    // 副凭据（百度的密钥 / 有道的应用密钥）：少一样都签不出请求
+    if info.need_secret && c.secret.trim().is_empty() {
+        return false;
+    }
+    if info.need_model && c.model_for(info).trim().is_empty() {
+        return false;
+    }
+    if info.need_base && c.base_for(info).trim().is_empty() {
+        return false;
+    }
+    true
+}
+
+/// 引擎注册表（给设置页渲染：引擎列表 + 问号按钮 + 凭据表单 + 同时翻译名单）。
+#[tauri::command]
+fn trans_engines_list() -> Value {
+    let cfg = cfg_snapshot();
+    let list: Vec<Value> = trans_engines::ENGINES
+        .iter()
+        .map(|e| {
+            json!({
+                "id": e.id,
+                "name": e.name,
+                "kind": e.kind.as_str(),
+                // 能不能拉模型列表 / 要不要显示模型那一栏
+                "canListModels": e.kind.has_models(),
+                "modelRow": e.kind.needs_model_row(),
+                "signup": e.signup,
+                "docs": e.docs,
+                "needKey": e.need_key,
+                "needSecret": e.need_secret,
+                "needBase": e.need_base,
+                "needModel": e.need_model,
+                "base": e.base,
+                "model": e.model,
+                "note": e.note,
+                "ready": trans_creds_ready(&cfg, e.id),
+            })
+        })
+        .collect();
+    Value::Array(list)
+}
+
+/// 每家引擎的凭据（给设置页渲染用，键 = 引擎 id）。
+fn trans_creds_view(cfg: &config::Config) -> Value {
+    let mut m = Map::new();
+    for e in trans_engines::ENGINES {
+        let c = config::trans_creds(cfg, e.id);
+        m.insert(
+            e.id.to_string(),
+            json!({ "key": c.key, "secret": c.secret, "base": c.base, "model": c.model }),
+        );
+    }
+    Value::Object(m)
+}
+
+/// 保存某家翻译引擎的凭据（设置页展开块里那几栏）。
+///
+/// 四样一起写；空串 = 删掉这一项（于是"清空密钥"能正常工作）。
+/// 存完广播一次配置，让横条 / 翻译窗 / 设置页各处的 ready 标记跟着变。
+#[tauri::command]
+fn trans_set_cred(
+    engine: String,
+    key: String,
+    secret: String,
+    base: String,
+    model: String,
+) -> Result<(), String> {
+    let info = trans_engines::find(&engine).ok_or_else(|| format!("不认识的翻译引擎：{engine}"))?;
+    {
+        let mut cfg = st().cfg.lock().map_err(|_| "配置忙".to_string())?;
+        fn put(m: &mut std::collections::HashMap<String, String>, id: &str, v: &str) {
+            let v = v.trim();
+            if v.is_empty() {
+                m.remove(id);
+            } else {
+                m.insert(id.to_string(), v.to_string());
+            }
+        }
+        put(&mut cfg.trans_keys, info.id, &key);
+        put(&mut cfg.trans_secrets, info.id, &secret);
+        put(&mut cfg.trans_bases, info.id, &base);
+        put(&mut cfg.trans_models, info.id, &model);
+        config::save(&cfg);
+    }
+    broadcast();
+    Ok(())
+}
+
+/// 「同时翻译」名单：设哪几家**额外**和默认引擎一起翻。
+///
+/// ⚠ 为什么单开一个命令而不是走 `set_setting`：这份名单有三条不变式
+///   （只收注册表里认识的 id / 不含默认引擎自己 / 无重复），放进通用键值
+///   设置里就没地方执行。这里过滤完**返回清洗后的名单**，前端拿它回画界面
+///   —— 和 `ocr_set_multi` 完全一个路子。
+#[tauri::command]
+fn trans_set_multi(engines: Vec<String>) -> Vec<String> {
+    let mut cleaned: Vec<String> = Vec::new();
+    {
+        let Ok(mut cfg) = st().cfg.lock() else {
+            return cleaned;
+        };
+        let def = cfg.trans_engine.clone();
+        for e in trans_engines::ENGINES {
+            if e.id == def {
+                continue;
+            }
+            if engines.iter().any(|x| x == e.id) && !cleaned.iter().any(|x| x == e.id) {
+                cleaned.push(e.id.to_string());
+            }
+        }
+        cfg.trans_multi = cleaned.clone();
+        config::save(&cfg);
+    }
+    win::log(&format!("trans_set_multi: {:?}", cleaned));
+    broadcast();
+    cleaned
+}
+
+/// 拉一家的模型列表（异步：可能几百个模型，同步拉会把设置页卡住；
+/// 结果回 `qs://trans-models`）。方向与 OCR 相反 —— 只要**对话**模型。
+#[tauri::command]
+fn trans_list_models(app: AppHandle, engine: String) {
+    win::log(&format!("trans_list_models: {engine}"));
+    std::thread::spawn(move || {
+        let cfg = cfg_snapshot();
+        let payload = match trans_engines::find(&engine) {
+            None => json!({
+                "engine": engine, "ok": false,
+                "msg": format!("不认识的翻译引擎：{engine}"), "models": [],
+            }),
+            Some(info) => {
+                let creds = config::trans_creds(&cfg, info.id);
+                let base = creds.base_for(info);
+                match trans_engines::list_models(&base, &creds.key, 20) {
+                    Ok(list) => {
+                        let n_all = list.len();
+                        let chat = list.iter().filter(|(_, c)| *c).count();
+                        let (list, msg) = if chat > 0 && chat < n_all {
+                            (
+                                list.into_iter().filter(|(_, c)| *c).collect::<Vec<_>>(),
+                                format!("拉到 {n_all} 个模型，只留 {chat} 个对话模型"),
+                            )
+                        } else if chat == 0 {
+                            (
+                                list,
+                                format!("拉到 {n_all} 个模型，但名字里看不出哪些能对话 —— 全列出来了，自己挑一个"),
+                            )
+                        } else {
+                            (list, format!("拉到 {n_all} 个模型"))
+                        };
+                        json!({
+                            "engine": engine, "ok": true, "msg": msg,
+                            "models": list.into_iter()
+                                .map(|(id, c)| json!({ "id": id, "chat": c }))
+                                .collect::<Vec<_>>(),
+                        })
+                    }
+                    Err(e) => json!({ "engine": engine, "ok": false, "msg": e, "models": [] }),
+                }
+            }
+        };
+        let _ = app.emit("qs://trans-models", payload);
+    });
+}
+
+/// 用系统默认浏览器打开一个网址，**不阻塞主线程**。
+///
+/// `open::that` 在 Windows 上就是 ShellExecuteW，**是阻塞的**（等 shell 查
+/// 关联程序、冷启动浏览器要几百毫秒，机器慢时能到几秒）。而 Tauri v2 的
+/// 同步命令默认跑在**主线程**上 —— 在主线程上同步调它，整个 WebView2 的
+/// IPC 一起卡住，用户看到的是"点了那颗问号，什么都没发生"。
+/// （同一个坑项目里踩过两次：`open_repo_page` 早就改成后台线程了。）
+///
+/// 所以这里统一走 `spawn_blocking`：阻塞的那部分挪到工作线程，主线程照样
+/// 能收别的消息。返回 URL 本身，好让前端 toast 告诉用户"开的是哪一页"。
+async fn open_url_in_browser(url: &str) -> Result<String, String> {
+    let u = url.to_string();
+    tauri::async_runtime::spawn_blocking(move || open::that(&u))
+        .await
+        .map_err(|e| format!("打不开浏览器：{e}"))?
+        .map_err(|e| format!("打不开浏览器：{e}"))?;
+    Ok(url.to_string())
+}
+
+/// 用系统默认浏览器打开某家翻译引擎**申请 API 的官方页面**（引擎行上「?」点的
+/// 就是它）。地址来自注册表（trans_engines::EngineInfo::signup），界面不另存一份。
+#[tauri::command]
+async fn trans_open_help(engine: String) -> Result<String, String> {
+    let info = trans_engines::find(&engine).ok_or_else(|| format!("不认识的翻译引擎：{engine}"))?;
+    if info.signup.trim().is_empty() {
+        return Err(format!("{} 没有登记申请页面", info.name));
+    }
+    win::log(&format!("trans_open_help: {} → {}", info.id, info.signup));
+    open_url_in_browser(info.signup).await
+}
+
+/// 打开某家翻译引擎的**接口文档**（「?」旁边那颗「文档」）。
+///
+/// 理由和阻塞问题见 `trans_open_help`（同一段注释，别重复踩）。
+#[tauri::command]
+async fn trans_open_docs(engine: String) -> Result<String, String> {
+    let info = trans_engines::find(&engine).ok_or_else(|| format!("不认识的翻译引擎：{engine}"))?;
+    if info.docs.trim().is_empty() {
+        return Err(format!("{} 没有登记接口文档", info.name));
+    }
+    win::log(&format!("trans_open_docs: {} → {}", info.id, info.docs));
+    open_url_in_browser(info.docs).await
+}
+
 fn open_ocr_window(text: String) {
     if let Ok(mut g) = OCR_LAST.lock() {
         *g = text.clone();
@@ -7387,7 +8016,22 @@ fn open_ocr_window(text: String) {
         // 窗口尺寸按用户上次拖的结果开（见 config::ocr_window_size 的注释）。
         // 在这里取一次快照，闭包里用 —— 闭包要 'static，不能借用配置锁。
         let (ocr_w, ocr_h) = cfg_with(config::ocr_window_size);
-        let _ = a.run_on_main_thread(move || {
+        /* ⚠ 建窗必须**脱开命令调用栈**（和 `open_trans_window` 同一个坑）：
+         *
+         *   同步命令跑在**主线程**上，而 tauri-runtime-wry 的 `run_on_main_thread`
+         *   在主线程上是**当场内联执行**的（`send_user_message` 主线程分支直接调
+         *   `handle_user_message`，不排队）。于是 `WebviewWindowBuilder::build()`
+         *   跑在这次 invoke 的栈里 → 死锁。
+         *
+         *   本函数曾漏了这层保护，而它的调用链**全是同步命令**：
+         *     - `ocr_warm`（同步）→ `ocr_tell(..., important=true)` → 这里 → 死锁；
+         *     - `ocr_region`（同步）→ 同上。
+         *   死锁时主线程事件循环停摆 → 托盘菜单弹不出、双击不唤起、划词无反应。
+         *
+         *   修法：先 spawn 一个工作线程，再由它去 `run_on_main_thread`。 */
+        std::thread::spawn(move || {
+            let a4 = a2.clone();
+            let _ = a2.run_on_main_thread(move || {
             // ⚠ 关键：**先不显示**（`.visible(false)`）。
             //
             // 用户报的"OCR 之后又蹦出一个黑框"就是这个原因：Tauri 建窗是**同步**的，
@@ -7400,7 +8044,7 @@ fn open_ocr_window(text: String) {
             // 至少颜色是对的），等页面侧发来 `ocr_ready`（首帧画完）再 show。
             // 兜底：万一 ready 信号没来（脚本异常），2.5 秒后强制显示，不能让用户
             // 以为程序卡死了什么都不弹。
-            let mut b = WebviewWindowBuilder::new(&a2, "ocr", WebviewUrl::App("ocr.html".into()))
+            let mut b = WebviewWindowBuilder::new(&a4, "ocr", WebviewUrl::App("ocr.html".into()))
                 .title("识别结果 —— Quick Search")
                 // 尺寸记忆：用户上次拖成多大，这次就开多大（没拖过用默认 760×620）。
                 .inner_size(ocr_w, ocr_h)
@@ -7450,6 +8094,7 @@ fn open_ocr_window(text: String) {
                 }
                 Err(e) => win::log(&format!("ocr win: build failed: {e}")),
             }
+            });
         });
     }
     // 推「文字 + 图片」这一整份结果。
@@ -7487,12 +8132,24 @@ fn open_ocr_window(text: String) {
     let img = std::sync::Arc::new(img);
     let text = std::sync::Arc::new(text);
     std::thread::spawn(move || {
+        /* ⚠ 别把「窗口还没登记」当成「用户把窗口关了」。
+         *
+         * 建窗现在跑在**主线程队列**里（见上面 open_ocr_window 的 spawn 说明），
+         * 本线程可能比它先醒：这时 get_webview_window 还是 None。原先是见到
+         * None 就直接 return —— 于是整轮结果**一个字都推不出去**，用户看到的是
+         * 一个空的识别窗（机器越慢越容易中，冷启动尤其）。
+         *
+         * 判据改成「先见到过、之后又没了」才是真的被关掉。 */
+        let mut seen = false;
         for i in 0..14 {
             std::thread::sleep(Duration::from_millis(if i < 6 { 90 } else { 260 }));
-            // 窗口已经被关掉（用户看都不想看就退了）就没必要继续推
             if a3.get_webview_window("ocr").is_none() {
-                return;
+                if seen {
+                    return;
+                }
+                continue;
             }
+            seen = true;
             let _ = a3.emit_to(
                 "ocr",
                 "qs://ocr-result",
@@ -9458,21 +10115,21 @@ fn ocr_list_models(app: AppHandle, engine: String, vision_only: Option<bool>) {
 }
 
 /// 用系统默认浏览器打开某家引擎**申请 API 的官方页面**（问号按钮点的就是它）。
+///
+/// 阻塞问题见 `open_url_in_browser`（同一段注释，别重复踩）。
 #[tauri::command]
-fn ocr_open_help(engine: String) -> Result<String, String> {
+async fn ocr_open_help(engine: String) -> Result<String, String> {
     let info = ocr_engines::find(&engine).ok_or_else(|| format!("不认识的识别引擎：{engine}"))?;
     win::log(&format!("ocr_open_help: {} → {}", info.id, info.signup));
-    open::that(info.signup).map_err(|e| format!("打不开浏览器：{e}"))?;
-    Ok(info.signup.to_string())
+    open_url_in_browser(info.signup).await
 }
 
-/// 打开某家引擎的**接口文档**（问号旁边的「文档」）。
+/// 打开某家引擎的**接口文档**（问号旁边的「文档」）。阻塞问题同上。
 #[tauri::command]
-fn ocr_open_docs(engine: String) -> Result<String, String> {
+async fn ocr_open_docs(engine: String) -> Result<String, String> {
     let info = ocr_engines::find(&engine).ok_or_else(|| format!("不认识的识别引擎：{engine}"))?;
     win::log(&format!("ocr_open_docs: {} → {}", info.id, info.docs));
-    open::that(info.docs).map_err(|e| format!("打不开浏览器：{e}"))?;
-    Ok(info.docs.to_string())
+    open_url_in_browser(info.docs).await
 }
 
 /// r56：识图引擎行上那颗「?」—— 打开这家引擎的官方页面 / 教程。
@@ -9483,7 +10140,7 @@ fn ocr_open_docs(engine: String) -> Result<String, String> {
 /// 地址由注册表的 `Engine.help` 给（`imgsearch::每家的问号地址都是_https` 钉住
 /// 它必须是 https），界面不另存一份 —— 加引擎只改 imgsearch.rs 一行。
 #[tauri::command]
-fn img_open_help(engine: String) -> Result<String, String> {
+async fn img_open_help(engine: String) -> Result<String, String> {
     let e = imgsearch::find(&engine).ok_or_else(|| format!("不认识的识图引擎：{engine}"))?;
     if !e.help.starts_with("https://") {
         // 前端与单测都只认 https；走到这里说明注册表被人改坏了，
@@ -9491,8 +10148,8 @@ fn img_open_help(engine: String) -> Result<String, String> {
         return Err(format!("{} 的教程地址不是 https：{}", e.name, e.help));
     }
     win::log(&format!("img_open_help: {} → {}", e.id, e.help));
-    open::that(e.help).map_err(|e| format!("打不开浏览器：{e}"))?;
-    Ok(e.help.to_string())
+    // 别在主线程上等 ShellExecute（见 open_url_in_browser 的注释）
+    open_url_in_browser(e.help).await
 }
 
 /// 保存某家引擎的凭据。
@@ -11326,6 +11983,10 @@ fn icon_edit_name(key: &str) -> String {
     if key == config::BAR_IMG {
         return "识图搜索".to_string();
     }
+    // v1.5.16：翻译按钮（@trans）同理。
+    if key == config::BAR_TRANS {
+        return "翻译".to_string();
+    }
     if let Some(id) = key.strip_prefix("@app:") {
         return cfg_with(|c| {
             c.apps
@@ -12024,7 +12685,8 @@ fn ai_model_dir_open() {
     if !dir.exists() {
         let _ = std::fs::create_dir_all(&dir);
     }
-    let _ = open::that(&dir);
+    // 打开资源管理器是 ShellExecute（阻塞）—— 这是同步命令，别压在主线程上
+    let _ = open::that_detached(&dir);
 }
 
 /// 清理下载残留与旧位置的模型（r80i）。
@@ -12552,6 +13214,7 @@ fn toggle_bar_engine_impl(cfg: &mut Config, engine: &str, on: bool) {
     if on
         && engine != config::BAR_OCR
         && engine != config::BAR_IMG
+        && engine != config::BAR_TRANS
         && !config::is_fav_sentinel(engine)
         && !config::is_app_sentinel(engine)
     {
@@ -13422,6 +14085,11 @@ fn remove_app(id: String) {
 
 /// 把地址交给系统打开。`file://` 先转成本地路径再喂 ShellExecute ——
 /// 直接递 URI 给 ShellExecuteW 在部分 Windows 版本上会静默失败（它更认原生路径）。
+///
+/// ⚠ 走 `that_detached`（起独立进程后立刻返回）而不是 `that`：本函数唯一的调用方
+///   是**同步命令** `open_app`，它跑在主线程上。用阻塞版的话，用户的观感就是
+///   「点了软件图标，横条要等浏览器/资源管理器拉起来才肯收」—— 机器慢时能卡好几秒，
+///   期间右键菜单、托盘都点不动（和 `open_url_in_browser` 是同一个坑）。
 fn shell_open(url: &str) -> Result<(), String> {
     let target = if let Some(rest) = url.strip_prefix("file://") {
         if let Some(unc) = rest.strip_prefix("//") {
@@ -13441,7 +14109,7 @@ fn shell_open(url: &str) -> Result<(), String> {
     if looks_like_local_path(&target) && !std::path::Path::new(&target).exists() {
         return Err(format!("找不到 {target}，去设置里检查一下地址"));
     }
-    open::that(&target).map_err(|e| {
+    open::that_detached(&target).map_err(|e| {
         // 别的失败原因同样只取第一行、截到 80 字符：横条提示位很窄，
         // 用户需要知道的是"系统拒绝了"，不是启动器的内部细节。
         let first = e.to_string().lines().next().unwrap_or("").trim().to_string();
@@ -13588,6 +14256,246 @@ fn reset_all() {
 /* 搜索 / 打开链接                                                     */
 /* ================================================================== */
 
+/// 执行一次「快捷键类引擎」：确保应用在跑 → 等它初始化 → 聚焦 → 发键。
+///
+/// # 为什么它必须是一个独立函数（而不是写在 `open_search` 里）
+///
+/// `open_search` 是**同步命令**，Tauri 把它跑在**主线程**上。而这条分支里有
+/// 三种"等"：
+///
+///   · `win::wait_app_ready_ex(&exe, 20000, launched)` —— 最多等 20 秒应用建窗；
+///   · 刚拉起的应用再等 `app_launch_delay`（用户可配，默认 900ms）；
+///   · 抢焦点最多 10 × 120ms = 1.2 秒，还要再等 60ms 让横条真的撤走。
+///
+/// 在主线程上睡这一串，等于把整个软件冻住：横条不收、托盘菜单弹不出、
+/// 翻译窗里正在流出来的字也停住 —— 用户感知就是「点了快捷键，软件卡了一下」。
+/// 这和建窗死锁（见 `open_trans_window` 那段注释）是同一类问题的两种表现：
+/// **主线程不许等**。
+///
+/// 所以 `open_search` 只做「spawn 一下就返回」，真正的等待全在这里。
+///
+/// ⚠ 搬代码时**顺序一笔都不能改**：横条必须在发键**之前**收起（r89c 的真
+///    bug —— 横条自己占着前台时，`keybd_event` 发的键会打到我们自己身上），
+///   而"先确保应用在跑"又必须在聚焦之前。这段顺序是三次回归换来的。
+fn fire_hotkey_engine(engine: String, entry: engines::EngineEntry, spec: String) {
+    // 下面这段是从 `open_search` 原样搬过来的，里面大量用 `entry.as_ref()`；
+    // 包一层 `Some(..)` 就不用把十几处调用点全改一遍。
+    let entry = Some(entry);
+    /* r58：「绑定应用」—— 先确保那个应用真的在跑，再把键发过去。
+     *
+     * 用户原话：「软件内部要先确定这个应用真的已经打开了，如果打开了
+     * 就直接把这个快捷键给运用出来，如果没有打开，那就先打开这个应用，
+     * 然后再实行快捷键。」
+     *
+     * 顺序是三件事，缺一件都不成：
+     *   ① **查**：按 exe 文件名判在不在跑（不按全路径，见
+     *      `win::exe_name_of` 的注释）；
+     *   ② **拉**：没在跑就拉起来，可选管理员（会弹 UAC）；
+     *   ③ **等 + 聚焦**：等它把窗口建出来，把前台给它 ——
+     *      不等就发键，键会丢在初始化过程里（用户看到的是
+     *      「第一次点没反应，再点一次才行」）；不聚焦就发键，
+     *      键会打到用户刚才那个软件身上（等于什么都没发生）。
+     */
+    let mut bound_window: Option<HWND> = None;
+    let mut launched = false;
+    if let Some(e) = entry.as_ref() {
+        if e.bind_app && !e.app_path.trim().is_empty() {
+            let exe = win::exe_name_of(&e.app_path);
+            let t0 = std::time::Instant::now();
+            let was_running = win::app_running(&exe);
+            win::log(&format!(
+                "open_search: {engine} 绑定应用 {exe} 已在运行={was_running}（查进程 {}ms）",
+                t0.elapsed().as_millis()
+            ));
+            if !was_running {
+                match win::launch_app(&e.app_path, e.app_admin) {
+                    Ok(()) => {
+                        launched = true;
+                        win::log(&format!(
+                            "open_search: {engine} 已拉起 {exe}{}，等它就绪…",
+                            if e.app_admin { "（管理员）" } else { "" }
+                        ));
+                    }
+                    Err(msg) => {
+                        // 拉不起来就别硬发键了 —— 发出去只会打到别的
+                        // 软件上，比"什么都没发生"更糟（可能误触快捷键）。
+                        win::log(&format!("open_search: {engine} 拉起失败：{msg}"));
+                        img_tell(format!("{engine}：{msg}"));
+                        dismiss_bar();
+                        return;
+                    }
+                }
+            }
+            /* 已经在跑的也可能缩在后台：同样要等/找窗口来聚焦。
+             * ⚠ 但「本来就在跑」和「我们刚拉起」要区别对待：
+             *   后者才需要为窗口多等（慢启动应用），前者（尤其是
+             *   托盘常驻的 Octoclip 那种）多等纯粹是让用户干瞪眼。 */
+            bound_window = win::wait_app_ready_ex(&exe, 20000, launched);
+            /* r60：**刚拉起来的应用，窗口出现 ≠ 能收键盘。**
+             *
+             * 用户报的正是这条：「应用没打开时点了快捷键，应用确实开了，
+             * 但快捷键的功能没触发」。原因就是窗口刚建出来、程序还在
+             * 初始化（读配置 / 建 UI / 加载数据），这时把组合键发过去，
+             * 应用根本不处理 —— 键丢在初始化过程里。
+             *
+             * 所以：拉起过的多等一拍再发。已经在跑的应用不用等
+             * （它早就初始化完了，多等只是让用户觉得慢）。
+             */
+            if launched && bound_window.is_some() {
+                /* r76：这一拍从写死的 900ms 变成**用户可配**
+                 * （`app_launch_delay`，见 config.rs 里那个字段的注释：
+                 *  用户原话「打开软件与按快捷键之间中间有一个时差，这个
+                 *  时间是可以在设置当中自己设置的」）。
+                 * 大型软件（IDE/设计软件）常常 900ms 不够，小工具又嫌久，
+                 * 所以每个引擎各配各的，互不影响。 */
+                let settle = Duration::from_millis(e.app_launch_delay as u64);
+                win::log(&format!(
+                    "open_search: {engine} 是新拉起的，再等 {}ms 让它初始化完",
+                    settle.as_millis()
+                ));
+                std::thread::sleep(settle);
+                // 等完之后重新找一次窗口：初始化过程中主窗口可能刚换成另一个
+                if let Some(h) = win::find_app_window(&exe) {
+                    bound_window = Some(h);
+                }
+            }
+            win::log(&format!(
+                "open_search: {engine} 就绪检查完成，窗口={}（共 {}ms）",
+                bound_window.is_some(),
+                t0.elapsed().as_millis()
+            ));
+        }
+    }
+    // 组合键必须打到「触发现场的那个软件」身上：横条此刻可能持有焦点
+    // （用户刚在面板搜索框里敲过字），直接发会打回到我们自己窗口上 ——
+    // 那正是 fav_send 踩过的坑（文字进了收藏夹窗口自己的搜索框）。
+    // 同款解法：先把焦点还给目标，等前台切换落地，发完再收横条。
+    //
+    // r58：配了「绑定应用」且找到了它的窗口时，**目标改成那个应用** ——
+    // 用户点这颗图标的意思就是"让那个软件执行这个快捷键"，而不是
+    // "让刚才划词的那个软件执行"。
+    let target = match bound_window {
+        Some(h) => h.0 as isize,
+        None => st().geo.lock().map(|g| g.trigger_hwnd).unwrap_or(0),
+    };
+    /* r60：聚焦从"试一次"改成**带重试并每次核对前台**。
+     *
+     * 用户报：「应用确实打开了，但快捷键的功能没触发」。
+     * 除了"刚启动还没初始化完"（上面已经补了等待），第二个原因是
+     * **前台没抢到**：`SetForegroundWindow` 有前台锁定，被拒时是
+     * 静默失败；而刚启动的应用抢前台的时机很不确定（有的在首帧之后
+     * 才抢、有的要等登录窗关掉）。只试一次 60ms 很容易落在缝隙里，
+     * 于是按键发给了"当时的前台"（多半是我们自己或桌面）。
+     *
+     * 现在最多试 10 次、每次 120ms，**每一次都核对前台真的到了目标**
+     * 才发键。全都失败时仍然发一次（打到当前前台），并在日志里写明
+     * 是"没抢到焦点"—— 这样用户下次报障时能一眼看出是哪一类。 */
+    /* r90：**按每个引擎自己的开关**决定要不要把它的窗口调出来。
+     *
+     * 用户原话：
+     *   「如果这个软件已经存在于后台，那没有必要说我触发这个快捷键的
+     *     时候把这个快捷键给换出来。比如说我设置了一个 alt+a 的微信
+     *     截图快捷键，那微信在后台挂着的时候，那就算它需要检测微信
+     *     留存，那没有必要把微信的窗口换出来，然后再 alt+a。」
+     *   「在每一个快捷引擎里面添加个按钮……打开这个按钮之后，点击这个
+     *     快捷引擎图标触发快捷键会把主窗口打开，如果把这个按钮关闭，
+     *     那么触发快捷引擎功能就不会把相应软件的主窗口打开。」
+     *
+     * # 判断依据
+     *
+     *   ① `app_bring_front == false`（**默认**）且应用**本来就在跑**
+     *      → **不抢焦点**，直接注入按键交给系统路由。
+     *        微信截图 / 章鱼速贴这类靠全局热键的后台工具走这条，
+     *        用户手上的事一点不被打断。
+     *
+     *   ② `app_bring_front == true`，或者应用**是我们刚拉起来的**
+     *      → 抢焦点（多次重试 + 每次核对）再发键。
+     *        刚拉起来的必须让它就位（不然按键发出去无处可去）；
+     *        用户主动打开那个开关，也说明他要看着它执行。
+     *
+     * ⚠ v1.3.2 里这段是"无条件抢焦点" —— 那是我为了修章鱼速贴
+     *   （它失败的真实原因是**横条自己占着前台**，已在
+     *   `dismiss_bar` 顺序里修掉）而做的临时妥协。病根没了之后，
+     *   就不该继续用"每次都把人家窗口弹出来"这种粗暴手段。 */
+    let want_front = entry.as_ref().map(|e| e.app_bring_front).unwrap_or(true);
+    // 刚拉起来的必须让它就位（否则按键可能打空）；其余听开关的。
+    let must_front = launched || want_front;
+    win::log(&format!(
+        "open_search: {engine} 抢焦点={must_front}（开关键={want_front} 刚拉起={launched}）"
+    ));
+    let mut aimed = false;
+    /* 只有 must_front 时才去抢焦点。
+     * 关掉开关、且应用本来就在跑 → 直接跳过这一整段，
+     * 让按键走系统路由（不打断用户手上正在做的事）。 */
+    if must_front && target != 0 {
+        let t = HWND(target as *mut c_void);
+        if win::is_visible(t) && !win::is_minimized(t) {
+            for attempt in 0..10 {
+                restore_focus_to(t);
+                std::thread::sleep(Duration::from_millis(120));
+                if win::foreground_addr() == target {
+                    aimed = true;
+                    if attempt > 0 {
+                        win::log(&format!(
+                            "open_search: 第 {} 次尝试抢到焦点（目标 0x{target:x}）",
+                            attempt + 1
+                        ));
+                    }
+                    break;
+                }
+            }
+            if !aimed {
+                let fg_now = win::foreground_addr();
+                win::log(&format!(
+                    "open_search: 抢焦点 10 次都没成功（前台 0x{fg_now:x} ≠ 目标 0x{target:x}）→ 发给当前前台"
+                ));
+            }
+        } else {
+            win::log(&format!(
+                "open_search: 目标窗口 0x{target:x} 不可见或已最小化，直接发给当前前台"
+            ));
+        }
+    }
+    /* r89c：**只有一条路 —— 模拟按键**。
+     * 不再有"定向投递/无窗口直发"那些分支（它们把功能弄坏了，
+     * 见上面那段长注释）。 */
+    /* ⚠⚠ r89c：**必须先把横条收起来，再发键**（这是真 bug）。
+     *
+     * 用户日志里的证据：`dismiss_bar` 排在发键**之后**，于是发键那一
+     * 瞬间**横条自己还占着前台**（用户刚点完图标，焦点在我们窗口里）。
+     * `keybd_event` 发出去的 alt+v 打到了我们自己身上 ——
+     * 而 Octoclip 的 alt+v 是**系统级全局热键**，它要求"前台不是
+     * 我们自己"才不会被自己的窗口吃掉。
+     *
+     * 所以我前几版无论用 PostMessage 还是 keybd_event 都唤不动它：
+     * 不是注入方式的问题，是**发键的时候我们自己还在前台**。
+     *
+     * 修法：先收横条（前台会自动回到用户刚才那个窗口），
+     * 再发键。横条本来也就在收起的路上，顺序换一下而已。 */
+    dismiss_bar();
+    std::thread::sleep(Duration::from_millis(60));
+    {
+        let ok = win::send_hotkey(&spec);
+        win::log(&format!(
+            "open_search: {engine} 模拟按键 {spec} -> {} 投向={}",
+            if ok { "已发送" } else { "按键序列无法解析" },
+            if aimed {
+                // r90b：带上窗口标题 —— "抢了焦点但键没生效"的报障
+                // 一眼能看出抢到的是不是正确的窗口
+                // （cmd/终端类应用的窗口由 WindowsTerminal 托管，
+                //   find_app_window 可能找到别的宿主窗口，标题会暴露这一点）。
+                format!(
+                    "目标窗口 0x{target:x}「{}」",
+                    win::window_title(HWND(target as *mut c_void))
+                )
+            } else {
+                "当前前台（横条已先收起）".to_string()
+            }
+        ));
+    }
+}
+
+
 #[tauri::command]
 fn open_search(engine: String, text: Option<String>) {
     // r51 速度：量「进命令 → 收起横条」这一段。用户报的"打开网页慢"就是它 ——
@@ -13630,227 +14538,19 @@ fn open_search(engine: String, text: Option<String>) {
     // 快捷键类：按键合成完就直接收工，后面的 URL / 剪贴板 / last_engine
     // 逻辑一概不适用。放在最前面 return，别让三类逻辑缠在一起。
     if kind == config::EngineKind::Hotkey {
-        match entry.as_ref().and_then(|e| e.hotkey.as_deref()) {
-            Some(spec) => {
-                /* r58：「绑定应用」—— 先确保那个应用真的在跑，再把键发过去。
-                 *
-                 * 用户原话：「软件内部要先确定这个应用真的已经打开了，如果打开了
-                 * 就直接把这个快捷键给运用出来，如果没有打开，那就先打开这个应用，
-                 * 然后再实行快捷键。」
-                 *
-                 * 顺序是三件事，缺一件都不成：
-                 *   ① **查**：按 exe 文件名判在不在跑（不按全路径，见
-                 *      `win::exe_name_of` 的注释）；
-                 *   ② **拉**：没在跑就拉起来，可选管理员（会弹 UAC）；
-                 *   ③ **等 + 聚焦**：等它把窗口建出来，把前台给它 ——
-                 *      不等就发键，键会丢在初始化过程里（用户看到的是
-                 *      「第一次点没反应，再点一次才行」）；不聚焦就发键，
-                 *      键会打到用户刚才那个软件身上（等于什么都没发生）。
-                 */
-                let mut bound_window: Option<HWND> = None;
-                let mut launched = false;
-                if let Some(e) = entry.as_ref() {
-                    if e.bind_app && !e.app_path.trim().is_empty() {
-                        let exe = win::exe_name_of(&e.app_path);
-                        let t0 = std::time::Instant::now();
-                        let was_running = win::app_running(&exe);
-                        win::log(&format!(
-                            "open_search: {engine} 绑定应用 {exe} 已在运行={was_running}（查进程 {}ms）",
-                            t0.elapsed().as_millis()
-                        ));
-                        if !was_running {
-                            match win::launch_app(&e.app_path, e.app_admin) {
-                                Ok(()) => {
-                                    launched = true;
-                                    win::log(&format!(
-                                        "open_search: {engine} 已拉起 {exe}{}，等它就绪…",
-                                        if e.app_admin { "（管理员）" } else { "" }
-                                    ));
-                                }
-                                Err(msg) => {
-                                    // 拉不起来就别硬发键了 —— 发出去只会打到别的
-                                    // 软件上，比"什么都没发生"更糟（可能误触快捷键）。
-                                    win::log(&format!("open_search: {engine} 拉起失败：{msg}"));
-                                    img_tell(format!("{engine}：{msg}"));
-                                    dismiss_bar();
-                                    return;
-                                }
-                            }
-                        }
-                        /* 已经在跑的也可能缩在后台：同样要等/找窗口来聚焦。
-                         * ⚠ 但「本来就在跑」和「我们刚拉起」要区别对待：
-                         *   后者才需要为窗口多等（慢启动应用），前者（尤其是
-                         *   托盘常驻的 Octoclip 那种）多等纯粹是让用户干瞪眼。 */
-                        bound_window = win::wait_app_ready_ex(&exe, 20000, launched);
-                        /* r60：**刚拉起来的应用，窗口出现 ≠ 能收键盘。**
-                         *
-                         * 用户报的正是这条：「应用没打开时点了快捷键，应用确实开了，
-                         * 但快捷键的功能没触发」。原因就是窗口刚建出来、程序还在
-                         * 初始化（读配置 / 建 UI / 加载数据），这时把组合键发过去，
-                         * 应用根本不处理 —— 键丢在初始化过程里。
-                         *
-                         * 所以：拉起过的多等一拍再发。已经在跑的应用不用等
-                         * （它早就初始化完了，多等只是让用户觉得慢）。
-                         */
-                        if launched && bound_window.is_some() {
-                            /* r76：这一拍从写死的 900ms 变成**用户可配**
-                             * （`app_launch_delay`，见 config.rs 里那个字段的注释：
-                             *  用户原话「打开软件与按快捷键之间中间有一个时差，这个
-                             *  时间是可以在设置当中自己设置的」）。
-                             * 大型软件（IDE/设计软件）常常 900ms 不够，小工具又嫌久，
-                             * 所以每个引擎各配各的，互不影响。 */
-                            let settle = Duration::from_millis(e.app_launch_delay as u64);
-                            win::log(&format!(
-                                "open_search: {engine} 是新拉起的，再等 {}ms 让它初始化完",
-                                settle.as_millis()
-                            ));
-                            std::thread::sleep(settle);
-                            // 等完之后重新找一次窗口：初始化过程中主窗口可能刚换成另一个
-                            if let Some(h) = win::find_app_window(&exe) {
-                                bound_window = Some(h);
-                            }
-                        }
-                        win::log(&format!(
-                            "open_search: {engine} 就绪检查完成，窗口={}（共 {}ms）",
-                            bound_window.is_some(),
-                            t0.elapsed().as_millis()
-                        ));
-                    }
-                }
-                // 组合键必须打到「触发现场的那个软件」身上：横条此刻可能持有焦点
-                // （用户刚在面板搜索框里敲过字），直接发会打回到我们自己窗口上 ——
-                // 那正是 fav_send 踩过的坑（文字进了收藏夹窗口自己的搜索框）。
-                // 同款解法：先把焦点还给目标，等前台切换落地，发完再收横条。
-                //
-                // r58：配了「绑定应用」且找到了它的窗口时，**目标改成那个应用** ——
-                // 用户点这颗图标的意思就是"让那个软件执行这个快捷键"，而不是
-                // "让刚才划词的那个软件执行"。
-                let target = match bound_window {
-                    Some(h) => h.0 as isize,
-                    None => st().geo.lock().map(|g| g.trigger_hwnd).unwrap_or(0),
-                };
-                /* r60：聚焦从"试一次"改成**带重试并每次核对前台**。
-                 *
-                 * 用户报：「应用确实打开了，但快捷键的功能没触发」。
-                 * 除了"刚启动还没初始化完"（上面已经补了等待），第二个原因是
-                 * **前台没抢到**：`SetForegroundWindow` 有前台锁定，被拒时是
-                 * 静默失败；而刚启动的应用抢前台的时机很不确定（有的在首帧之后
-                 * 才抢、有的要等登录窗关掉）。只试一次 60ms 很容易落在缝隙里，
-                 * 于是按键发给了"当时的前台"（多半是我们自己或桌面）。
-                 *
-                 * 现在最多试 10 次、每次 120ms，**每一次都核对前台真的到了目标**
-                 * 才发键。全都失败时仍然发一次（打到当前前台），并在日志里写明
-                 * 是"没抢到焦点"—— 这样用户下次报障时能一眼看出是哪一类。 */
-                /* r90：**按每个引擎自己的开关**决定要不要把它的窗口调出来。
-                 *
-                 * 用户原话：
-                 *   「如果这个软件已经存在于后台，那没有必要说我触发这个快捷键的
-                 *     时候把这个快捷键给换出来。比如说我设置了一个 alt+a 的微信
-                 *     截图快捷键，那微信在后台挂着的时候，那就算它需要检测微信
-                 *     留存，那没有必要把微信的窗口换出来，然后再 alt+a。」
-                 *   「在每一个快捷引擎里面添加个按钮……打开这个按钮之后，点击这个
-                 *     快捷引擎图标触发快捷键会把主窗口打开，如果把这个按钮关闭，
-                 *     那么触发快捷引擎功能就不会把相应软件的主窗口打开。」
-                 *
-                 * # 判断依据
-                 *
-                 *   ① `app_bring_front == false`（**默认**）且应用**本来就在跑**
-                 *      → **不抢焦点**，直接注入按键交给系统路由。
-                 *        微信截图 / 章鱼速贴这类靠全局热键的后台工具走这条，
-                 *        用户手上的事一点不被打断。
-                 *
-                 *   ② `app_bring_front == true`，或者应用**是我们刚拉起来的**
-                 *      → 抢焦点（多次重试 + 每次核对）再发键。
-                 *        刚拉起来的必须让它就位（不然按键发出去无处可去）；
-                 *        用户主动打开那个开关，也说明他要看着它执行。
-                 *
-                 * ⚠ v1.3.2 里这段是"无条件抢焦点" —— 那是我为了修章鱼速贴
-                 *   （它失败的真实原因是**横条自己占着前台**，已在
-                 *   `dismiss_bar` 顺序里修掉）而做的临时妥协。病根没了之后，
-                 *   就不该继续用"每次都把人家窗口弹出来"这种粗暴手段。 */
-                let want_front = entry.as_ref().map(|e| e.app_bring_front).unwrap_or(true);
-                // 刚拉起来的必须让它就位（否则按键可能打空）；其余听开关的。
-                let must_front = launched || want_front;
-                win::log(&format!(
-                    "open_search: {engine} 抢焦点={must_front}（开关键={want_front} 刚拉起={launched}）"
-                ));
-                let mut aimed = false;
-                /* 只有 must_front 时才去抢焦点。
-                 * 关掉开关、且应用本来就在跑 → 直接跳过这一整段，
-                 * 让按键走系统路由（不打断用户手上正在做的事）。 */
-                if must_front && target != 0 {
-                    let t = HWND(target as *mut c_void);
-                    if win::is_visible(t) && !win::is_minimized(t) {
-                        for attempt in 0..10 {
-                            restore_focus_to(t);
-                            std::thread::sleep(Duration::from_millis(120));
-                            if win::foreground_addr() == target {
-                                aimed = true;
-                                if attempt > 0 {
-                                    win::log(&format!(
-                                        "open_search: 第 {} 次尝试抢到焦点（目标 0x{target:x}）",
-                                        attempt + 1
-                                    ));
-                                }
-                                break;
-                            }
-                        }
-                        if !aimed {
-                            let fg_now = win::foreground_addr();
-                            win::log(&format!(
-                                "open_search: 抢焦点 10 次都没成功（前台 0x{fg_now:x} ≠ 目标 0x{target:x}）→ 发给当前前台"
-                            ));
-                        }
-                    } else {
-                        win::log(&format!(
-                            "open_search: 目标窗口 0x{target:x} 不可见或已最小化，直接发给当前前台"
-                        ));
-                    }
-                }
-                /* r89c：**只有一条路 —— 模拟按键**。
-                 * 不再有"定向投递/无窗口直发"那些分支（它们把功能弄坏了，
-                 * 见上面那段长注释）。 */
-                /* ⚠⚠ r89c：**必须先把横条收起来，再发键**（这是真 bug）。
-                 *
-                 * 用户日志里的证据：`dismiss_bar` 排在发键**之后**，于是发键那一
-                 * 瞬间**横条自己还占着前台**（用户刚点完图标，焦点在我们窗口里）。
-                 * `keybd_event` 发出去的 alt+v 打到了我们自己身上 ——
-                 * 而 Octoclip 的 alt+v 是**系统级全局热键**，它要求"前台不是
-                 * 我们自己"才不会被自己的窗口吃掉。
-                 *
-                 * 所以我前几版无论用 PostMessage 还是 keybd_event 都唤不动它：
-                 * 不是注入方式的问题，是**发键的时候我们自己还在前台**。
-                 *
-                 * 修法：先收横条（前台会自动回到用户刚才那个窗口），
-                 * 再发键。横条本来也就在收起的路上，顺序换一下而已。 */
-                dismiss_bar();
-                std::thread::sleep(Duration::from_millis(60));
-                {
-                    let ok = win::send_hotkey(spec);
-                    win::log(&format!(
-                        "open_search: {engine} 模拟按键 {spec} -> {} 投向={}",
-                        if ok { "已发送" } else { "按键序列无法解析" },
-                        if aimed {
-                            // r90b：带上窗口标题 —— "抢了焦点但键没生效"的报障
-                            // 一眼能看出抢到的是不是正确的窗口
-                            // （cmd/终端类应用的窗口由 WindowsTerminal 托管，
-                            //   find_app_window 可能找到别的宿主窗口，标题会暴露这一点）。
-                            format!(
-                                "目标窗口 0x{target:x}「{}」",
-                                win::window_title(HWND(target as *mut c_void))
-                            )
-                        } else {
-                            "当前前台（横条已先收起）".to_string()
-                        }
-                    ));
-                }
-                return;
+        /* v1.5.18：整条分支甩到后台线程去跑 —— 这里有最多 20 秒的"等应用建窗"
+         * 和 1.2 秒的"抢焦点重试"，同步命令睡在主线程上会把整个软件冻住。
+         * 详见 `fire_hotkey_engine` 的注释。 */
+        match entry.and_then(|e| e.hotkey.clone().map(|spec| (e, spec))) {
+            Some((e, spec)) => {
+                std::thread::spawn(move || fire_hotkey_engine(engine, e, spec));
             }
             None => win::log(&format!("open_search: {engine} 是快捷键类但没配按键")),
         }
         dismiss_bar();
         return;
     }
+
     // r51：横条到底收没收（下面几条路各自先收，收尾时别再收一次）
     let mut dismissed = false;
     if let Some(entry) = entry {
@@ -13979,11 +14679,11 @@ fn open_link(text: Option<String>) {
         let url = st().sel_url.lock().ok().and_then(|u| u.clone());
         if let Some(u) = url {
             win::log(&format!("open_link: 开 sel_url {}", redact_url(&u)));
-            let _ = open::that(u);
+            let _ = open::that_detached(u);
         } else if !from_ui.trim().is_empty() {
             let t = from_ui.trim();
             win::log(&format!("open_link: 判不出链接，直接开这段文字 {t}"));
-            let _ = open::that(t);
+            let _ = open::that_detached(t);
         }
     } else {
         spawn_open_links(links);
@@ -14248,7 +14948,8 @@ fn open_settings(focus_engine: Option<String>, tab: Option<String>) {
 
 #[tauri::command]
 fn open_data_dir() {
-    let _ = open::that(config::data_dir());
+    // 同步命令跑在主线程上；ShellExecute 会阻塞，用 detached 版（起进程即返回）
+    let _ = open::that_detached(config::data_dir());
 }
 
 /// 是不是备份文件（设置页「备份」页列清单用）。
@@ -14358,7 +15059,7 @@ fn pick_backup_dir(app: AppHandle) -> String {
 /// 用资源管理器打开备份目录。
 #[tauri::command]
 fn open_backup_dir() {
-    let _ = open::that(cfg_with(config::backup_dir_of));
+    let _ = open::that_detached(cfg_with(config::backup_dir_of));
 }
 
 /// 清理 N 天前的备份（设置页「清理 7 天前备份」按钮）。
@@ -14661,7 +15362,8 @@ fn build_tray(a: &AppHandle) -> tauri::Result<()> {
                 });
             }
             "dir" => {
-                let _ = open::that(config::data_dir());
+                // ⚠ 托盘回调在主线程上，ShellExecute 不能在这里等
+                let _ = open::that_detached(config::data_dir());
             }
             "quit" => quit_with_sync(0),
             _ => {}
@@ -14680,6 +15382,12 @@ fn init_state() {
      * 可拖动、可移出。只在「识图开着 + 加到横条」时才补，详见函数注释。 */
     if config::ensure_img_bar_sentinel(&mut cfg) {
         win::log("config: 给老配置补上横条识图哨兵 @img");
+        config::save(&cfg);
+    }
+    // v1.5.16：翻译按钮同样并进 bar_list（@trans 哨兵）—— 拖位置 / 换图标 /
+    // 移出全靠这张表，和 @img 完全同一套机制。
+    if config::ensure_trans_bar_sentinel(&mut cfg) {
+        win::log("config: 给老配置补上横条翻译哨兵 @trans");
         config::save(&cfg);
     }
     let _ = STATE.set(AppState {
@@ -14772,7 +15480,14 @@ fn build_bar_window(app: &tauri::App) -> tauri::Result<()> {
     if !wv_args.is_empty() {
         b = b.additional_browser_args(&wv_args);
     }
+    /* 建第一个 WebView2 窗口是整条启动链里**唯一没有超时**的外部调用：
+     * wry 的 `create_environment` → `CreateCoreWebView2EnvironmentWithOptions`
+     * 之后进 `wait_with_pump`（纯 GetMessage 循环，没有 deadline）。真出问题时
+     * 表现就是「进程在、但没有窗口、托盘也没有、点什么都没反应」，事后无从下手。
+     * 这里同步落一条盘（绕过后台日志队列），把「卡在建窗」这件事钉在日志里。 */
+    win::log_sync("bar: 开始建第一个 WebView2 窗口");
     b.build()?;
+    win::log_sync("bar: 第一个 WebView2 窗口已建成");
     Ok(())
 }
 
@@ -14856,6 +15571,16 @@ fn main() {
     // --ocr-demo：启动后直接打开「识别结果」窗口，内容用 QS_T_OCR_TEXT /
     // QS_T_OCR_IMG 两个环境变量喂进去（自动化测试用，绕开真实 OCR 额度）。
     let ocr_demo = flag("--ocr-demo");
+    // --trans-demo：启动后直接打开翻译窗口，文字用 QS_T_TRANS_TEXT 喂进去
+    // （自动化测试用：绕开"划词 → 点横条按钮"那条依赖真实鼠标的路径，
+    // 直接验"窗口起来 → 并行调各家 → 并排呈现"这条主链路）。
+    let trans_demo = flag("--trans-demo");
+    // --trans-click-demo：走「点横条上那颗翻译按钮」的**完全同一条**链路
+    // （DOM click → invoke('trans_start') → dismiss_bar → open_trans_window），
+    // 但不用真鼠标、不用 CDP —— 自动化探针要的是这条链路本身。
+    let trans_click_demo = flag("--trans-click-demo");
+    // --trans-ui-demo：开设置页，验翻译引擎那栏的 ?/文档按钮（测试用）。
+    let trans_ui_demo = flag("--trans-ui-demo");
     // --touch-config：加载一次配置并立刻重新保存，然后退出（不进界面）。
     //
     // 为什么需要它：`.bak` 是保存时产生的，所以「验证 .bak 能不能救回配置」
@@ -15230,7 +15955,6 @@ fn main() {
     if cfg0.auto_start && !env_on("QS_SKIP_AUTOSTART") {
         win::set_autostart(true);
     }
-
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             get_config,
@@ -15323,6 +16047,20 @@ fn main() {
             ocr_cancel,
             region_beat,
             ocr_ready,
+            // v1.5.16：翻译
+            trans_start,
+            trans_session,
+            trans_langs,
+            trans_run,
+            trans_test,
+            trans_ready,
+            close_trans_window,
+            trans_engines_list,
+            trans_set_cred,
+            trans_set_multi,
+            trans_list_models,
+            trans_open_help,
+            trans_open_docs,
             settings_ready,
             qs_page_ack,
             ocr_take_text,
@@ -15537,6 +16275,109 @@ fn main() {
                         *g = demo_png();
                     }
                     open_ocr_window(text);
+                });
+            }
+            // --trans-demo：直接开翻译窗口，喂一段待翻文字（测试用）。
+            if trans_demo {
+                std::thread::spawn(|| {
+                    std::thread::sleep(Duration::from_millis(1500));
+                    let text = std::env::var("QS_T_TRANS_TEXT")
+                        .unwrap_or_else(|_| "Hello, world! 这是翻译功能的联调文字。".to_string());
+                    let cfg = cfg_snapshot();
+                    open_trans_window(text, cfg.trans_target);
+                });
+            }
+            // --trans-click-demo：在横条上真的点那颗「翻译」按钮（测试用）。
+            if trans_click_demo {
+                let h2 = handle.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(2600));
+                    let js = r#"
+(() => {
+  const inv = window.__TAURI__.core.invoke;
+  const btn = document.querySelector('.qs-trans-inbar');
+  if (!btn) { inv('log_msg', {msg: 'TCD: 找不到 .qs-trans-inbar 按钮'}); return; }
+  const r = btn.getBoundingClientRect();
+  inv('log_msg', {msg: 'TCD: 找到按钮 rect=' + JSON.stringify({x:Math.round(r.x),y:Math.round(r.y),w:Math.round(r.width),h:Math.round(r.height)})});
+  btn.click();
+  inv('log_msg', {msg: 'TCD: 已 click()'});
+})()
+"#;
+                    match h2.get_webview_window("bar") {
+                        Some(w) => {
+                            win::log("TCD: eval 点击 @trans");
+                            let _ = w.eval(js);
+                            std::thread::sleep(Duration::from_millis(2500));
+                            let t = h2.get_webview_window("trans");
+                            let vis = t
+                                .as_ref()
+                                .and_then(|w| w.is_visible().ok())
+                                .unwrap_or(false);
+                            win::log(&format!(
+                                "TCD: 点击后 2.5 秒 trans 窗口存在={} 可见={}",
+                                t.is_some(),
+                                vis
+                            ));
+                        }
+                        None => win::log("TCD: 没有 bar 窗口"),
+                    }
+                });
+            }
+            // --trans-ui-demo：开设置页，验「翻译引擎」那栏的 ?/文档按钮（测试用）。
+            if trans_ui_demo {
+                let h3 = handle.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(1500));
+                    open_settings(None, None);
+                    // 等设置页真的显示出来（它也是建完 hidden、等页面 ready 才 show）
+                    for _ in 0..40 {
+                        let vis = h3
+                            .get_webview_window("settings")
+                            .and_then(|w| w.is_visible().ok())
+                            .unwrap_or(false);
+                        if vis {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(200));
+                    }
+                    std::thread::sleep(Duration::from_millis(1200));
+                    let js = r#"
+(async () => {
+  const inv = window.__TAURI__.core.invoke;
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const tab = document.querySelector('[data-tab="trans"]');
+  if (tab) { tab.click(); await sleep(700); }
+  inv('log_msg', {msg: 'TCD-UI: 切到翻译标签 ' + (tab ? 'ok' : '没找到')});
+  const list = document.querySelector('#w-transEngList');
+  const rows = list ? [...list.querySelectorAll('.eng-row')] : [];
+  const helps = list ? [...list.querySelectorAll('.eng-help')] : [];
+  inv('log_msg', {msg: 'TCD-UI: 翻译引擎行数=' + rows.length + ' 问号/文档按钮数=' + helps.length});
+  inv('log_msg', {msg: 'TCD-UI: 明细=' + JSON.stringify(helps.map(b => {
+    const r = b.getBoundingClientRect();
+    return {t: b.textContent, x: Math.round(r.x), y: Math.round(r.y),
+            w: Math.round(r.width), h: Math.round(r.height), vis: b.offsetParent !== null};
+  }))});
+  const q = helps.find(b => b.textContent === '?');
+  if (q) {
+    const r = q.getBoundingClientRect();
+    const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+    inv('log_msg', {msg: 'TCD-UI: ? 中心命中 ' +
+      (hit ? (hit.tagName + '.' + hit.className + ' text=' + (hit.textContent || '').slice(0, 12)) : 'null')});
+    q.click();
+    await sleep(1500);
+  }
+  const doc = helps.find(b => b.textContent === '文档');
+  if (doc) { doc.click(); await sleep(1200); }
+  inv('log_msg', {msg: 'TCD-UI: 两个按钮都点过了'});
+})()
+"#;
+                    match h3.get_webview_window("settings") {
+                        Some(w) => {
+                            win::log("TCD-UI: eval 设置页诊断");
+                            let _ = w.eval(js);
+                        }
+                        None => win::log("TCD-UI: 没有 settings 窗口"),
+                    }
                 });
             }
             // ---- 启动时 WebDAV 同步 ----
@@ -18864,6 +19705,212 @@ mod tests {
             ctrl_copy_bar(Got::Text("  \r\n\t".into())),
             CopyBar::Empty,
             "空白文字不能当成有内容"
+        );
+    }
+    /// ★ 建窗铁律的**静态断言**（2026-10-27，v1.5.16）
+    ///
+    /// 背景：用户报「应用启动后经常无响应 —— 托盘有图标、右键菜单弹不出、
+    /// 双击不唤起、划词无反应」。根因是**主线程事件循环被死锁**：
+    ///
+    ///   - 同步 Tauri 命令跑在**主线程**上（tauri-macros `body_blocking`）；
+    ///   - tauri-runtime-wry 的 `run_on_main_thread` 在主线程上会**当场内联执行**
+    ///     闭包（`send_user_message` 里 `current_thread().id() == main_thread_id`
+    ///     分支直接调 `handle_user_message`，**不排队**）；
+    ///   - 于是 `WebviewWindowBuilder::build()` 跑在这次 invoke 的栈里，
+    ///     而 wry 建 WebView2 时要 `wait_with_pump` 泵消息 → 与尚未释放的
+    ///     命令锁互相卡死。
+    ///
+    /// wry 自己的注释写得很直白（tauri-runtime-wry-2.12.3/src/lib.rs:2034）：
+    /// "Note that this must be called from a separate thread, otherwise the
+    /// channel will introduce a deadlock."
+    ///
+    /// 这条坑**极易复发**：修好一处，下一个新增的开窗入口忘了包 spawn 就又卡死，
+    /// 而且症状极具迷惑性（托盘图标还在 —— 那是 Explorer 画的 —— 看起来像
+    /// "程序在跑"，实际主线程已经死了）。所以这里用源码扫描把它**钉死**。
+    ///
+    /// 规则：凡是出现 `WebviewWindowBuilder::new` 的地方，
+    /// 其所在函数（或它内部那一层闭包）必须能找到 `std::thread::spawn`。
+    /// 唯一豁免是 setup 里直接建横条窗 —— 那个阶段事件循环还没启动，
+    /// 没有「命令栈」可言，直接 build 是安全的（见 `build_bar_window`）。
+    #[test]
+    fn window_building_must_be_off_command_stack() {
+        let src = include_str!("main.rs");
+        let lines: Vec<&str> = src.lines().collect();
+
+        // 只扫**生产代码**：`mod tests` 之后的不算（测试里的字符串/片段不算建窗点）
+        let test_start = lines
+            .iter()
+            .position(|l| l.trim() == "mod tests {")
+            .unwrap_or(lines.len());
+
+        // 找所有建窗点
+        let mut sites: Vec<(usize, String)> = Vec::new();
+        for (i, l) in lines.iter().enumerate() {
+            if i >= test_start {
+                break;
+            }
+            if l.contains("WebviewWindowBuilder::new") {
+                // 往上找最近的 `fn ` 定义 —— 归属函数名
+                let mut owner = String::from("<unknown>");
+                for j in (0..=i).rev() {
+                    if let Some(p) = lines[j].find("fn ") {
+                        owner = lines[j][p + 3..]
+                            .split('(')
+                            .next()
+                            .unwrap_or("?")
+                            .split('<')
+                            .next()
+                            .unwrap_or("?")
+                            .trim()
+                            .to_string();
+                        break;
+                    }
+                }
+                sites.push((i, owner));
+            }
+        }
+        assert!(sites.len() >= 8, "建窗点数量异常，只找到 {} 个", sites.len());
+
+        // 豁免名单：这些函数里 build 不在命令栈上 ——
+        //   - `build_bar_window`：setup 里建横条窗，事件循环还没启动，没有命令栈；
+        //   - `main`：setup 闭包里的 `QS_PROBE_WINDOW` 调试窗，同理（见 setup 处注释）。
+        const EXEMPT: &[&str] = &["build_bar_window", "main"];
+
+        for (i, owner) in &sites {
+            if EXEMPT.contains(&owner.as_str()) {
+                continue;
+            }
+            // 判定一：建窗点**自身**的上下文里就有 spawn
+            let lo = i.saturating_sub(90);
+            let win: String = lines[lo..=*i].join("\n");
+            if win.contains("std::thread::spawn") {
+                continue;
+            }
+            // 判定二：**每一个调用方**都必须在 spawn 出来的线程里调它
+            // （例：`open_icon_edit_win` 自身不 spawn，是命令 `open_icon_editor`
+            //   用 `std::thread::spawn` 调它的 —— 同样安全）。
+            //
+            // 这里要求「全部」而不是「任意一个」：只要**有一条**调用路径
+            // 是在命令栈上直接调的，那个路径就足以死锁。宽松判据会漏检，
+            // 那正是本次 bug 的形态（`ocr_tell` 有好几个调用点，其中
+            // `ocr_warm` / `ocr_region` 是**同步命令**，绝不能漏）。
+            let mut bad_caller: Option<usize> = None;
+            for (k, l) in lines.iter().enumerate() {
+                if k >= test_start {
+                    break;
+                }
+                if !l.contains(&format!("{owner}(")) {
+                    continue;
+                }
+                // 跳过函数定义自身那一行
+                if l.contains(&format!("fn {owner}(")) {
+                    continue;
+                }
+                let clo = k.saturating_sub(40);
+                let ctx: String = lines[clo..=k].join("\n");
+                if !ctx.contains("std::thread::spawn") {
+                    bad_caller = Some(k);
+                    break;
+                }
+            }
+            assert!(
+                bad_caller.is_none(),
+                "建窗点 `{}`（main.rs:{}）自身没有 spawn，且存在**未脱开命令栈**的调用方（main.rs:{}）—— \
+                 run_on_main_thread 在主线程上会内联执行，build() 落在命令栈里会死锁！",
+                owner,
+                i + 1,
+                bad_caller.map(|x| x + 1).unwrap_or(0)
+            );
+        }
+    }
+
+    /// 契约：**同步命令里不许长时间等**。
+    ///
+    /// 同步命令（`#[tauri::command] fn`，没有 `async`）是跑在**主线程**上的，
+    /// 在里面 `sleep` 等于把整个软件冻住 —— 横条不收、托盘菜单弹不出、翻译窗里
+    /// 正在流出来的译文也停住。这类问题本项目已经犯过两次：
+    ///   · 建窗死锁：`build()` 落在命令栈里（见 `open_trans_window` 的注释）；
+    ///   · `open_search` 的热键分支：等应用建窗最多 20 秒 + 抢焦点 1.2 秒。
+    ///
+    /// 两次都是"人眼审代码没看出来"，所以把规则钉在这儿：以后谁再往同步命令里
+    /// 写等待，跑测试就红。
+    #[test]
+    fn sync_commands_must_not_block_the_main_thread() {
+        let src = include_str!("main.rs");
+        let lines: Vec<&str> = src.lines().collect();
+        let test_start = lines
+            .iter()
+            .position(|l| l.trim() == "mod tests {")
+            .unwrap_or(lines.len());
+
+        /* 白名单：这几条同步命令里确实有一小段**刻意的几十毫秒**等待 ——
+         * 取窗口前要让遮罩真的从屏幕上消失、注入按键前要让焦点切换落地。
+         * 它们等的是"系统把事做完"，不是等网络，几十毫秒对用户无感；
+         * 真搬进后台线程反而会改变 Z 序/焦点的时序。 */
+        const EXEMPT: &[&str] = &["pick_app_at", "pick_app_path_at", "fav_send"];
+
+        let mut bad: Vec<String> = Vec::new();
+        let mut i = 0;
+        while i < test_start {
+            if lines[i].trim() != "#[tauri::command]" {
+                i += 1;
+                continue;
+            }
+            // 跳过属性行和注释，找到真正的签名
+            let mut j = i + 1;
+            while j < test_start {
+                let t = lines[j].trim();
+                if t.starts_with("#[") || t.starts_with("//") || t.is_empty() {
+                    j += 1;
+                } else {
+                    break;
+                }
+            }
+            let sig = lines.get(j).copied().unwrap_or("");
+            let sig = sig.trim_start();
+            if !sig.starts_with("fn ") {
+                i = j; // async 命令不占主线程，不用管
+                continue;
+            }
+            let name = sig
+                .split("fn ")
+                .nth(1)
+                .and_then(|x| x.split('(').next())
+                .unwrap_or("?")
+                .trim()
+                .to_string();
+
+            // 函数体：从签名那行到下一个顶格 `}`（本文件所有顶层函数都这么结束）
+            let mut k = j;
+            while k < test_start && lines[k] != "}" {
+                k += 1;
+            }
+            if !EXEMPT.contains(&name.as_str()) {
+                for (off, l) in lines[j..k.min(test_start)].iter().enumerate() {
+                    let is_blocking = l.contains("thread::sleep") || l.contains("open::that(");
+                    // 注释里提到这些名字是常态（本项目注释写得很细），不算违规。
+                    // 块注释的续行以 `*` 开头，单行注释以 `//` 开头。
+                    let t = l.trim_start();
+                    let in_comment = t.starts_with("//") || t.starts_with("*") || t.starts_with("/*");
+                    if !is_blocking || in_comment {
+                        continue;
+                    }
+                    let abs = j + off;
+                    // 睡在 spawn 出来的线程里就没事（往上 40 行内能看到 spawn）
+                    let lo = abs.saturating_sub(40);
+                    if lines[lo..=abs].join("\n").contains("std::thread::spawn") {
+                        continue;
+                    }
+                    bad.push(format!("{name}（main.rs:{}）", abs + 1));
+                }
+            }
+            i = k.max(i + 1);
+        }
+
+        assert!(
+            bad.is_empty(),
+            "同步命令跑在主线程上，里面不许 sleep / 阻塞打开：{bad:?} —— \
+             要等就 std::thread::spawn 出去（见 fire_hotkey_engine / open_trans_window 的注释）"
         );
     }
 }

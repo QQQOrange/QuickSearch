@@ -105,6 +105,13 @@ pub const BAR_OCR: &str = "@ocr";
 /// 前端 `window.QS_IMG` 必须与本常量保持一致。
 pub const BAR_IMG: &str = "@img";
 
+/// v1.5.16：横条上「翻译」按钮的哨兵。
+///
+/// 和 `BAR_OCR` / `BAR_IMG` 完全同一套机制：能出现在「横条上的引擎」列表里、
+/// 位置可拖动、能用 `pick_icon` 换图标（overrideIcons 的键就是这一串）。
+/// 前端 `window.QS_TRANS` 必须与本常量保持一致。
+pub const BAR_TRANS: &str = "@trans";
+
 /// 用户自己加的搜索引擎。
 ///
 /// 只存「名字 + URL 模板 + 分类」几样东西。图标故意不放进这个结构 ——
@@ -389,12 +396,14 @@ pub fn prune_undefined_bar_engines(cfg: &mut Config) -> usize {
          *   `|`        分隔线（SEP）
          *   `@ocr`     OCR 按钮
          *   `@img`     识图搜索按钮
+         *   `@trans`   翻译按钮
          *   `@app:<id>`  外部软件
          *   `@fav:<id>`  收藏夹
          */
         if n == SEP
             || n == BAR_OCR
             || n == BAR_IMG
+            || n == BAR_TRANS
             || is_app_sentinel(n)
             || is_fav_sentinel(n)
         {
@@ -494,6 +503,61 @@ pub fn ensure_img_bar_sentinel(cfg: &mut Config) -> bool {
     }
     cfg.bar_list.push(BAR_IMG.to_string());
     true
+}
+
+/// v1.5.16：把翻译按钮并进 `bar_list`（`@trans` 哨兵）。
+///
+/// 和 `ensure_img_bar_sentinel` 同一套道理：翻译按钮要能拖位置、能换图标、
+/// 能移出，就必须是 bar_list 的一员。老配置里没有这根哨兵，启动时补一根
+/// （追加到末尾）；「翻译」总开关关着时不补 —— 用户主动关掉的功能，
+/// 不该在升级时又把按钮塞回横条。
+pub fn ensure_trans_bar_sentinel(cfg: &mut Config) -> bool {
+    if !cfg.trans_enable {
+        return false;
+    }
+    if cfg.bar_list.iter().any(|n| n == BAR_TRANS) {
+        return false;
+    }
+    cfg.bar_list.push(BAR_TRANS.to_string());
+    true
+}
+
+/// 一次翻译参与的引擎（口径同 main.rs 的 `ocr_engine_plan`）：
+/// 默认引擎 + 「同时翻译」名单，按**注册表顺序**排（翻译窗里几家文本框的
+/// 左右顺序由此决定，稳定才找得到自己要看的那家），并去重。
+///
+/// `sanitize` 已经保证过两份名单都合法，这里仍然逐个 `find` 兜底 ——
+/// 命令路径（`trans_run` 等）拿到的配置可能来自还没 sanitize 的快照。
+pub fn trans_plan(c: &Config) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let def = c.trans_engine.trim();
+    if crate::trans_engines::find(def).is_some() {
+        out.push(def.to_string());
+    }
+    for e in crate::trans_engines::ENGINES {
+        if e.id == def {
+            continue;
+        }
+        if c.trans_multi.iter().any(|x| x == e.id) && !out.iter().any(|x| x == e.id) {
+            out.push(e.id.to_string());
+        }
+    }
+    out
+}
+
+/// 某家翻译引擎的凭据（用户填的那部分）。
+///
+/// 模型 / base 的**缺省值不在这里补** —— 那是注册表的事，读的人统一走
+/// `trans_engines::Creds::model_for / base_for`（和 OCR 的 `ocr_creds`
+/// 一个路子：填了用填的，没填用注册表预置的）。
+pub fn trans_creds(c: &Config, id: &str) -> crate::trans_engines::Creds {
+    let g = |m: &HashMap<String, String>| m.get(id).cloned().unwrap_or_default();
+    crate::trans_engines::Creds {
+        key: g(&c.trans_keys),
+        secret: g(&c.trans_secrets),
+        base: g(&c.trans_bases),
+        model: g(&c.trans_models),
+    }
 }
 
 /// 外部软件地址里**不允许出现**的协议。
@@ -944,6 +1008,41 @@ pub ocr_accurate: bool,
     pub ocr_secrets: HashMap<String, String>,
     pub ocr_bases: HashMap<String, String>,
     pub ocr_models: HashMap<String, String>,
+
+    /* ---------------- v1.5.16：翻译（多引擎，对齐 OCR 那套） ---------------- */
+    /// 翻译功能总开关。关掉后横条上的翻译按钮不渲染、OCR 窗口里的翻译入口也失效。
+    ///
+    /// 默认**开**：真正的"入口"是 bar_list 里那个 `@trans` 哨兵 —— 用户把它加进
+    /// 横条才会看见按钮，所以这里开着的默认值不会凭空多出个按钮。
+    #[serde(default = "default_true")]
+    pub trans_enable: bool,
+    /// 默认翻译引擎（`trans_engines::ENGINES` 里的 id）。任何一次翻译它一定参与。
+    pub trans_engine: String,
+    /// **同时翻译**的引擎（v1.5.16，语义同 `ocr_multi`）：
+    ///   · `trans_engine` 是默认引擎，一定参与；
+    ///   · 这个列表是"另外还要一起翻的"（不含默认引擎），可空；
+    ///   · 真正参与一次翻译的 = `[默认引擎] + 这个列表`（见 `trans_plan`），
+    ///     翻译窗里**一家一个文本框并排呈现**。
+    #[serde(default)]
+    pub trans_multi: Vec<String>,
+    /// 每家翻译引擎的凭据（v1.5.16）。键 = 引擎 id，值 = 那家的 Key/模型/base。
+    /// 和 OCR 的 `ocr_keys` 那套一个路子：翻译和识别可能用不同账号/额度。
+    /// 磁盘上不会明文落盘 —— 整个 config.json 是加密信封（见 `save_to`）。
+    pub trans_keys: HashMap<String, String>,
+    pub trans_models: HashMap<String, String>,
+    pub trans_bases: HashMap<String, String>,
+    /// 每家翻译引擎的**副凭据**（百度的「密钥」、有道的「应用密钥」）。
+    ///
+    /// 老牌那几家的凭据是"两样一起"：APP ID + 密钥 / 应用 ID + 应用密钥，
+    /// 少一样都签不出请求。所以要单独一个 map（和 OCR 的 `ocr_secrets` 一个路子）。
+    #[serde(default)]
+    pub trans_secrets: HashMap<String, String>,
+    /// 默认目标语言（语言代码，见 `trans::LANGS`）。默认 `zh`。
+    ///
+    /// ⚠ 这是**默认值**，不是"当前值"：翻译窗口里切了语言只影响那一次，
+    ///   除非用户在窗口里点了「设为默认」—— 那个按钮才会写回这里。
+    pub trans_target: String,
+
     /// 横条上显示哪些引擎、什么顺序
     pub bar_list: Vec<String>,
     /// 横条上两条分隔线之间的样式：line（细竖线）/ dot（点状）/ space（纯留白）
@@ -1263,6 +1362,14 @@ impl Default for Config {
             ocr_secrets: HashMap::new(),
             ocr_bases: HashMap::new(),
             ocr_models: HashMap::new(),
+            trans_enable: true,
+            trans_engine: "siliconflow".to_string(),
+            trans_multi: Vec::new(),
+            trans_keys: HashMap::new(),
+            trans_models: HashMap::new(),
+            trans_bases: HashMap::new(),
+            trans_secrets: HashMap::new(),
+            trans_target: crate::trans::DEFAULT_TARGET.to_string(),
             bar_list: DEFAULT_BAR.iter().map(|s| s.to_string()).collect(),
             sep_style: "line".to_string(),
             custom_engines: Vec::new(),
@@ -2302,6 +2409,43 @@ pub(crate) fn sanitize(mut c: Config) -> Config {
             c.ocr_clean_space
         ));
         c.ocr_clean_space = "smart".to_string();
+    }
+    /* ---- v1.5.16：翻译（多引擎，口径同 OCR 那两段） ----
+     *
+     * 目标语言只认 `trans::LANGS` 里的代码。脏值（手改配置、老版本留的空串）
+     * 一律归一成简体中文 —— 界面上「翻译成中文」是默认，绝不能变成一个空下拉。 */
+    let want_target = crate::trans::normalize_lang(&c.trans_target);
+    if want_target != c.trans_target {
+        crate::win::log(&format!(
+            "config: 翻译目标语言 {:?} 不认识，归一为 {:?}",
+            c.trans_target, want_target
+        ));
+        c.trans_target = want_target;
+    }
+    // 默认引擎只认注册表里登记过的 id（siliconflow / zhipu / dashscope / …），
+    // 其它一概退回硅基流动（国内直连、有免费额度的默认）。
+    if crate::trans_engines::find(&c.trans_engine).is_none() {
+        crate::win::log(&format!(
+            "config: 翻译引擎 {:?} 不认识，归一为 siliconflow",
+            c.trans_engine
+        ));
+        c.trans_engine = "siliconflow".to_string();
+    }
+    // 同时翻译的名单：只认注册表里登记过的 id，并去掉默认引擎自己与重复项
+    // （默认引擎**一定**参与，不该在"额外"名单里再出现一次 —— 与 ocr_multi 同口径）。
+    {
+        let def = c.trans_engine.clone();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let before = c.trans_multi.len();
+        c.trans_multi.retain(|id| {
+            crate::trans_engines::find(id).is_some() && *id != def && seen.insert(id.clone())
+        });
+        if c.trans_multi.len() != before {
+            crate::win::log(&format!(
+                "config: 同时翻译名单里有 {} 项不认识 / 重复 / 就是默认引擎，已清理",
+                before - c.trans_multi.len()
+            ));
+        }
     }
     // ---- r47：旧开关 `ocr_parallel` → 新列表 `ocr_multi` 的一次性迁移 ----
     //
@@ -4108,6 +4252,93 @@ mod sanitize_tests {
             vec!["windows"],
             "默认引擎自己 / 重复 / 不认识的都该清掉"
         );
+    }
+
+    /* ---------- v1.5.16：翻译多引擎 ---------- */
+
+    /// 翻译计划 = 默认引擎 + 同时翻译名单，按**注册表顺序**排（翻译窗里几家
+    /// 文本框的左右顺序由此决定），去重；脏 id 一律不计入。
+    #[test]
+    fn trans_plan_orders_by_registry_and_dedups() {
+        let mut c = Config::default();
+        c.trans_engine = "deepseek".into();
+        c.trans_multi = vec!["moonshot".into(), "没这家".into(), "deepseek".into()];
+        // 注册表顺序：siliconflow, zhipu, dashscope, deepseek, moonshot, …
+        assert_eq!(
+            super::trans_plan(&c),
+            vec!["deepseek", "moonshot"],
+            "默认引擎在前，额外的那家按注册表顺序跟上"
+        );
+        // 默认引擎无效（sanitize 会修，但命令路径要能自己兜住）——
+        // 此时计划里只剩 multi 里合法的那些，绝不含无效 id
+        c.trans_engine = "没这家".into();
+        assert_eq!(
+            super::trans_plan(&c),
+            vec!["deepseek", "moonshot"],
+            "默认引擎无效时不该把无效 id 塞进计划"
+        );
+    }
+
+    /// 各家凭据分 map 存；没填的键读出来是空串（缺省值由注册表补，见
+    /// `trans_engines::Creds::model_for`）。
+    #[test]
+    fn trans_creds_reads_per_engine_maps() {
+        let mut c = Config::default();
+        c.trans_keys.insert("siliconflow".into(), "sk-x".into());
+        c.trans_models.insert("siliconflow".into(), "my-chat".into());
+        let cr = super::trans_creds(&c, "siliconflow");
+        assert_eq!(cr.key, "sk-x");
+        assert_eq!(cr.model, "my-chat");
+        assert_eq!(cr.base, "", "没填 base 就是空串，用的时候落注册表预置值");
+        // 没配过的家：全空
+        let none = super::trans_creds(&c, "zhipu");
+        assert!(none.key.is_empty() && none.model.is_empty() && none.base.is_empty());
+    }
+
+    /// 老牌那几家的**副凭据**（百度的密钥 / 有道的应用密钥）也分 map 存，
+    /// 且和主凭据一样是"没填就是空串"。
+    #[test]
+    fn trans_secrets_reads_per_engine_maps() {
+        let mut c = Config::default();
+        c.trans_keys.insert("baidu".into(), "APP123".into());
+        c.trans_secrets.insert("baidu".into(), "SECRET".into());
+        let cr = super::trans_creds(&c, "baidu");
+        assert_eq!(cr.key, "APP123");
+        assert_eq!(cr.secret, "SECRET");
+        // 谷歌只要一个 Key，没有副凭据
+        c.trans_keys.insert("google".into(), "GK".into());
+        let g = super::trans_creds(&c, "google");
+        assert_eq!(g.key, "GK");
+        assert!(g.secret.is_empty());
+    }
+
+    /// 读配置时归一：默认引擎 / 同时翻译名单里的脏数据都要清（口径同 OCR）。
+    #[test]
+    fn trans_lists_are_sanitized_on_load() {
+        let _serial = big_lock();
+        let (f, _g) = tmp_file("transdirty");
+        std::fs::write(
+            &f,
+            r#"{"trans_engine":"没这家","trans_multi":["没这家","siliconflow","siliconflow"]}"#,
+        )
+        .unwrap();
+        let c = load_from(&f);
+        assert_eq!(c.trans_engine, "siliconflow", "不认识的默认引擎落回硅基流动");
+        assert_eq!(
+            c.trans_multi,
+            Vec::<String>::new(),
+            "名单里：不认识的清掉、默认引擎自己清掉、重复清掉"
+        );
+        // 合法值原样保留
+        let (f2, _g2) = tmp_file("transok");
+        std::fs::write(
+            &f2,
+            r#"{"trans_engine":"deepseek","trans_multi":["zhipu","moonshot"]}"#,
+        )
+        .unwrap();
+        let c2 = load_from(&f2);
+        assert_eq!(c2.trans_engine, "deepseek");
+        assert_eq!(c2.trans_multi, vec!["zhipu", "moonshot"]);
     }
 
     /// 配置文件里完全没有 ocr_accurate 这个键时，必须落到「标准版」。

@@ -2127,6 +2127,22 @@ body.idx-on .to-top { bottom: 56px; }
     letter-spacing: .3px;
 }
 
+/* v1.5.16：翻译按钮（@trans）在列表里的徽标 —— 和 OCR 同一套配方，
+   单字「译」比三个字母更占地，字号随字收一点。 */
+.item .ic .trans-tag {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 22px;
+    height: 18px;
+    padding: 0 5px;
+    border-radius: 5px;
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    color: var(--accent);
+    font-size: 11.5px;
+    font-weight: 700;
+}
+
 /* 正在编辑的那一条自定义引擎，左侧给一道强调色 */
 .item.editing {
     background: color-mix(in srgb, var(--accent) 9%, transparent);
@@ -2553,6 +2569,20 @@ body.idx-on .to-top { bottom: 56px; }
     font-size: 10.5px;
     font-weight: 700;
     letter-spacing: .3px;
+}
+/* v1.5.16：翻译按钮在预览里的徽标（同上，单字「译」）。 */
+.qs-preview .pv-item .trans-tag {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: calc(var(--pv-size) - 8px);
+    height: calc(var(--pv-size) - 12px);
+    padding: 0 4px;
+    border-radius: max(0px, calc(var(--pv-icon-r, var(--pv-radius, 9px)) - 2px));
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    color: var(--accent);
+    font-size: 11.5px;
+    font-weight: 700;
 }
 
 /* 分隔线三档，和横条上的 .sep 保持一致 */

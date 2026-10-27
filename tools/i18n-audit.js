@@ -60,6 +60,13 @@ const dom = new JSDOM(inlineScripts(read('ui/' + page)), {
             if (cmd === 'backup_info') return Promise.resolve({ dir: 'C:\\t', isCustom: false, configPath: 'C:\\t\\config.json', files: [] });
             if (cmd === 'backup_security_state') return Promise.resolve({ hasPassword: false, envelope: 'dpapi', portable: false, hasToken: false, secretCount: 0 });
             if (cmd === 'github_rate_state') return Promise.resolve({ ok: true, authed: false, limit: 60, remaining: 60, used: 0, reset: 0 });
+            /* v1.5.16：翻译的引擎注册表。给两家有代表性的（一家预置 base/model、
+             * 一家要用户全填），不然那些行的文案压根不渲染，审计看不出来。 */
+            if (cmd === 'trans_engines_list') return Promise.resolve([
+                { id: 'siliconflow', name: '硅基流动', kind: 'openai', canListModels: true, modelRow: true, signup: 'https://cloud.siliconflow.cn/', docs: 'https://docs.siliconflow.cn/', needKey: true, needBase: false, needModel: false, base: 'https://api.siliconflow.cn/v1', model: 'Qwen/Qwen2.5-7B-Instruct', note: '', ready: true },
+                { id: 'custom', name: '自定义（OpenAI 兼容）', kind: 'openai', canListModels: true, modelRow: true, signup: '', docs: '', needKey: true, needBase: true, needModel: true, base: '', model: '', note: '', ready: false },
+            ]);
+            if (cmd === 'trans_session') return Promise.resolve({ text: 'Hello', target: 'zh', plan: [{ id: 'siliconflow', name: '硅基流动', ready: true }] });
             if (cmd === 'export_groups_list' || cmd === 'ocr_engines_list' || cmd === 'img_engines' || cmd === 'img_engine_list') return Promise.resolve([]);
             if (cmd === 'update_pending') return Promise.resolve({ has: false });
             return Promise.resolve(null);

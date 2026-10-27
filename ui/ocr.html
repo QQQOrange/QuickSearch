@@ -583,6 +583,10 @@ textarea.ghost { color: var(--fg-dim); }
         <span class="label">逐条开标签页</span>
     </label>
 
+    <!-- v1.5.16：翻译入口。把识别出的文字原样送进翻译窗口（同显原文/译文、
+         可切目标语言）—— 和横条上那颗翻译按钮走同一个后端入口 trans_start，
+         配置也统一读（设置 → 翻译）。翻译总开关关着时这颗按钮隐藏。 -->
+    <button class="btn" id="btnTrans" title="把识别出的文字送进翻译窗口">翻译</button>
     <button class="btn" id="btnCopy" title="划了一段就复制那一段，没划就复制全部">复制</button>
     <!-- 去空格按钮：不重新识别，只对识别原文再清一遍空格。
          智能 = 只留「单词↔单词」「单词↔中文」的空格（默认管线的口径）；
@@ -842,6 +846,27 @@ $('btnCopy').addEventListener('click', async () => {
 
 // 「打开链接」：直接把识别出的链接打开，忽略其它文字（中文照旧留在原地）
 $('btnOpenLinks').addEventListener('click', openDetectedLinks);
+
+/* v1.5.16：「翻译」—— 把这段识别文字送进翻译窗口。
+ *
+ * 为什么不在本窗里就地翻：翻译是"一问一答"（原文 → 译文 → 可能还想换种语言
+ * 再翻一遍），和识别结果"一块文字 + 一排整理按钮"不是一回事。独立窗口和
+ * 横条上那颗翻译按钮完全同一条路（trans_start），配置、语言表、错误提示
+ * 全都共用一份，不会有"两处翻译行为不一样"的问题。 */
+$('btnTrans').addEventListener('click', () => {
+    // 划了选区就翻选区，没划就翻全文 —— 和「复制」同一个口径（textToSearch）
+    const picked = textToSearch(curTa());
+    if (!picked) { toast('没有可翻译的文字'); return; }
+    invoke('trans_start', { text: picked }).catch(() => {});
+});
+
+/* 翻译总开关关着时这颗按钮不出现（后端 trans_start 也会兜一层，
+ * 但界面先藏起来更直白）。CONF 每次广播都会刷新。 */
+function syncTransBtn() {
+    const b = $('btnTrans');
+    if (!b) return;
+    b.hidden = !!(CONF && CONF.transEnable === false);
+}
 
 // 「逐条开标签页」开关（默认关）。关=只开第一条，开=全部逐条开。
 // 切换之后要顺手刷新按钮文案（「打开链接」↔「打开 N 条链接」）。
@@ -1945,6 +1970,8 @@ listen('qs://config', (ev) => {
     // 设置里改了「文本整理」的默认值 → 按钮的亮灭立刻跟着走
     // （后端 clean_mask_now() 在没有临时覆盖时就是读这些值）。
     syncCleanBtnsFromConf();
+    // v1.5.16：翻译总开关 → 「翻译」按钮显隐
+    syncTransBtn();
 });
 
 /* 页面首帧一画完就通知 Rust「可以显示了」。
@@ -1969,6 +1996,7 @@ requestAnimationFrame(() => requestAnimationFrame(() => {
     // r47：首屏按**参与名单**把底部段控摆好（只参与一家就整块藏起来）
     renderResultText(true);
     syncCleanBtnsFromConf();  // 首屏按设置里的默认值点亮文本整理按钮
+    syncTransBtn();          // v1.5.16：翻译总开关 → 「翻译」按钮显隐
     await pull();
     syncLinkControls();   // pull 之后立刻判一次有没有链接
     // 自检要等图真的解码完（img.onload 是异步的），所以延后一拍

@@ -28,6 +28,20 @@ window.QS_OCR = '@ocr';
 /** r61：横条上那颗「识图搜索」按钮的哨兵。
  *  和 @ocr 同一套地位：能出现在「横条上的引擎」列表里、能用 pick_icon 换图标。 */
 window.QS_IMG = '@img';
+/** v1.5.16：横条上那颗「翻译」按钮的哨兵。
+ *  和 @ocr / @img 同一套地位：bar_list 成员、可拖拽排序、可换图标、可移出。
+ *  Rust 侧 config::BAR_TRANS 必须与之保持一致。 */
+window.QS_TRANS = '@trans';
+/** 翻译按钮的**内置默认图标**（用户 2026-10-27 指定的「翻译.png」）。
+ *
+ *  放在 `data/icons/` 下、随前端一起打包 —— 开箱即得所有用户都有，
+ *  不依赖本机 icons 目录。
+ *
+ *  ⚠ 为什么不是 overrideIcons：overrideIcons 的语义是「用户**自己挑**的图」，
+ *    点「恢复默认」时会被清掉。把程序自带的默认图塞进去，那「恢复默认」就变成
+ *    「恢复成程序自带的那张」—— 语义正好反了。所以内置图走独立这一路，
+ *    overrideIcons 只负责「用户覆盖过」的情况。 */
+window.QS_TRANS_ICON = 'data/icons/trans.png';
 /** r70：识图按钮的**内置图标**（四角取景框 + 放大镜）的内联 SVG 标记。
  *  语义：框选屏幕的一块区域（四角）→ 按图去搜（放大镜）。
  *  以前这份标记只存在于横条的 index.html 里，设置页想显示同一颗图标只能
@@ -88,6 +102,57 @@ window.qsAppIconNode = function (sentinel) {
     let h = 0;
     for (let i = 0; i < nm.length; i++) h = (h * 31 + nm.charCodeAt(i)) | 0;
     span.style.setProperty('--lt-color', P[Math.abs(h) % P.length]);
+    return span;
+};
+
+/* ------------------------------------------------------------------ */
+/* 翻译按钮（@trans）的默认图标                                          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 翻译按钮的图标节点 —— **横条 / 设置页列表 / 设置页预览三处共用这一份**。
+ *
+ *  优先级只有两级（翻译不是真引擎，没有 iconFile 那一级）：
+ *    1. 用户换过的图（overrideIcons['@trans']）—— 用户挑的永远最优先；
+ *    2. 程序自带的默认图（data/icons/trans.png，用户 2026-10-27 指定的那张）。
+ *
+ *  以前这里是三处各画一枚「译」文字徽标 —— 同一个意思三份实现，改一处
+ *  忘了另两处就会对不上。收到默认图标后统一收在这里。
+ *
+ *  图加载失败（文件被裁掉、路径写错）时退回「译」文字徽标：宁可丑一点，
+ *  也不能让翻译按钮变成一颗空白方块。
+ */
+window.qsTransIconNode = function () {
+    const conf = window.CONF || {};
+    const custom = conf.overrideIcons ? conf.overrideIcons[window.QS_TRANS] : null;
+    const unify = conf.unifyIcons !== false;
+    const src = custom || window.QS_TRANS_ICON;
+    if (src) {
+        const img = document.createElement('img');
+        img.src = src;
+        img.alt = '';
+        img.draggable = false;
+        if (window.qsApplyOpticalScale) {
+            window.qsApplyOpticalScale(img, unify);
+        }
+        img.addEventListener('error', () => {
+            // 自带的图读不出来 → 换回文字徽标（只在没换过图时才换：
+            // 用户自己挑的图挂了，不该偷偷改成别的东西）。
+            if (custom) { img.style.visibility = 'hidden'; return; }
+            const span = document.createElement('span');
+            // 两个 class 都带上：横条页认 .qs-trans-tag，设置页认 .trans-tag
+            //（两个页面各引各的 css，兜底徽标在哪儿都得有样式）。
+            span.className = 'qs-trans-tag trans-tag';
+            span.textContent = '译';
+            span.setAttribute('data-i18n-skip', '');
+            if (img.parentNode) img.parentNode.replaceChild(span, img);
+        });
+        return img;
+    }
+    const span = document.createElement('span');
+    span.className = 'qs-trans-tag trans-tag';
+    span.textContent = '译';
+    span.setAttribute('data-i18n-skip', '');
     return span;
 };
 

@@ -1,0 +1,859 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="color-scheme" content="light dark">
+<title>翻译 —— Quick Search</title>
+<style>
+/* 和识别结果窗（ocr.html）同一套配色与控件语言 —— 两个窗口挨着用，
+   长得不一样会让人觉得"进了别的软件"。 */
+* { box-sizing: border-box; }
+
+:root {
+    --bg: #F5F6F8;
+    --card: #FFFFFF;
+    --fg: #1B1D23;
+    --fg-dim: #6B6F7A;
+    --line: #E4E6EB;
+    --hover: rgba(15, 20, 40, .06);
+    --accent: #3B7DFF;
+}
+
+@media (prefers-color-scheme: dark) {
+    :root {
+        --bg: #17181C;
+        --card: #1E1F24;
+        --fg: #ECEDF1;
+        --fg-dim: #A0A4AF;
+        --line: rgba(255, 255, 255, .12);
+        --hover: rgba(255, 255, 255, .09);
+        --accent: #6FA1FF;
+    }
+}
+
+html, body {
+    margin: 0;
+    height: 100%;
+    background: var(--bg);
+    color: var(--fg);
+    font: 13px/1.55 "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+body { display: flex; flex-direction: column; overflow: hidden; }
+
+/* ------------------------------ 顶部工具栏 ------------------------------ */
+/* 就一件事：翻成什么语言。加上「设为默认」—— 用户这次选了日语，下次还想
+   默认日语，点一下就把这个选择写进配置（默认目标语言）。
+   最右边是**本轮参与名单**的摘要（几家一起翻、几家就绪）—— 多引擎之后
+   "这次到底翻了几家"必须一眼可见，否则用户会以为另外几家没跑。 */
+.topbar {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    background: var(--card);
+    border-bottom: 1px solid var(--line);
+}
+.topbar .cap { flex: none; font-size: 12.5px; color: var(--fg-dim); }
+.topbar select {
+    flex: none;
+    height: 30px;
+    max-width: 220px;
+    padding: 0 8px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--card);
+    color: var(--fg);
+    font: inherit;
+    font-size: 12.5px;
+    cursor: pointer;
+    outline: none;
+}
+.topbar select:focus { border-color: var(--accent); }
+.topbar .spacer { flex: 1; }
+#engCap {
+    max-width: 46%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* ------------------------------ 原文 / 译文 ------------------------------ */
+/* 上面一块原文（用户可能要改），下面**一家引擎一块译文**（v1.5.16 起，
+   用户要求"像 OCR 识别一样可以同时多选几个，同一个页面同时呈现"）。
+   两三块并排，再多就换行 —— 和识别结果窗的 .panes-multi 同一套摆法。 */
+.panes {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 12px;
+    /* 原文框可以被用户拖宽，超出部分用横向滚动条兜住
+       （body 是 overflow:hidden，不加这层的话拖宽后右侧直接被裁掉看不见）。 */
+    overflow: auto;
+}
+/* 原文区：高度**不占满**（flex:0 0 auto），剩下留给译文区。
+   之前是 `flex:1 1 0` + `min-height:72px` —— 高度被 flex 锁死，
+   下面的 #src 根本没法用鼠标拖出新的高度。 */
+.pane-box {
+    flex: 0 0 auto;
+    align-self: flex-start;
+    /* min-width:100% 保证初始时原文框撑满一行；用户拖窄之后它就按
+       自己的宽度来（textarea 拖出来的宽度是行内 px 值，不受这个约束）。 */
+    min-width: 100%;
+    min-height: 72px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+/* 原文输入框（#src）。
+   三个诉求 —— 圆角、拖拽调宽高、可直接编辑：
+     1. 圆角/边框/底色照抄译文区 `.tp textarea` 的那套，视觉统一；
+     2. `resize: both` + 固定初始 height：浏览器原生拖拽把手在右下角，
+        拖出来的宽高会写进**行内样式**（优先级高于样式表），所以不会被
+        flex 布局覆盖掉；父级 .pane-box 是 auto 高度，会跟着长高/变宽，
+        译文区则自动让出空间 —— 内容和布局同步更新。
+     3. `user-select: text`：html/body 上有 `user-select:none`，那是给
+        「界面上的字不该被误选」用的，但它会被 textarea **继承**，
+        结果原文框里既选不中也编辑不了（用户以为被设成只读）。
+        这里显式开回来。 */
+#src {
+    display: block;
+    width: 100%;
+    /* 拖出来的最小/最大尺寸：太小会看不见内容，太大超出窗口没意义 */
+    min-width: 240px;
+    max-width: 100%;
+    height: 150px;
+    min-height: 72px;
+    padding: 11px 13px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--card);
+    color: var(--fg);
+    font: 13.5px/1.7 "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+    outline: none;
+    overflow: auto;
+    /* ★ 可拖拽调整宽高 */
+    resize: both;
+    /* ★ 可直接编辑、选中 */
+    user-select: text;
+    -webkit-user-select: text;
+    caret-color: var(--fg);
+}
+#src:focus { border-color: var(--accent); }
+#src::placeholder { color: var(--fg-dim); }
+.pane-cap {
+    flex: none;
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    font-size: 11.5px;
+    color: var(--fg-dim);
+    padding-left: 2px;
+}
+.pane-cap b { font-size: 12px; color: var(--fg); font-weight: 600; }
+.pane-cap .dim { color: var(--fg-dim); }
+
+/* 译文区：一家一个文本框。每个框顶上是「引擎名 · 模型」+ 这一家的状态
+   （等待中 / 已完成 / 失败），框下面是这一家自己的出错原因 ——
+   三家同时翻、挂了两家时，用户能立刻看出是谁不行、为什么。 */
+.tps {
+    flex: 2.6 1 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+.tp {
+    flex: 1 1 240px;
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+.tp-cap {
+    flex: none;
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    min-width: 0;
+    font-size: 11.5px;
+    line-height: 16px;
+    color: var(--fg-dim);
+    padding-left: 2px;
+}
+.tp-cap .tp-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.tp-cap .tp-name b { font-size: 12px; color: var(--fg); font-weight: 600; }
+.tp-cap .tp-st { flex: none; margin-left: auto; padding-left: 6px; }
+.tp-cap .tp-st.err { color: #C93A3A; }
+@media (prefers-color-scheme: dark) {
+    .tp-cap .tp-st.err { color: #FF8A8A; }
+}
+/* 点 / 聚焦哪个框，哪个框就是"活动框"（复制译文作用于它）*/
+.tp.tp-active .tp-cap { color: var(--accent); }
+.tp.tp-active .tp-cap .tp-name b { color: var(--accent); }
+.tp textarea {
+    flex: 1 1 0;
+    min-height: 0;
+    width: 100%;
+    padding: 11px 13px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--card);
+    color: var(--fg);
+    font: 13.5px/1.7 "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+    outline: none;
+    resize: none;
+    user-select: text;
+    -webkit-user-select: text;
+}
+.tp textarea:focus { border-color: var(--accent); }
+/* 翻译中给译文框一点"等待中"的观感，别让人以为窗口坏了 */
+.tp textarea.ghost { color: var(--fg-dim); }
+/* 这一家自己的出错原因：贴在它的框下面，别家的错误不会串到这块来 */
+.tp-note {
+    flex: none;
+    font-size: 11px;
+    line-height: 1.45;
+    color: #C93A3A;
+    word-break: break-all;
+}
+@media (prefers-color-scheme: dark) {
+    .tp-note { color: #FF8A8A; }
+}
+.tp-note[hidden] { display: none; }
+
+/* 说明条：错误 / 提示（没填 Key、限流、网络不通……）。
+   独立横条，不挤占文字区的高度。多引擎时它是**汇总**（几家挂了、
+   第一家的原因），各家的详情在各家框上面。 */
+.note {
+    flex: none;
+    margin: 0 12px 10px;
+    font-size: 11.5px;
+    line-height: 1.5;
+    color: var(--fg-dim);
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent) 26%, transparent);
+    border-radius: 8px;
+    padding: 7px 10px;
+}
+.note.err {
+    color: #C93A3A;
+    background: color-mix(in srgb, #C93A3A 9%, transparent);
+    border-color: color-mix(in srgb, #C93A3A 32%, transparent);
+}
+@media (prefers-color-scheme: dark) {
+    .note.err { color: #FF8A8A; }
+}
+.note[hidden] { display: none; }
+
+/* ------------------------------ 底部按钮栏 ------------------------------ */
+/* 窄窗口防文字外溢（OCR 窗同款教训）：flex-wrap + 按钮一律 flex:none。 */
+.foot {
+    flex: none;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+    border-top: 1px solid var(--line);
+    background: var(--card);
+}
+.foot .btn { flex: none; }
+.tip { flex: 1; font-size: 11.5px; color: var(--fg-dim); min-width: 60px; }
+
+.btn {
+    height: 30px;
+    padding: 0 13px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: transparent;
+    color: var(--fg);
+    font: inherit;
+    white-space: nowrap;
+    cursor: pointer;
+    transition: background-color .12s ease;
+}
+.btn:hover { background: var(--hover); }
+.btn:disabled { opacity: .55; cursor: progress; }
+/* 主按钮（翻译）：一点强调色，和中性按钮分开 */
+.btn-primary {
+    border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+    color: var(--accent);
+    font-weight: 600;
+}
+.btn-primary:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.btn .spinner {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    margin-right: 5px;
+    border: 2px solid color-mix(in srgb, var(--accent) 30%, transparent);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: trans-spin .8s linear infinite;
+    vertical-align: -2px;
+}
+@keyframes trans-spin {
+    to { transform: rotate(360deg); }
+}
+
+.toast {
+    position: fixed;
+    left: 50%;
+    bottom: 18px;
+    transform: translateX(-50%) translateY(8px);
+    padding: 7px 15px;
+    border-radius: 9px;
+    background: rgba(20, 22, 28, .93);
+    color: #fff;
+    font-size: 12.5px;
+    opacity: 0;
+    transition: opacity .18s ease, transform .18s ease;
+    pointer-events: none;
+    z-index: 40;
+}
+.toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+    <span class="cap">翻译成</span>
+    <select id="target" title="目标语言（切一下就会按新语言重翻）"></select>
+    <button class="btn" id="btnSetDefault" title="把当前选的语言设为默认：以后从横条 / 识别结果窗打开翻译窗时，默认就翻成它">设为默认</button>
+    <span class="spacer"></span>
+    <span class="cap" id="engCap"></span>
+</div>
+
+<div class="panes">
+    <div class="pane-box">
+        <div class="pane-cap"><b>原文</b><span class="dim" id="dstLang">翻成「简体中文」</span></div>
+        <textarea id="src" spellcheck="false" placeholder="要翻译的文字会出现在这里；空着也可以自己粘贴一段（Ctrl+Enter 直接翻）"></textarea>
+    </div>
+    <!-- 译文：按 trans_session 的 plan 一家一块，JS 建（buildPanes） -->
+    <div class="tps" id="tps"></div>
+</div>
+
+<div class="note" id="note" hidden></div>
+
+<div class="foot">
+    <button class="btn btn-primary" id="btnGo" title="按上面选的目标语言翻译（Ctrl+Enter）">翻译</button>
+    <button class="btn" id="btnCopy" title="复制当前选中的那块译文（先点一下哪个框就复制哪个）">复制译文</button>
+    <button class="btn" id="btnCopySrc" title="复制原文到剪贴板">复制原文</button>
+    <button class="btn" id="btnClear" title="清空原文和所有译文">清空</button>
+    <button class="btn" id="btnClose" title="关闭翻译窗口">关闭</button>
+    <span class="tip" id="tip"></span>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script src="shared.js"></script>
+<script src="i18n.js"></script>
+<script src="i18n.en.js"></script>
+<script>
+const invoke = window.__TAURI__.core.invoke;
+const listen = window.__TAURI__.event.listen;
+const $ = (id) => document.getElementById(id);
+
+/** 复制走的统一出口（和识别结果窗同一个后端命令）。
+ *  单独留一层是给自检留观察点：不能真去写系统剪贴板（会覆盖用户正在用的内容）。 */
+let copySink = (text) => invoke('copy_text', { text });
+
+let CONF = null;
+let langs = [];        // [{code,label}]，来自 Rust 的 trans_langs
+let busy = false;      // 一轮只发一批请求：连点会排队，还会把上一轮的结果盖掉
+
+/** 本轮翻译的编号（流式增量靠它认领）。
+ *  用户改两个字再点一次 / 切语言重翻时，上一轮那条 HTTP 流可能还在往外吐；
+ *  Rust 会把每段增量连同它所属的 round 一起发过来，这里只认 `curRound`，
+ *  别的直接丢 —— 否则新译文会被上一轮的尾货糊成两份。 */
+let roundSeq = 0;
+let curRound = '';
+
+/** 本轮参与的引擎：[{id, name, ready}]。
+ *
+ *  ⚠ 来自 `trans_session` 的 `plan`，是**权威名单** —— "默认引擎 + 同时翻译"
+ *  的算法（按注册表排序、去重、清脏）在 Rust 有一份实现（config::trans_plan），
+ *  前端不自己从 CONF 拼：抄一遍迟早对不上，设置页改了名前端还不知道。 */
+let plan = [];
+
+/** 注册表静态信息（base / model / need*），来自 trans_engines_list。
+ *  只用来把"这一家用的什么模型、缺什么"显示出来；拉不到也不影响主流程。 */
+let REG = {};
+
+/** id → 这一家的 pane 句柄 {box, name, st, ta, note} */
+let panes = new Map();
+
+/** 当前「活动」结果框 —— 复制译文作用于它（同 OCR 结果窗的口径：
+ *  用户刚点过 / 聚焦过的那个）。 */
+let activeTa = null;
+
+function toast(msg) {
+    const t = $('toast');
+    t.textContent = msg;
+    t.classList.add('show');
+    clearTimeout(toast._t);
+    toast._t = setTimeout(() => t.classList.remove('show'), 1500);
+}
+
+function showNote(msg, isErr) {
+    const n = $('note');
+    n.textContent = msg || '';
+    n.classList.toggle('err', !!isErr);
+    n.hidden = !msg;
+}
+
+/** 当前选中的目标语言代码。没建好选项就按后端默认（zh）。 */
+function curTarget() {
+    const sel = $('target');
+    return (sel && sel.value) || 'zh';
+}
+
+/** 语言代码 → 显示名（认不出来就显示代码本身）。 */
+function langLabel(code) {
+    for (const l of langs) if (l.code === code) return l.label;
+    return code;
+}
+
+/** 这一家**实际会用**的模型名：用户在设置里填过就用填的，否则用注册表预置的。
+ *  都拿不到就返回空串（cap 上只显示引擎名）。 */
+function paneModel(id) {
+    const c = CONF && CONF.transCreds && CONF.transCreds[id];
+    const mine = c && typeof c.model === 'string' ? c.model.trim() : '';
+    if (mine) return mine;
+    const r = REG[id];
+    return (r && typeof r.model === 'string') ? r.model.trim() : '';
+}
+
+/** 没就绪时缺什么（注册表的 need_* + 用户已填的部分现算）。
+ *  比干巴巴一个"未就绪"有用：用户一看就知道该去填哪一栏。 */
+function readyHint(id) {
+    const r = REG[id];
+    if (!r) return '未就绪';
+    const c = (CONF && CONF.transCreds && CONF.transCreds[id]) || {};
+    const key = (c.key || '').trim();
+    const secret = (c.secret || '').trim();
+    const base = (c.base || '').trim() || (r.base || '').trim();
+    const model = (c.model || '').trim() || (r.model || '').trim();
+    if (r.needKey && !key) return '缺 Key';
+    // 百度 / 有道 的副凭据（密钥 / 应用密钥）：和主凭据是一对，
+    // 少一样都签不出请求 —— 提示要说到点子上，别让用户只填了 APP ID 就干等。
+    if (r.needSecret && !secret) return '缺密钥';
+    if (r.needModel && !model) return '缺模型';
+    if (r.needBase && !base) return '缺接口地址';
+    return '未就绪';
+}
+
+/** 刷新原文标题后面的语言名，以及顶部"几家一起翻"的摘要。 */
+function syncCaps() {
+    $('dstLang').textContent = '翻成「' + langLabel(curTarget()) + '」';
+    const n = plan.length;
+    if (!n) { $('engCap').textContent = ''; return; }
+    const ready = plan.filter((e) => e.ready).length;
+    $('engCap').textContent = n === 1
+        ? plan[0].name + (plan[0].ready ? '' : '（' + readyHint(plan[0].id) + '）')
+        : n + ' 家一起翻 · ' + ready + ' 家就绪';
+    $('engCap').title = plan.map((e) => e.name + (e.ready ? '' : '（' + readyHint(e.id) + '）')).join('、');
+}
+
+/** 填目标语言下拉。只建一次选项；之后广播/重入只改选中项。 */
+function fillLangs(list) {
+    langs = Array.isArray(list) ? list : [];
+    const sel = $('target');
+    sel.textContent = '';
+    for (const l of langs) {
+        const o = document.createElement('option');
+        o.value = l.code;
+        o.textContent = l.label;
+        sel.appendChild(o);
+    }
+}
+
+/** 把选中项设成某个语言代码（不在表里就落回中文）。 */
+function setTarget(code) {
+    const sel = $('target');
+    const hit = langs.some((l) => l.code === code);
+    sel.value = hit ? code : 'zh';
+    syncCaps();
+}
+
+/** 翻译中 / 空闲的界面状态。 */
+function setBusy(on) {
+    busy = on;
+    $('btnGo').disabled = on;
+    $('btnCopy').disabled = on;
+    $('target').disabled = on;
+    $('btnSetDefault').disabled = on;
+    const b = $('btnGo');
+    if (on) {
+        b.textContent = '';
+        const sp = document.createElement('span');
+        sp.className = 'spinner';
+        b.appendChild(sp);
+        b.appendChild(document.createTextNode('翻译中…'));
+        // 文案跟着流式改：以前是"要等几秒"，现在第一个字几百毫秒就上屏了
+        $('tip').textContent = '正在翻译：第一个字很快就到，长段落边生成边显示…';
+    } else {
+        b.textContent = '翻译';
+        $('tip').textContent = '';
+    }
+}
+
+/* ==================================================================== */
+/* 译文区：一家一个文本框（v1.5.16，用户要求"像 OCR 识别一样多选几家、      */
+/* 同一页面同时呈现"）                                                    */
+/* ==================================================================== */
+
+/** 名单的"指纹"：一样就不重建 DOM（重建会把用户已经拿到的译文冲掉）。 */
+function planSig(list) {
+    return (list || []).map((e) => e.id).join('|');
+}
+
+/** 按参与名单摆译文框。
+ *
+ *  · 每个框顶上是「引擎名 · 模型」+ 这一家的状态；
+ *  · 还没回来的显示它自己的等待占位，不会拿别家的字填进去；
+ *  · 复制 / 清空都作用于「活动框」（curTa()）—— 用户刚点过的那个。
+ *
+ *  名单没变时**不重建 DOM**（重建会把已经拿到的译文冲掉），但标题照刷 ——
+ *  用户在设置里给这家换了个模型，窗口开着也该马上看见。 */
+function buildPanes(list) {
+    const wrap = $('tps');
+    const sig = planSig(list);
+    if (wrap.dataset.sig !== sig) {
+        wrap.dataset.sig = sig;
+        wrap.textContent = '';
+        panes = new Map();
+        activeTa = null;
+        for (const e of (list || [])) {
+            const d = document.createElement('div');
+            d.className = 'tp';
+            d.dataset.eng = e.id;
+
+            const cap = document.createElement('div');
+            cap.className = 'tp-cap';
+            const nm = document.createElement('span');
+            nm.className = 'tp-name';
+            const st = document.createElement('span');
+            st.className = 'tp-st';
+            cap.appendChild(nm);
+            cap.appendChild(st);
+
+        const ta = document.createElement('textarea');
+        ta.setAttribute('spellcheck', 'false');
+        // 占位语是**整句**（不带引擎名）—— 带名字就得靠碎片翻译才能翻成英文，
+        // 而引擎名是数据、字典里永远不会有；这一家是谁，看上面那一行标题就够了。
+        ta.placeholder = '这一家的译文会出现在这里…';
+            ta.addEventListener('focus', () => markActiveTa(ta));
+            ta.addEventListener('pointerdown', () => markActiveTa(ta));
+
+            const note = document.createElement('div');
+            note.className = 'tp-note';
+            note.hidden = true;
+
+            d.appendChild(cap);
+            d.appendChild(ta);
+            d.appendChild(note);
+            wrap.appendChild(d);
+            // done = 这一家本轮已经有结果了（成功或失败都算）——
+            // 刷新标题时不碰它的状态，免得把「失败」擦回「等待中」。
+            panes.set(e.id, { box: d, st: st, ta: ta, note: note, done: false });
+        }
+    }
+    for (const e of (list || [])) {
+        const p = panes.get(e.id);
+        if (!p) continue;
+        const nm = p.box.querySelector('.tp-name');
+        if (nm) {
+            nm.textContent = '';
+            const b = document.createElement('b');
+            b.textContent = e.name || e.id;
+            nm.appendChild(b);
+            const model = paneModel(e.id);
+            if (model) nm.appendChild(document.createTextNode(' · ' + model));
+        }
+        if (p.done) continue;
+        p.st.textContent = e.ready ? '等待中…' : readyHint(e.id);
+        p.st.classList.toggle('err', !e.ready);
+    }
+    syncCaps();
+}
+
+/** 当前「活动」结果框。被摘掉 / 藏起来就退回第一家。 */
+function curTa() {
+    if (activeTa && activeTa.isConnected && !activeTa.hidden) return activeTa;
+    const first = panes.values().next();
+    return first.done ? null : first.value.ta;
+}
+function markActiveTa(el) {
+    if (!el) return;
+    activeTa = el;
+    for (const p of panes.values()) p.box.classList.toggle('tp-active', p.ta === el);
+}
+
+/** 全部框回到"等待中"（一轮新的翻译开始）。 */
+function clearPanes() {
+    for (const p of panes.values()) {
+        p.ta.value = '';
+        p.ta.classList.remove('ghost');
+        p.note.hidden = true;
+        p.note.textContent = '';
+        p.st.textContent = '等待中…';
+        p.st.classList.remove('err');
+        p.done = false;
+    }
+}
+
+/** 某一家的结果落进它自己那一格。
+ *  `err` 非空 = 这家失败了：状态标红、原因贴在它框下面（别家不受影响）。 */
+function fillPane(id, text, err) {
+    const p = panes.get(id);
+    if (!p) return;
+    p.done = true;
+    if (err) {
+        /* ⚠ 流式翻到一半断掉时，框里已经有半段译文了 —— 别一把清空。
+         * "刚才看到的字突然消失"比"看到半段 + 一句说明"更让人慌；
+         * 下一轮 clearPanes 会把它清掉，不会有残留。 */
+        p.st.textContent = '失败';
+        p.st.classList.add('err');
+        p.note.textContent = err;
+        p.note.hidden = false;
+    } else {
+        /* 流式显示的是"边收边贴"的粗坯（比如整段被 ``` 包住时围栏也在里面）；
+         * 这里拿到的是 Rust 剥干净、去过首尾空白的权威结果 —— 覆盖掉。 */
+        p.ta.value = text || '';
+        p.ta.classList.remove('ghost');
+        p.st.textContent = '已完成';
+        p.st.classList.remove('err');
+        p.note.hidden = true;
+        p.note.textContent = '';
+    }
+}
+
+/* 流式增量：模型吐一段就贴一段，不等整段回来。
+ *
+ * `round` 是这一轮翻译的编号 —— 用户改字重翻 / 切语言重翻时，上一轮那条
+ * 连接可能还在往外吐，只认当前轮次就不会把两次的译文糊在一起。 */
+function appendDelta(id, delta) {
+    const p = panes.get(id);
+    if (!p || !delta) return;
+    const ta = p.ta;
+    // 用户往下翻过就别抢滚动条；本来停在底部才跟着走
+    const atBottom = ta.scrollTop + ta.clientHeight >= ta.scrollHeight - 12;
+    ta.value += delta;
+    if (atBottom) ta.scrollTop = ta.scrollHeight;
+    if (!p.done) {
+        p.st.textContent = '翻译中…';
+        p.st.classList.remove('err');
+    }
+}
+
+/** 真正发一轮翻译：**每一家各发一次** trans_run，并行等它们全部回来。
+ *
+ *  文本取原文框此刻的内容（不是唤起时那份）—— 用户很可能改了几个字再点。
+ *  失败时错误原样进那一格的说明：Rust 那边已经分好类了（缺 Key / 401 /
+ *  429 / 网络不通各有各的说法，还带厂商名），界面不再自己猜。 */
+async function runAll() {
+    if (busy) return;
+    const text = $('src').value;
+    if (!text.trim()) { toast('没有可翻译的文字'); return; }
+    const target = curTarget();
+    showNote('');
+    if (!plan.length) {
+        showNote('还没有配翻译引擎：去 设置 → 翻译 选一家（默认引擎），想一起翻就再勾几家', true);
+        return;
+    }
+    setBusy(true);
+    clearPanes();
+    const round = 'r' + (++roundSeq).toString(36) + '-' + Date.now().toString(36);
+    curRound = round;
+    /* 一家一个 Promise，全部兜住 rejection —— 三家一起翻、挂两家是常态，
+       不能因为一家 401 就把另外两家的结果也一起吞了。 */
+    const jobs = plan.map((e) =>
+        invoke('trans_run', { engine: e.id, text: text, target: target, round: round }).then(
+            (out) => ({ id: e.id, ok: true, out: out }),
+            (err) => ({ id: e.id, ok: false, err: String(err || '翻译失败') })
+        )
+    );
+    const done = await Promise.all(jobs);
+    const fails = done.filter((r) => !r.ok);
+    for (const r of done) fillPane(r.id, r.ok ? r.out : '', r.ok ? null : r.err);
+    if (fails.length) {
+        // 汇总条只说"几家挂了 + 第一家的原因"；每家的详情在它自己框上面
+        showNote(fails.length === 1
+            ? fails[0].err
+            : (fails.length + ' 家没翻出来，第一家是：' + fails[0].err), true);
+    }
+    setBusy(false);
+}
+
+/** 收到"新的一段文字"（窗口已经开着，横条 / OCR 窗又点了一次翻译）。
+ *  整块换掉原文、按 payload 里的目标语言重翻 —— 和冷启动走同一条路。 */
+function acceptOpen(payload) {
+    const p = payload || {};
+    $('src').value = p.text || '';
+    if (p.target) setTarget(p.target);
+    runAll();
+}
+
+/* 后端没有返回 plan 时的兜底（老版本 / 自检环境）：按 CONF 现拼一个。
+ *   正常路径永远走 trans_session 的 plan，这里只是不让界面变成空白。 */
+function planFromConf(c) {
+    const def = (c && c.transEngine) || 'siliconflow';
+    const ids = [def];
+    const multi = (c && Array.isArray(c.transMulti)) ? c.transMulti : [];
+    for (const m of multi) if (m !== def && ids.indexOf(m) < 0) ids.push(m);
+    return ids.map((id) => ({ id: id, name: id, ready: true }));
+}
+
+/** 采纳一份新的参与名单：名单变了才重建框（并重翻），没变就什么都不做。 */
+function applyPlan(list) {
+    if (!Array.isArray(list) || !list.length) return;
+    const changed = planSig(list) !== planSig(plan);
+    plan = list;
+    buildPanes(plan);
+    if (changed && $('src').value.trim()) runAll();
+}
+
+(async function boot() {
+    /* 四路一起拉：会话（这次翻什么 + 哪几家）、语言表、注册表、整份配置。
+     *
+     * ⚠ 以前 `get_config` 是**单拎出来先 await** 的 —— 它要把整份配置序列化
+     *   过来（含图标 data URL、收藏夹、自定义引擎），慢的时候上百毫秒，而它
+     *   只是给界面做装饰用的（模型名、"同时翻译"标签）。压在链子最前面等于
+     *   让翻译请求白等一截；现在四路并发。 */
+    const [sess, list, reg, conf] = await Promise.all([
+        invoke('trans_session').catch(() => ({ text: '', target: 'zh' })),
+        invoke('trans_langs').catch(() => []),
+        invoke('trans_engines_list').catch(() => []),
+        invoke('get_config').catch(() => ({})),
+    ]);
+    CONF = conf || {};
+    REG = {};
+    if (Array.isArray(reg)) for (const r of reg) REG[r.id] = r;
+    fillLangs(list);
+    setTarget((sess && sess.target) || (CONF && CONF.transTarget) || 'zh');
+    plan = (sess && Array.isArray(sess.plan) && sess.plan.length)
+        ? sess.plan
+        : planFromConf(CONF);
+    buildPanes(plan);
+    $('src').value = (sess && sess.text) || '';
+
+    /* 订阅要**先挂上**再发请求：流式的第一段增量可能在 invoke 刚出去就回来了。 */
+    listen('qs://trans-chunk', (ev) => {
+        const p = ev.payload || {};
+        if (!p.round || p.round !== curRound) return;   // 上一轮的尾货，丢掉
+        appendDelta(p.engine, p.delta);
+    });
+    // 窗口已经开着时又收到新文本（横条 / OCR 窗的翻译入口）
+    listen('qs://trans-open', (ev) => acceptOpen(ev.payload));
+
+    // 有文字就自动翻：用户点翻译按钮时心里想的就是"打开就看到译文"，
+    // 让他再点一次「翻译」是多一步操作。没文字就空着等他自己粘贴。
+    if ($('src').value.trim()) runAll();
+})();
+
+/* 设置页改了翻译相关的配置（换默认引擎 / 勾「同时翻译」/ 填凭据）——
+ *  重新问一次权威名单，变了才重建框、重翻。
+ *
+ *  ⚠ 不能直接拿广播里的 CONF 拼名单：那份算法在 Rust（config::trans_plan），
+ *  前端拼一份迟早对不上；也不能每来一次广播就重建 —— 用户正在看译文时
+ *  把框全冲掉等于"设置页动一下、译文全没了"。 */
+listen('qs://config', async () => {
+    CONF = await invoke('get_config').catch(() => CONF);
+    const s = await invoke('trans_session').catch(() => null);
+    if (s && Array.isArray(s.plan) && s.plan.length) applyPlan(s.plan);
+    else syncCaps();
+});
+
+/* 页面首帧画完再通知 Rust 显示 —— 同 OCR 窗：hidden 建窗，等第一帧上屏，
+   否则深色系统下先闪一块原生黑框。双重 rAF 保证上一帧真的提交过。 */
+requestAnimationFrame(() => requestAnimationFrame(() => {
+    invoke('trans_ready').catch(() => {});
+}));
+
+/* ------------------------------ 控件事件 ------------------------------ */
+$('target').addEventListener('change', () => {
+    // 标题先换（没文字时也该换）—— 少了这一步：空原文切语言，标题还挂着上一个语言
+    syncCaps();
+    // 切语言 = 想按新语言再看一遍：有原文就自动重翻，不用再点「翻译」
+    if ($('src').value.trim()) runAll();
+});
+
+$('btnGo').addEventListener('click', runAll);
+
+$('btnCopy').addEventListener('click', async () => {
+    const ta = curTa();
+    const t = ta ? ta.value.trim() : '';
+    if (!t) { toast('还没有译文'); return; }
+    await copySink(t).then(
+        () => toast('译文已复制'),
+        () => toast('复制失败')
+    );
+});
+
+$('btnCopySrc').addEventListener('click', async () => {
+    const t = $('src').value.trim();
+    if (!t) { toast('原文是空的'); return; }
+    await copySink(t).then(
+        () => toast('原文已复制'),
+        () => toast('复制失败')
+    );
+});
+
+$('btnClear').addEventListener('click', () => {
+    $('src').value = '';
+    clearPanes();
+    showNote('');
+    $('src').focus();
+});
+
+$('btnClose').addEventListener('click', () => invoke('close_trans_window'));
+
+$('btnSetDefault').addEventListener('click', async () => {
+    const v = curTarget();
+    await invoke('set_setting', { key: 'transTarget', value: v }).then(
+        () => {
+            if (window.CONF) window.CONF.transTarget = v;
+            if (CONF) CONF.transTarget = v;
+            toast('已设为默认：' + langLabel(v));
+        },
+        () => toast('设置失败')
+    );
+});
+
+// Ctrl+Enter 直接翻（长文粘贴后不用去够按钮）
+$('src').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); runAll(); }
+});
+
+/* Esc 关窗（和识别结果窗同一个手感）。
+ *   唯一例外：焦点在某个译文框里、且里面有一段选中文字时，第一次 Esc 只取消
+ *   选中（那是编辑时的肌肉记忆），第二次才关窗。 */
+document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    const ta = document.activeElement;
+    if (ta && ta.tagName === 'TEXTAREA' && typeof ta.selectionStart === 'number'
+        && ta.selectionStart !== ta.selectionEnd) {
+        ta.setSelectionRange(ta.selectionStart, ta.selectionStart);
+        return;
+    }
+    invoke('close_trans_window').catch(() => {});
+});
+
+document.addEventListener('contextmenu', (e) => e.preventDefault());
+</script>
+</body>
+</html>

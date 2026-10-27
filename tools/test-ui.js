@@ -52,7 +52,7 @@ const ocrDepWithMissing = () => OCR_DEP_ALL.map((x) => ({ ...x, ok: !OCR_DEP_MIS
 
 /* ------------------------------ 通用环境 ------------------------------ */
 
-function makeEnv(htmlFile, conf) {
+function makeEnv(htmlFile, conf, opts) {
     const calls = [];
     const listeners = new Map();
     // 想让某条命令"失败"就把它加进来 —— 用来验证出错时前端会不会自己退场
@@ -96,6 +96,150 @@ function makeEnv(htmlFile, conf) {
      * setStartupPwd()。 */
     let STARTUP_PWD = 'alpha-111';
     const setStartupPwd = (v) => { STARTUP_PWD = v; };
+
+    /* v1.5.16：翻译四件套的桩。
+     *  · TRANS_SESSION —— 「这次要翻什么、默认翻成什么、哪几家一起翻」，
+     *    模拟横条带过来的一段文字；`plan` 是 Rust 侧 config::trans_plan 的
+     *    输出形状（前端不自己拼名单，详见 trans.html 的注释）；
+     *  · TRANS_LANGS   —— 对齐 Rust trans::LANGS 的头几项（语言表只有 Rust 一份）；
+     *  · TRANS_RUN     —— 真翻一次的返回值；FAIL 非空时改 reject，
+     *    用来测「限流 / 没填 Key」这类错误在界面上的落点；
+     *  · TRANS_ENGS    —— trans_engines_list 的输出（注册表静态信息：
+     *    预置 base/model、要填哪几样）。 */
+    const DEF_PLAN = [
+        { id: 'siliconflow', name: '硅基流动', ready: true },
+        { id: 'deepseek', name: 'DeepSeek', ready: true },
+    ];
+    let TRANS_SESSION = { text: 'Hello there', target: 'en', plan: DEF_PLAN.slice() };
+    let TRANS_LANGS = [
+        { code: 'zh', label: '简体中文' },
+        { code: 'zh-TW', label: '繁體中文' },
+        { code: 'en', label: 'English' },
+        { code: 'ja', label: '日本語' },
+    ];
+    let TRANS_RUN_OK = '你好啊';
+    let TRANS_RUN_FAIL = '';
+    /* 按引擎给不同结果（多引擎时一家成功一家失败才是真实场面）：
+     * key = 引擎 id → { ok: 译文, fail: 错误 }；没登记的走上面那两个默认值。 */
+    let TRANS_RUN_BY = {};
+    /* v1.5.18 流式：`trans_run` 挂起不返回，测试自己往里塞 qs://trans-chunk
+     * 增量、再手工放行 —— 不这样做就测不到"流式过程中界面怎么长"，
+     * 因为桩会立刻 resolve，pane 一秒就变成"已完成"了。 */
+    let TRANS_RUN_DEFER = false;
+    let TRANS_RUN_PENDING = [];
+    let TRANS_ENGS = [
+        {
+            id: 'baidu', name: '百度翻译', kind: 'baidu',
+            canListModels: false, modelRow: false,
+            signup: 'https://fanyi-api.baidu.com/products/api',
+            docs: 'https://fanyi-api.baidu.com/doc/21',
+            needKey: true, needSecret: true, needBase: false, needModel: false,
+            base: 'https://fanyi-api.baidu.com/api/trans/vip/translate', model: '',
+            note: '老牌通用翻译 API：要「APP ID」+「密钥」两样', ready: false,
+        },
+        {
+            id: 'google', name: '谷歌翻译', kind: 'google',
+            canListModels: false, modelRow: false,
+            signup: 'https://console.cloud.google.com/apis/credentials',
+            docs: 'https://cloud.google.com/translate/docs/reference/rest/v2/translate',
+            needKey: true, needSecret: false, needBase: false, needModel: false,
+            base: 'https://translation.googleapis.com/language/translate/v2', model: '',
+            note: 'Google Cloud Translation v2：只要一个 API Key', ready: false,
+        },
+        {
+            id: 'youdao', name: '有道翻译', kind: 'youdao',
+            canListModels: false, modelRow: false,
+            signup: 'https://ai.youdao.com/console/',
+            docs: 'https://ai.youdao.com/DOCSIRMA/html/trans/api/wbfy/index.html',
+            needKey: true, needSecret: true, needBase: false, needModel: false,
+            base: 'https://openapi.youdao.com/api', model: '',
+            note: '有道智云文本翻译：要「应用 ID」+「应用密钥」两样', ready: false,
+        },
+        {
+            id: 'siliconflow', name: '硅基流动', kind: 'openai',
+            canListModels: true, modelRow: true,
+            signup: 'https://cloud.siliconflow.cn/account/ak',
+            docs: 'https://docs.siliconflow.cn/docs/api/chat-completions-post',
+            needKey: true, needBase: false, needModel: false,
+            base: 'https://api.siliconflow.cn/v1', model: 'Qwen/Qwen2.5-7B-Instruct',
+            note: '国内直连、聚合了很多开源模型，小模型有免费额度', ready: true,
+        },
+        {
+            id: 'zhipu', name: '智谱 GLM', kind: 'openai',
+            canListModels: true, modelRow: true,
+            signup: 'https://bigmodel.cn/usercenter/proj-mgmt/apikeys',
+            docs: 'https://docs.bigmodel.cn/cn/guide/develop/openai/introduction',
+            needKey: true, needBase: false, needModel: false,
+            base: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-4-flash',
+            note: 'glm-4-flash 是免费档', ready: true,
+        },
+        {
+            id: 'dashscope', name: '通义千问', kind: 'openai',
+            canListModels: true, modelRow: true,
+            signup: 'https://bailian.console.aliyun.com/cn-beijing/model/settings/api-key',
+            docs: 'https://help.aliyun.com/zh/model-studio/qwen-api',
+            needKey: true, needBase: false, needModel: false,
+            base: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-flash',
+            note: '新用户有免费额度', ready: true,
+        },
+        {
+            id: 'deepseek', name: 'DeepSeek', kind: 'openai',
+            canListModels: true, modelRow: true,
+            signup: 'https://platform.deepseek.com/api_keys',
+            docs: 'https://api-docs.deepseek.com/zh-cn/',
+            needKey: true, needBase: false, needModel: false,
+            base: 'https://api.deepseek.com/v1', model: 'deepseek-chat',
+            note: '翻译质量好、便宜；兼容 OpenAI 接口', ready: true,
+        },
+        {
+            id: 'moonshot', name: 'Kimi', kind: 'openai',
+            canListModels: true, modelRow: true,
+            signup: 'https://platform.kimi.com/console/api-keys',
+            docs: 'https://platform.kimi.com/docs/api/chat',
+            needKey: true, needBase: false, needModel: false,
+            base: 'https://api.moonshot.cn/v1', model: 'moonshot-v1-8k',
+            note: '月之暗面 Kimi', ready: true,
+        },
+        {
+            id: 'ark', name: '火山方舟', kind: 'openai',
+            canListModels: true, modelRow: true,
+            signup: 'https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey',
+            docs: 'https://docs.volcengine.com/docs/ark/api-key',
+            needKey: true, needBase: false, needModel: true,
+            base: 'https://ark.cn-beijing.volces.com/api/v3', model: '',
+            note: '要填「推理接入点 ID」（ep- 开头）或模型名', ready: false,
+        },
+        {
+            id: 'openai', name: 'OpenAI', kind: 'openai',
+            canListModels: true, modelRow: true,
+            signup: 'https://platform.openai.com/api-keys',
+            docs: 'https://platform.openai.com/docs/api-reference/chat',
+            needKey: true, needBase: false, needModel: false,
+            base: 'https://api.openai.com/v1', model: 'gpt-4o-mini',
+            note: '国内网络需要能直连 api.openai.com', ready: true,
+        },
+        {
+            id: 'custom', name: '自定义（OpenAI 兼容）', kind: 'openai',
+            canListModels: true, modelRow: true,
+            signup: 'https://platform.openai.com/docs/api-reference/chat',
+            docs: 'https://platform.openai.com/docs/api-reference/chat/create',
+            needKey: true, needBase: true, needModel: true,
+            base: '', model: '',
+            note: '任何 OpenAI 兼容的接口都行', ready: false,
+        },
+    ];
+    const setTransSession = (s) => {
+        TRANS_SESSION = Object.assign({}, s);
+        if (!Array.isArray(TRANS_SESSION.plan) || !TRANS_SESSION.plan.length) {
+            TRANS_SESSION.plan = DEF_PLAN.slice();
+        }
+    };
+    const setTransRun = (ok, fail) => { TRANS_RUN_OK = ok; TRANS_RUN_FAIL = fail || ''; };
+    /** 只改某一家引擎这一次的返回（另一家照旧）—— 测"一家挂、一家好"。 */
+    const setTransRunFor = (engine, ok, fail) => {
+        TRANS_RUN_BY[engine] = { ok: ok, fail: fail || '' };
+    };
+    const setTransPlan = (list) => { TRANS_SESSION.plan = list; };
 
     /* ⚠ 桩必须装进 beforeParse：region.html 这类页面把脚本**内联**写在 HTML 里，
      * jsdom 会在构造函数的那一刻就执行它，等我们再拿到 dom.window 才补 __TAURI__
@@ -251,6 +395,42 @@ function makeEnv(htmlFile, conf) {
                 // 一键安装 / 教程：真机会去开系统设置页和浏览器，测试里只记调用
                 if (cmd === 'ocr_open_language_settings') return Promise.resolve(null);
                 if (cmd === 'ocr_open_lang_help') return Promise.resolve(null);
+                /* v1.5.16：翻译。⚠ 必须排在下面那条 `return null` 兜底前面 ——
+                 * 不桩的话 trans_langs 回 null，翻译窗的下拉框永远是空的，
+                 * 「切语言重翻」那条路根本走不到。 */
+                if (cmd === 'trans_session') return Promise.resolve(TRANS_SESSION);
+                if (cmd === 'trans_langs') return Promise.resolve(TRANS_LANGS);
+                if (cmd === 'trans_engines_list') return Promise.resolve(TRANS_ENGS);
+                if (cmd === 'trans_run') {
+                    const one = TRANS_RUN_BY[args && args.engine];
+                    const ok = one ? one.ok : TRANS_RUN_OK;
+                    const fail = one ? one.fail : TRANS_RUN_FAIL;
+                    if (fail) return Promise.reject(fail);
+                    if (TRANS_RUN_DEFER) {
+                        return new Promise((resolve) => {
+                            TRANS_RUN_PENDING.push({ resolve, ok, engine: args && args.engine });
+                        });
+                    }
+                    return Promise.resolve(ok);
+                }
+                if (cmd === 'trans_test') {
+                    if (TRANS_RUN_FAIL) return Promise.reject(TRANS_RUN_FAIL);
+                    return Promise.resolve(TRANS_RUN_OK);
+                }
+                /* trans_set_multi 的口径同 src/main.rs：只收注册表里认识的 id、
+                 * 踢掉默认引擎自己、去重，然后**把清洗后的名单回传**（前端拿它
+                 * 回画界面）。这里照抄，免得前端拿到 null 把名单画错。 */
+                if (cmd === 'trans_set_multi') {
+                    const def = (CONF && CONF.transEngine) || 'siliconflow';
+                    const known = TRANS_ENGS.map((e) => e.id);
+                    const cleaned = [];
+                    for (const id of (args && args.engines) || []) {
+                        if (id !== def && known.indexOf(id) >= 0 && cleaned.indexOf(id) < 0) {
+                            cleaned.push(id);
+                        }
+                    }
+                    return Promise.resolve(cleaned);
+                }
                 return Promise.resolve(null);
             },
         },
@@ -288,11 +468,22 @@ function makeEnv(htmlFile, conf) {
     };
     };
 
+    /* ⚠ 页面里的 `<script>` 是**内联**在 HTML 里的，`runScripts:'dangerously'`
+     * 意味着它在 `new JSDOM(...)` 这一刻就会执行 —— 也就是说 boot 已经跑完了。
+     * 所以"先把会话桩设好再让页面启动"这种事**只能在这里做**：
+     * 用 `beforeParse` 抢先设，晚一步（哪怕只是同一 tick 之后的 next line）都没用。
+     *
+     * 以前 boot 第一句是 `await get_config`，多出来的那一拍让测试"事后补设"
+     * 侥幸生效；v1.5.18 把四路 invoke 改成并发后这个侥幸就没了，所以显式给个口子。 */
+    const beforeParse = (win) => {
+        installStubs(win);
+        if (opts && opts.session) setTransSession(opts.session);
+    };
     const dom = new JSDOM(read(htmlFile), {
         runScripts: 'dangerously',
         pretendToBeVisual: true,
         url: 'http://localhost/',
-        beforeParse: installStubs,
+        beforeParse: beforeParse,
     });
     const w = dom.window;
     // 有的路径（比如后面 eval 进来的脚本）会重新读 window，保证桩是同一套
@@ -310,6 +501,23 @@ function makeEnv(htmlFile, conf) {
         setRateState,
         /** 让 `import_with_password` 失败（v1.5.10，测"密码错了"那条路） */
         setImportFail,
+        /** 「这次要翻什么 / 默认翻成什么」（v1.5.16 翻译窗） */
+        setTransSession,
+        /** `trans_run` 返回什么 / 怎么失败（v1.5.16） */
+        setTransRun,
+        /** 只改某一家引擎这一次的返回 —— 测"一家挂、一家好"（v1.5.16 多引擎） */
+        setTransRunFor,
+        /** 换一份参与名单（模拟设置页勾了「同时翻译」后 trans_session 的变化） */
+        setTransPlan,
+        /** 让 `trans_run` 挂住不返回（测流式：先塞增量、再放行） */
+        deferTransRun() { TRANS_RUN_DEFER = true; TRANS_RUN_PENDING = []; },
+        /** 放行所有挂住的 `trans_run`（用桩里记下的 ok 值 resolve） */
+        releaseTransRun() {
+            const list = TRANS_RUN_PENDING;
+            TRANS_RUN_PENDING = [];
+            TRANS_RUN_DEFER = false;
+            for (const p of list) p.resolve(p.ok);
+        },
         /** 换一份配置并触发一次真实的 qs://config 事件（走真实的重渲染路径） */
         pushConfig(next) {
             CONF = next;
@@ -381,6 +589,13 @@ function baseConf(over) {
         barPos: 'above',
         delayMs: 0, filterMode: 'off', filterList: [],
         ocrEnable: true, ocrLang: 'CHN_ENG', ocrAccurate: true,
+        // v1.5.16 翻译：默认引擎 + 「同时翻译」名单 + 各家凭据（键 = 引擎 id）
+        transEnable: true, transEngine: 'siliconflow',
+        transMulti: ['deepseek'], transTarget: 'zh',
+        transCreds: {
+            siliconflow: { key: 'sk-test', base: 'https://api.siliconflow.cn/v1', model: 'Qwen/Qwen2.5-7B-Instruct' },
+            deepseek: { key: 'sk-ds', base: 'https://api.deepseek.com/v1', model: 'deepseek-chat' },
+        },
         barList: ['百度', 'Google', '必应', '百度翻译', '知乎', '哔哩哔哩', '淘宝'],
         sepStyle: 'line',
         customEngines: [],
@@ -1524,18 +1739,41 @@ async function testBar() {
         await flush();
 
         // ① 弹出来就是淡的（待机态），且挂着 noanim（出现那帧不许过渡）
-        hideFn();
-        await flush();
-        showFn({ payload: { text: '淡度', isUrl: false, ocrOnly: false } });
-        await flush();
-        ok('弹出即待机淡度：横条挂着 qs-dim', bar.classList.contains('qs-dim'));
-        ok('  出现那帧掐掉过渡（qs-dim-noanim 挂着）',
-            bar.classList.contains('qs-dim-noanim'));
-        // 等两帧：noanim 应该被摘掉，之后的悬停/离开照常平滑
-        await new Promise((r) => w.requestAnimationFrame(() => w.requestAnimationFrame(r)));
-        await flush();
-        ok('  两帧后摘掉 qs-dim-noanim（之后过渡平滑）',
-            !bar.classList.contains('qs-dim-noanim'));
+        //
+        // ⚠ 这里必须**接管 rAF** 再断言，否则是概率性失败：实现是「挂上
+        //   qs-dim-noanim → 两帧后摘掉」，而 jsdom 的 rAF 走 16ms 定时器，
+        //   flush() 只排 20 个 setImmediate —— 机器一忙 16ms 先到，类已经摘了，
+        //   「挂着」这条就假失败（实测 3 次里挂 1 次）。接管之后第几帧由测试
+        //   自己决定，断言变成确定的。
+        const rafQ = [];
+        const origRaf = w.requestAnimationFrame;
+        const origCaf = w.cancelAnimationFrame;
+        w.requestAnimationFrame = (cb) => { rafQ.push(cb); return rafQ.length; };
+        w.cancelAnimationFrame = () => {};
+        /** 走 n 轮动画帧（实现是 rAF 套 rAF，所以一轮不够） */
+        const drainRaf = (rounds = 4) => {
+            for (let k = 0; k < rounds && rafQ.length; k++) {
+                const batch = rafQ.splice(0, rafQ.length);
+                for (const cb of batch) cb(w.performance.now());
+            }
+        };
+        try {
+            hideFn();
+            await flush();
+            showFn({ payload: { text: '淡度', isUrl: false, ocrOnly: false } });
+            await flush();
+            ok('弹出即待机淡度：横条挂着 qs-dim', bar.classList.contains('qs-dim'));
+            ok('  出现那帧掐掉过渡（qs-dim-noanim 挂着）',
+                bar.classList.contains('qs-dim-noanim'),
+                'class=' + bar.className + ' rafQ=' + rafQ.length);
+            // 走两帧：noanim 应该被摘掉，之后的悬停/离开照常平滑
+            drainRaf();
+            ok('  两帧后摘掉 qs-dim-noanim（之后过渡平滑）',
+                !bar.classList.contains('qs-dim-noanim'));
+        } finally {
+            w.requestAnimationFrame = origRaf;
+            w.cancelAnimationFrame = origCaf;
+        }
 
         // ② 鼠标悬停 → 立刻全不透明（摘 qs-dim）
         bar.dispatchEvent(new w.Event('mouseenter'));
@@ -2149,7 +2387,831 @@ async function testOcrResult() {
     ok('【对照】图片跟随容器缩放（max-height:100%）',
         /\.panes:not\(\.side\)\s*\.shot-body\s+img\s*\{[^}]*max-height:\s*100%/.test(ocrSrc));
 }
+/* ================================================================== */
+/* v1.5.16：翻译（横条按钮 / 翻译窗 / 识别结果窗入口 / 设置栏）          */
+/*                                                                    */
+/* 第二轮起翻译窗是**一家引擎一个文本框**（用户原话：「像 OCR 识别一样  */
+/* 可以同时多选几个翻译引擎，然后同一个页面同时呈现出来」），所以这里    */
+/* 的用例从"一个原文框 + 一个译文框"改成"一个原文框 + N 个译文框"。     */
+/* ================================================================== */
 
+/** 取翻译窗里某一家的译文框句柄。 */
+function tpPane(w, id) {
+    return w.document.querySelector('#tps .tp[data-eng="' + id + '"]');
+}
+function tpTa(w, id) {
+    const p = tpPane(w, id);
+    return p ? p.querySelector('textarea') : null;
+}
+
+async function testTrans() {
+    console.log('');
+    console.log('=== 翻译窗（ui/trans.html）：一家一个文本框 ===');
+
+    /* ① 冷启动：带一段文字 + 两家一起翻 → 自动各发一次，两家译文各进各的框。
+     *   这条是用户的默认姿势：横条点「译」→ 打开就看到译文，不用再点一次。 */
+    {
+        const env = makeEnv('ui/trans.html', baseConf({ transTarget: 'en' }));
+        runScripts(env, ['ui/shared.js']);
+        await flush();
+        await new Promise((r) => setTimeout(r, 80));
+        const { w } = env;
+        const $ = (id) => w.document.getElementById(id);
+
+        ok('翻译窗有原文 / 语言下拉 / 翻译按钮', !!$('src') && !!$('target') && !!$('btnGo'));
+        ok('  译文区是空的容器（按参与名单由 JS 建框）', !!$('tps'));
+        ok('原文框带进了横条那段文字', $('src').value === 'Hello there', $('src').value);
+
+        // 参与名单来自 trans_session 的 plan（Rust 侧 config::trans_plan 的权威输出）
+        const panes = [...$('tps').querySelectorAll('.tp')];
+        ok('按 plan 建了两家译文框（siliconflow / deepseek）',
+            panes.length === 2
+            && panes.map((p) => p.dataset.eng).join(',') === 'siliconflow,deepseek',
+            panes.map((p) => p.dataset.eng).join(','));
+        ok('  每个框顶上挂了引擎名和模型',
+            /硅基流动/.test(panes[0].textContent)
+            && /Qwen\/Qwen2\.5-7B-Instruct/.test(panes[0].textContent)
+            && /DeepSeek/.test(panes[1].textContent),
+            panes.map((p) => p.querySelector('.tp-cap').textContent).join(' | '));
+        ok('  顶部摘要写明几家一起翻、几家就绪',
+            $('engCap').textContent === '2 家一起翻 · 2 家就绪', $('engCap').textContent);
+
+        // 两家各发一次 trans_run（并行），带的引擎 id 不一样、文字和目标语言一样
+        const runs = env.cmd('trans_run');
+        ok('有文字时打开翻译窗会自动翻（每家各一次）',
+            runs.length === 2, JSON.stringify(runs.map((r) => r.args)));
+        ok('  两次请求各带自己家的引擎 id',
+            runs.length === 2
+            && runs[0].args.engine === 'siliconflow' && runs[1].args.engine === 'deepseek',
+            JSON.stringify(runs.map((r) => r.args.engine)));
+        ok('  两次请求的文字与目标语言一致',
+            runs.every((r) => r.args.text === 'Hello there' && r.args.target === 'en'),
+            JSON.stringify(runs.map((r) => r.args)));
+        ok('两家译文各落进各自的框（不互相覆盖）',
+            tpTa(w, 'siliconflow').value === '你好啊' && tpTa(w, 'deepseek').value === '你好啊',
+            tpTa(w, 'siliconflow').value + ' / ' + tpTa(w, 'deepseek').value);
+        ok('  两家的状态都是「已完成」',
+            [...$('tps').querySelectorAll('.tp-st')].every((s) => s.textContent === '已完成'));
+        ok('译文标题标出目标语言', $('dstLang').textContent.includes('English'),
+            $('dstLang').textContent);
+
+        // 语言下拉由 trans_langs 填充，且选中 session 里的目标语言
+        const opts = [...$('target').querySelectorAll('option')].map((o) => o.value);
+        ok('语言下拉由后端语言表填充（Rust 一份，界面不自己维护）',
+            opts.join(',') === 'zh,zh-TW,en,ja', opts.join(','));
+        ok('  选中项跟着 session 的 target', $('target').value === 'en', $('target').value);
+        // 页面首帧画完通知 Rust 显示（hidden 建窗那条路）—— ⚠ 必须在下面
+        // `env.calls.length = 0` 之前查：boot 时的调用记录会被后续交互清掉。
+        ok('页面就绪后通知 Rust 显示窗口（hidden 建窗那条路）', !!env.lastCmd('trans_ready'),
+            JSON.stringify(env.calls.map((c) => c.cmd)));
+
+        // 切语言 → 两家都按新语言重翻（用户要求：可切目标语言）
+        env.calls.length = 0;
+        $('target').value = 'ja';
+        $('target').dispatchEvent(new w.Event('change', { bubbles: true }));
+        await flush();
+        await new Promise((r) => setTimeout(r, 60));
+        const runs2 = env.cmd('trans_run');
+        ok('切目标语言时两家都按新语言重翻',
+            runs2.length === 2 && runs2.every((r) => r.args.target === 'ja'),
+            JSON.stringify(runs2.map((r) => r.args.target)));
+        ok('  译文标题跟着换成日本語', $('dstLang').textContent.includes('日本語'),
+            $('dstLang').textContent);
+
+        // 复制译文：作用于「活动框」（用户刚点过的那一家）
+        env.calls.length = 0;
+        $('btnCopy').dispatchEvent(new w.Event('click', { bubbles: true }));
+        await flush();
+        let cp = env.lastCmd('copy_text');
+        ok('没点过任何框时「复制译文」复制第一家', !!cp && cp.args.text === '你好啊',
+            JSON.stringify(cp && cp.args));
+        // 点一下第二家，再复制 → 复制的就是第二家那一格
+        const ta2 = tpTa(w, 'deepseek');
+        ta2.value = 'SECOND-BOX-TEXT';
+        ta2.dispatchEvent(new w.Event('pointerdown', { bubbles: true }));
+        ta2.dispatchEvent(new w.Event('focus', { bubbles: true }));
+        env.calls.length = 0;
+        $('btnCopy').dispatchEvent(new w.Event('click', { bubbles: true }));
+        await flush();
+        cp = env.lastCmd('copy_text');
+        ok('  点过哪一家，「复制译文」就复制哪一家',
+            !!cp && cp.args.text === 'SECOND-BOX-TEXT', JSON.stringify(cp && cp.args));
+
+        // 复制原文 / 设为默认 / 关闭 / Ctrl+Enter
+        env.calls.length = 0;
+        $('btnCopySrc').dispatchEvent(new w.Event('click', { bubbles: true }));
+        await flush();
+        const cps = env.lastCmd('copy_text');
+        ok('「复制原文」把原文递进剪贴板命令',
+            !!cps && cps.args.text === 'Hello there', JSON.stringify(cps && cps.args));
+        $('btnSetDefault').dispatchEvent(new w.Event('click', { bubbles: true }));
+        await flush();
+        const sd = env.lastCmd('set_setting');
+        ok('「设为默认」把当前语言写回配置',
+            !!sd && sd.args.key === 'transTarget' && sd.args.value === 'ja',
+            JSON.stringify(sd && sd.args));
+        $('btnClose').dispatchEvent(new w.Event('click', { bubbles: true }));
+        await flush();
+        ok('「关闭」调 close_trans_window', !!env.lastCmd('close_trans_window'));
+        env.calls.length = 0;
+        $('src').dispatchEvent(new w.KeyboardEvent('keydown', {
+            key: 'Enter', ctrlKey: true, bubbles: true, cancelable: true,
+        }));
+        await flush();
+        ok('Ctrl+Enter 直接翻译（两家都翻）', env.cmd('trans_run').length === 2,
+            JSON.stringify(env.calls.map((c) => c.cmd)));
+    }
+
+    /* ①b 流式翻译（v1.5.18）：模型边吐边显示，最后再拿权威结果覆盖。
+     *
+     *  三件事必须成立，少一件用户就会看到怪东西：
+     *    · 增量只认**当前轮**的 round（重翻时旧连接还在吐，不能糊到一起）；
+     *    · 增量按到达顺序追加到**对应那一家**的框，别家不动；
+     *    · 整段回来后覆盖成 Rust 给的结果（剥围栏 / 去空白只在全量时才准）。 */
+    {
+        const env = makeEnv('ui/trans.html', baseConf({ transTarget: 'zh' }));
+        runScripts(env, ['ui/shared.js']);
+        const { w } = env;
+        const $ = (id) => w.document.getElementById(id);
+
+        env.deferTransRun();
+        await flush();
+        await new Promise((r) => setTimeout(r, 60));
+
+        const run = env.lastCmd('trans_run');
+        ok('trans_run 带上了本轮 round', !!run && typeof run.args.round === 'string'
+            && run.args.round.length > 0, JSON.stringify(run && run.args));
+
+        const round = run && run.args.round;
+        const paneOf = (id) => w.document.querySelector('.tp[data-eng="' + id + '"]');
+        const fire = (engine, delta, r) => {
+            const cb = env.listeners.get('qs://trans-chunk');
+            ok('  前端订阅了 qs://trans-chunk', !!cb);
+            if (cb) cb({ payload: { engine: engine, delta: delta, round: r === undefined ? round : r } });
+        };
+
+        fire('siliconflow', '你');
+        await flush();
+        const p1 = paneOf('siliconflow');
+        ok('增量先贴进对应那一家', p1 && p1.querySelector('textarea').value === '你',
+            JSON.stringify(p1 && p1.querySelector('textarea').value));
+        ok('  流式期间状态是「翻译中…」', p1.querySelector('.tp-st').textContent === '翻译中…',
+            p1.querySelector('.tp-st').textContent);
+        ok('  别家不受影响（还是等待中）',
+            paneOf('deepseek').querySelector('textarea').value === '',
+            JSON.stringify(paneOf('deepseek').querySelector('textarea').value));
+
+        fire('siliconflow', '好');
+        fire('siliconflow', '啊');
+        await flush();
+        ok('增量按顺序累加', p1.querySelector('textarea').value === '你好啊',
+            JSON.stringify(p1.querySelector('textarea').value));
+
+        // 上一轮的尾货：round 对不上，必须丢掉
+        fire('siliconflow', '【旧轮次】', 'r-old');
+        await flush();
+        ok('旧 round 的增量被丢掉（不会糊成两份）',
+            p1.querySelector('textarea').value === '你好啊',
+            JSON.stringify(p1.querySelector('textarea').value));
+
+        // 整段回来：覆盖成权威结果、状态收尾
+        env.releaseTransRun();
+        await flush();
+        await new Promise((r) => setTimeout(r, 60));
+        ok('收尾用权威结果覆盖（剥围栏/去空白只在全量时才准）',
+            p1.querySelector('textarea').value === '你好啊',
+            JSON.stringify(p1.querySelector('textarea').value));
+        ok('  状态变成「已完成」', p1.querySelector('.tp-st').textContent === '已完成',
+            p1.querySelector('.tp-st').textContent);
+        ok('  按钮恢复可点', $('btnGo').disabled === false);
+    }
+
+    /* ② 一家失败一家成功：失败的只在**它自己那一格**报错，别家的译文照样出来。
+     *   401 / 429 是最常见的两种失败，界面必须说人话、还不能连坐。 */
+    {
+        const env = makeEnv('ui/trans.html', baseConf({ transTarget: 'zh' }));
+        runScripts(env, ['ui/shared.js']);
+        env.setTransRunFor('deepseek', '', 'DeepSeek：API Key 不对或已失效（401）—— 去 platform.deepseek.com 重新创建一个');
+        await flush();
+        await new Promise((r) => setTimeout(r, 80));
+        const { w } = env;
+        const $ = (id) => w.document.getElementById(id);
+        ok('成功那家的译文正常落进它自己的框',
+            tpTa(w, 'siliconflow').value === '你好啊', tpTa(w, 'siliconflow').value);
+        ok('失败那家的框是空的、不塞别家的译文',
+            tpTa(w, 'deepseek').value === '', tpTa(w, 'deepseek').value);
+        const badPane = tpPane(w, 'deepseek');
+        ok('  失败那一家状态标红、说明贴在它自己框下面',
+            badPane.querySelector('.tp-st').textContent === '失败'
+            && badPane.querySelector('.tp-st').classList.contains('err')
+            && badPane.querySelector('.tp-note').hidden === false
+            && badPane.querySelector('.tp-note').textContent.includes('401'),
+            badPane.querySelector('.tp-note').textContent);
+        ok('  成功那一家没有错误说明、状态是已完成',
+            tpPane(w, 'siliconflow').querySelector('.tp-note').hidden === true
+            && tpPane(w, 'siliconflow').querySelector('.tp-st').textContent === '已完成');
+        ok('只有一家失败时汇总条显示这一家的原因',
+            $('note').hidden === false && $('note').textContent.includes('401'),
+            $('note').textContent);
+        ok('  说明条用出错样式', $('note').classList.contains('err'));
+        ok('  失败后「翻译」按钮恢复可点（不会卡死）', $('btnGo').disabled === false);
+        env.setTransRunFor('deepseek', '你好啊', '');
+    }
+
+    /* ③ 两家全失败：汇总条说清"几家挂了 + 第一家的原因"，各框自己那格也有详情。 */
+    {
+        const env = makeEnv('ui/trans.html', baseConf({ transTarget: 'zh' }));
+        runScripts(env, ['ui/shared.js']);
+        env.setTransRun('', '请求太频繁，或者本月额度用完了（429）—— 过一会儿再试');
+        await flush();
+        await new Promise((r) => setTimeout(r, 80));
+        const { w } = env;
+        const $ = (id) => w.document.getElementById(id);
+        ok('两家都挂时汇总条写明几家失败和第一家的原因',
+            $('note').hidden === false
+            && /^2 家没翻出来，第一家是：/.test($('note').textContent)
+            && $('note').textContent.includes('429'),
+            $('note').textContent);
+        ok('  每一家自己那格也都有失败原因',
+            [...$('tps').querySelectorAll('.tp-note')].every((n) => !n.hidden && n.textContent.includes('429')));
+        ok('  两个译文框都不留旧译文',
+            tpTa(w, 'siliconflow').value === '' && tpTa(w, 'deepseek').value === '');
+        env.setTransRun('你好啊', '');
+    }
+
+    /* ④ 没文字：不自动翻，空着等用户自己粘贴（比弹一句"先选文字"省事）。
+     *   点「翻译」时也只提示一句，不发请求。 */
+    {
+        const env = makeEnv('ui/trans.html', baseConf({ transTarget: 'zh' }),
+            { session: { text: '', target: 'zh' } });
+        runScripts(env, ['ui/shared.js']);
+        await flush();
+        await new Promise((r) => setTimeout(r, 80));
+        const { w } = env;
+        const $ = (id) => w.document.getElementById(id);
+        ok('没有文字时打开翻译窗不自动翻', !env.lastCmd('trans_run'),
+            JSON.stringify({ src: $('src').value, calls: env.calls.map((c) => c.cmd) }));
+        ok('  原文框是空的（等用户粘贴）', $('src').value === '');
+        env.calls.length = 0;
+        $('btnGo').dispatchEvent(new w.Event('click', { bubbles: true }));
+        await flush();
+        ok('  空着点「翻译」不发请求、只提示一句', !env.lastCmd('trans_run'));
+        ok('    toast 提示"没有可翻译的文字"', $('toast').textContent === '没有可翻译的文字',
+            $('toast').textContent);
+    }
+
+    /* ⑤ 设置页改了参与名单（换默认引擎 / 勾同时翻译）→ 翻译窗重建框并重翻。
+     *   用户在设置里动一下、翻译窗开着，必须马上反映新名单。 */
+    {
+        const env = makeEnv('ui/trans.html', baseConf({ transTarget: 'zh' }));
+        runScripts(env, ['ui/shared.js']);
+        await flush();
+        await new Promise((r) => setTimeout(r, 80));
+        const { w } = env;
+        const $ = (id) => w.document.getElementById(id);
+        ok('初始是两家并排', $('tps').querySelectorAll('.tp').length === 2);
+
+        // 换成只留 deepseek 一家（设置里把默认引擎改成它、同时翻译清空）
+        env.setTransPlan([{ id: 'deepseek', name: 'DeepSeek', ready: true }]);
+        env.pushConfig(baseConf({ transTarget: 'zh', transEngine: 'deepseek', transMulti: [] }));
+        await flush();
+        await new Promise((r) => setTimeout(r, 60));
+        const panes = [...$('tps').querySelectorAll('.tp')];
+        ok('名单变成一家时译文区重建成一个框',
+            panes.length === 1 && panes[0].dataset.eng === 'deepseek',
+            panes.map((p) => p.dataset.eng).join(','));
+        ok('  重建后自动按新名单重翻', env.cmd('trans_run').some((r) => r.args.engine === 'deepseek'));
+        ok('  顶部摘要变成单引擎口径', $('engCap').textContent === 'DeepSeek', $('engCap').textContent);
+    }
+
+    /* ⑥ 没配任何引擎时：不发请求，说清去哪儿配（不静默失败）。 */
+    {
+        const env = makeEnv('ui/trans.html', baseConf({ transTarget: 'zh' }),
+            { session: { text: 'Hello', target: 'zh', plan: [] } });
+        runScripts(env, ['ui/shared.js']);
+        env.pushConfig(baseConf({ transTarget: 'zh', transEngine: '', transMulti: [] }));
+        await flush();
+        await new Promise((r) => setTimeout(r, 80));
+        const { w } = env;
+        const $ = (id) => w.document.getElementById(id);
+        // plan 为空 → 前端按 CONF 兜底；CONF 里默认引擎也是空 → 落 siliconflow，
+        // 所以这里断言的是"不会一个框都不建、也不会不发请求"
+        ok('名单为空时也有框可翻（兜底不白屏）', $('tps').querySelectorAll('.tp').length >= 1);
+    }
+
+    /* ⑧ 原文框的三个问题（2026-10-27 用户报）：
+     *     1. 缺少圆角边框；
+     *     2. 固定尺寸，不能拖拽调宽高；
+     *     3. 内容被设成只读，不能直接编辑。
+     *   根因都在 ui/trans.html 的样式/结构上：
+     *     1&2 —— `.pane-box` 里从来没给 `#src` 写过样式规则（圆角/边框只写在
+     *            译文区 `.tp textarea` 上），而 `.pane-box` 又是 `flex:1 1 0`，
+     *            高度被 flex 锁死，浏览器原生的拖拽把手形同虚设；
+     *     3   —— `html, body { user-select: none }` 被 textarea **继承**
+     *            （只有译文区 `.tp textarea` 显式开了 `user-select: text`），
+     *            于是原文框既选不中也编辑不了，看着像被设成只读。 */
+    {
+        const env = makeEnv('ui/trans.html', baseConf({ transTarget: 'zh' }));
+        runScripts(env, ['ui/shared.js']);
+        await flush();
+        await new Promise((r) => setTimeout(r, 80));
+        const { w } = env;
+        const $ = (id) => w.document.getElementById(id);
+        const src = $('src');
+
+        // ① 圆角 + 边框
+        //    注意：jsdom 不解析 `border: 1px solid var(--line)` 这种**带 var()
+        //    的简写**（译文区 .tp textarea 同款写法在 jsdom 里也算成 none），
+        //    所以「边框」这条改成 ①a 比对译文区（同一套 = 同一份声明）、
+        //    ①b 直接查 CSS 源里有没有那行声明 —— 后者才是真正在断言。
+        const cs = w.getComputedStyle(src);
+        ok('原文框有圆角边框（不再是浏览器默认的直角灰框）',
+            cs.borderRadius && cs.borderRadius !== '0px' && cs.borderRadius !== '0%',
+            'border-radius=' + cs.borderRadius);
+        {
+            // 找译文区的框（如果这一轮没建译文框就现建一个）
+            let tpTa = w.document.querySelector('.tp textarea');
+            if (!tpTa) {
+                const tp = w.document.createElement('div');
+                tp.className = 'tp';
+                tp.innerHTML = '<div class="tp-cap"></div><textarea></textarea>';
+                w.document.getElementById('tps').appendChild(tp);
+                tpTa = tp.querySelector('textarea');
+            }
+            const csTp = w.getComputedStyle(tpTa);
+            ok('  圆角跟译文区一模一样（同一套视觉）',
+                cs.borderRadius === csTp.borderRadius,
+                cs.borderRadius + ' vs ' + csTp.borderRadius);
+
+            const html = read('ui/trans.html');
+            const srcRule = (html.match(/#src\s*\{([^}]*)\}/) || ['', ''])[1];
+            ok('  CSS 源里 #src 声明了 1px 实线边框',
+                /border:\s*1px\s+solid/.test(srcRule),
+                (srcRule.match(/border[^;]*/) || ['(没有)'])[0].trim());
+            ok('  CSS 源里 #src 声明了圆角 10px',
+                /border-radius:\s*10px/.test(srcRule),
+                (srcRule.match(/border-radius[^;]*/) || ['(没有)'])[0].trim());
+        }
+
+        // ② 可拖拽调宽高
+        ok('原文框可以拖拽调整宽高（resize: both）',
+            cs.resize === 'both', 'resize=' + cs.resize);
+        ok('  有明确的高度（不是被 flex 撑出来的 auto）',
+            cs.height && cs.height !== 'auto' && parseFloat(cs.height) > 0,
+            'height=' + cs.height);
+
+        // ③ 可编辑
+        ok('原文框不是只读（没有 readonly / disabled）',
+            src.readOnly === false && src.disabled === false,
+            'readOnly=' + src.readOnly + ' disabled=' + src.disabled);
+        ok('  文字可以被选中（user-select: text，不是继承来的 none）',
+            cs.userSelect === 'text' || cs.webkitUserSelect === 'text',
+            'user-select=' + cs.userSelect);
+
+        // ③ 续：编辑之后能正常触发翻译流程
+        src.value = '我改过的文字';
+        src.dispatchEvent(new w.Event('input', { bubbles: true }));
+        env.calls.length = 0;
+        $('btnGo').dispatchEvent(new w.Event('click', { bubbles: true }));
+        await flush();
+        const tr = env.cmd('trans_run');
+        ok('编辑后的新文字被送去翻译（拿的是此刻框里的内容）',
+            tr.length > 0 && tr[0].args.text === '我改过的文字',
+            JSON.stringify(tr.map((r) => r.args.text)));
+    }
+
+    console.log('');
+    console.log('=== 翻译窗：老牌引擎缺副凭据时的提示 ===');
+    /* 百度 / 有道 的凭据是「主 + 副」成对的。只填了 APP ID 时，pane 上必须
+     * 说清「缺密钥」—— 笼统一句「未就绪」会让人把 APP ID 反复检查半天。
+     * 这条对应 Rust 侧 trans_creds_ready 的 need_secret 判定，两边口径要一致。 */
+    {
+        const env = makeEnv('ui/trans.html', baseConf({
+            transEngine: 'baidu', transMulti: [], transTarget: 'zh',
+            transCreds: { baidu: { key: '2024bdappid' } },   // 只有 APP ID，没有密钥
+        }), { session: { text: '', target: 'zh' } });
+        env.setTransPlan([{ id: 'baidu', name: '百度翻译', ready: false }]);
+        runScripts(env, ['ui/shared.js']);
+        await flush();
+        await new Promise((r) => setTimeout(r, 60));
+        const st = env.w.document.querySelector('.tp .tp-st');
+        ok('只填 APP ID 没填密钥时，提示「缺密钥」（不是笼统的「未就绪」）',
+            !!st && st.textContent === '缺密钥', st && st.textContent);
+
+        // 补上密钥之后（全新的界面 + 后端已认可 ready）：状态该是「等待中…」
+        const env2 = makeEnv('ui/trans.html', baseConf({
+            transEngine: 'baidu', transMulti: [], transTarget: 'zh',
+            transCreds: { baidu: { key: '2024bdappid', secret: 's3cret' } },
+        }), { session: { text: '', target: 'zh' } });
+        env2.setTransPlan([{ id: 'baidu', name: '百度翻译', ready: true }]);
+        runScripts(env2, ['ui/shared.js']);
+        await flush();
+        await new Promise((r) => setTimeout(r, 60));
+        const st2 = env2.w.document.querySelector('.tp .tp-st');
+        ok('  填齐之后状态是「等待中…」，不再报缺凭据',
+            !!st2 && st2.textContent === '等待中…', st2 && st2.textContent);
+    }
+
+    console.log('');
+    console.log('=== 识别结果窗的翻译入口 ===');
+    /* ⑦ OCR 结果窗：「翻译」按钮把识别文字递进 trans_start。
+     *   划了选区就只翻选区（和「复制」同一个口径）。 */
+    {
+        const env = makeEnv('ui/ocr.html', baseConf({ barList: ['百度', '@ocr', 'Google'] }));
+        runScripts(env, ['ui/shared.js']);
+        await flush();
+        const { w } = env;
+        const $ = (id) => w.document.getElementById(id);
+        const b = $('btnTrans');
+        ok('识别结果窗有「翻译」按钮', !!b);
+        ok('  默认显示（翻译开着）', b && b.hidden === false);
+        $('text').value = 'Hello from OCR';
+        env.calls.length = 0;
+        b.dispatchEvent(new w.Event('click', { bubbles: true }));
+        await flush();
+        const ts = env.lastCmd('trans_start');
+        ok('点「翻译」调 trans_start 并带上识别文字',
+            !!ts && ts.args.text === 'Hello from OCR', JSON.stringify(ts && ts.args));
+        const ta = $('text');
+        ta.value = '一二三四五六';
+        ta.selectionStart = 0;
+        ta.selectionEnd = 2;
+        env.calls.length = 0;
+        b.dispatchEvent(new w.Event('click', { bubbles: true }));
+        await flush();
+        const ts2 = env.lastCmd('trans_start');
+        ok('  划了选区时只翻选区（和「复制」同口径）',
+            !!ts2 && ts2.args.text === '一二', JSON.stringify(ts2 && ts2.args));
+        env.pushConfig(baseConf({ barList: ['百度', '@ocr', 'Google'], transEnable: false }));
+        await flush();
+        ok('翻译开关关掉后「翻译」按钮隐藏', $('btnTrans').hidden === true);
+        env.pushConfig(baseConf({ barList: ['百度', '@ocr', 'Google'], transEnable: true }));
+        await flush();
+        ok('  开关打开后按钮回来', $('btnTrans').hidden === false);
+    }
+
+    console.log('');
+    console.log('=== 设置页：翻译栏（多引擎） ===');
+    /* ⑧ 开关 / 引擎列表 / 凭据 / 同时翻译 / 语言下拉 / 加进横条 / 申请 Key 链接。
+     *   整套对齐「文字识别」那一栏：名单来自后端注册表，点一行 = 设为默认引擎，
+     *   凭据按注册表的 need_* 生成、走 trans_set_cred 落盘。 */
+    {
+        const env = makeEnv('ui/settings.html', baseConf({
+            barList: ['百度', 'Google'],
+            transEnable: true, transEngine: 'siliconflow', transMulti: ['deepseek'],
+            transTarget: 'ja',
+        }));
+        runScripts(env, ['ui/shared.js', 'ui/settings.js']);
+        await flush();
+        await new Promise((r) => setTimeout(r, 60));
+        const { w } = env;
+        const $ = (id) => w.document.getElementById(id);
+
+        ok('设置页有「启用翻译」开关', !!$('s-transEnable'));
+        ok('  开关回填配置里的值', $('s-transEnable').checked === true);
+        $('s-transEnable').checked = false;
+        $('s-transEnable').dispatchEvent(new w.Event('change', { bubbles: true }));
+        await flush();
+        const sw = env.lastCmd('set_setting');
+        ok('  切换开关写配置',
+            !!sw && sw.args.key === 'transEnable' && sw.args.value === false,
+            JSON.stringify(sw && sw.args));
+        $('s-transEnable').checked = true;
+
+        /* 引擎列表：11 家都在（8 家 OpenAI 兼容 + 百度/谷歌/有道三家老牌），
+         * 默认那家展开。⚠ 别按位置索引写死 —— 注册表一改位置就全错位，
+         * 一律按 dataset.id 找。 */
+        const rows = [...$('w-transEngList').querySelectorAll('.eng-row')];
+        const rowOf = (id) => rows.find((r) => r.dataset.id === id);
+        ok('翻译引擎列表由后端注册表渲染（11 家）', rows.length === 11,
+            rows.map((r) => r.dataset.id).join(','));
+        ok('  三家老牌都在名单里',
+            !!rowOf('baidu') && !!rowOf('google') && !!rowOf('youdao'));
+        ok('  默认引擎那一行是选中 + 展开态',
+            rowOf('siliconflow').classList.contains('on')
+            && rowOf('siliconflow').classList.contains('open'));
+        ok('  展开的凭据块挂在默认那一行下面',
+            !!$('w-transBody') && $('w-transBody').parentElement === rowOf('siliconflow'));
+        ok('  「同时翻译」名单里的那家带徽标',
+            /同时翻译/.test(rowOf('deepseek').textContent), rowOf('deepseek').textContent.trim());
+        ok('  行上有「?」和「文档」按钮',
+            !!rowOf('siliconflow').querySelector('.eng-help')
+            && !!rowOf('siliconflow').querySelector('.eng-help.doc'));
+        ok('  每家引擎旁边都有「?」和「文档」两颗按钮',
+            rows.every((r) => !!r.querySelector('.eng-help')
+                && !!r.querySelector('.eng-help.doc')));
+
+        // 「同时翻译」多选：默认引擎不在这里（它一定参与），只列另外几家
+        const chips0 = [...$('w-transMultiBox').querySelectorAll('.multi-chip')];
+        const chipOf = (id) => chips0.find((c) => c.dataset.id === id);
+        ok('「同时翻译」只列默认引擎之外的几家（11 家里排掉默认那家）',
+            chips0.length === 10 && chipOf('baidu')
+            && chips0.every((c) => c.dataset.id !== 'siliconflow'),
+            chips0.map((c) => c.dataset.id).join(','));
+        ok('  配置里勾中的那家是点亮态',
+            chipOf('deepseek').classList.contains('on'),
+            chips0.map((c) => c.dataset.id + (c.classList.contains('on') ? '(on)' : '')).join(','));
+
+        // 点另一行 = 设为默认引擎
+        env.calls.length = 0;
+        rowOf('deepseek').dispatchEvent(new w.Event('click', { bubbles: true }));
+        await flush();
+        const pe = env.lastCmd('set_setting');
+        ok('点另一行 = 设为默认引擎',
+            !!pe && pe.args.key === 'transEngine' && pe.args.value === 'deepseek',
+            JSON.stringify(pe && pe.args));
+        /* 不变式：默认引擎不留在「同时翻译」名单里（它一定参与，勾着是条死
+         * 配置）。前端把整份名单发给后端，后端踢掉默认引擎、去重后**回传**，
+         * 前端拿回传值覆盖本地 —— 所以发出去的是 ['deepseek']，界面变成全灭。 */
+        const dm = env.lastCmd('trans_set_multi');
+        ok('  新默认引擎原来在同时翻译名单里 → 后端顺手剔掉',
+            !!dm && JSON.stringify(dm.args.engines) === JSON.stringify(['deepseek']),
+            JSON.stringify(dm && dm.args));
+        const chips1 = [...$('w-transMultiBox').querySelectorAll('.multi-chip')];
+        ok('  回传的名单生效：新默认引擎自己消失、原来勾它的那一格也灭了',
+            chips1.length === 10 && !!chips1.find((c) => c.dataset.id === 'baidu')
+            && chips1.every((c) => c.dataset.id !== 'deepseek')
+            && !chips1.some((c) => c.classList.contains('on')),
+            chips1.map((c) => c.dataset.id + (c.classList.contains('on') ? '(on)' : '')).join(','));
+
+        // 凭据：Key 是密码框（带眼睛）、模型框 + 拉取模型、测试连接
+        const cred = $('w-transCredBox');
+        ok('凭据区有 API Key 密码框', !!cred.querySelector('input[data-field="key"]')
+            && cred.querySelector('input[data-field="key"]').type === 'password');
+        eq('  Key 框回填配置里这一家的值',
+            cred.querySelector('input[data-field="key"]').value, 'sk-ds');
+        ok('  密码框带「显示 / 隐藏」眼睛', !!cred.querySelector('.cred-eye-btn'));
+        ok('凭据区有模型框和「拉取模型」按钮',
+            !!cred.querySelector('input[data-field="model"]') && !!cred.querySelector('.cred-pull'));
+        eq('  模型框回填配置里这一家的值',
+            cred.querySelector('input[data-field="model"]').value, 'deepseek-chat');
+        ok('凭据区有「测试连接」按钮', !!cred.querySelector('.cred-foot .dep-btn'));
+
+        // 改 Key → trans_set_cred 三样一起发。
+        // base 发空串：DeepSeek 的 base 是注册表预置的（needBase=false），
+        // 凭据区压根不渲染接口地址那一栏，get('base') 自然取到 ''。
+        env.calls.length = 0;
+        const keyInp = cred.querySelector('input[data-field="key"]');
+        keyInp.value = 'sk-new';
+        keyInp.dispatchEvent(new w.Event('change', { bubbles: true }));
+        await flush();
+        const sc = env.lastCmd('trans_set_cred');
+        ok('改 Key 走 trans_set_cred（按引擎 id 存）',
+            !!sc && sc.args.engine === 'deepseek' && sc.args.key === 'sk-new'
+            && sc.args.base === '' && sc.args.model === 'deepseek-chat',
+            JSON.stringify(sc && sc.args));
+
+        // 测试连接 → trans_test 带引擎 id，结果写进状态行
+        env.calls.length = 0;
+        cred.querySelector('.cred-foot .dep-btn').dispatchEvent(new w.Event('click', { bubbles: true }));
+        await flush();
+        await new Promise((r) => setTimeout(r, 30));
+        const tt = env.lastCmd('trans_test');
+        ok('「测试连接」调 trans_test 并带上当前引擎',
+            !!tt && tt.args.engine === 'deepseek', JSON.stringify(tt && tt.args));
+        ok('  测试结果写进状态行（成功）',
+            cred.querySelector('.cred-status').classList.contains('ok')
+            && cred.querySelector('.cred-status').textContent.includes('你好啊'),
+            cred.querySelector('.cred-status').textContent);
+
+        // 拉模型 → trans_list_models，回来后在凭据区陈列出来、点一下选用
+        env.calls.length = 0;
+        cred.querySelector('.cred-pull').dispatchEvent(new w.Event('click', { bubbles: true }));
+        await flush();
+        ok('「拉取模型」调 trans_list_models 并带上引擎', !!env.lastCmd('trans_list_models'),
+            JSON.stringify(env.calls.map((c) => c.cmd)));
+        const ml = env.listeners.get('qs://trans-models');
+        ok('  后端经 qs://trans-models 把模型表推回来', !!ml);
+        if (ml) {
+            // 后端已按「能对话」滤过（trans_list_models 的口径），前端原样陈列
+            ml({ payload: { engine: 'deepseek', ok: true, msg: '拉到 2 个对话模型', models: [{ id: 'deepseek-chat', chat: true }, { id: 'deepseek-reasoner', chat: true }] } });
+            await flush();
+            const items = [...cred.querySelectorAll('.cred-model-item')];
+            ok('  拉到的模型陈列出来', items.length === 2,
+                items.map((i) => i.textContent).join(' | '));
+            ok('    对话模型带徽标', items.length === 2
+                && !!items[0].querySelector('.v-badge') && !!items[1].querySelector('.v-badge'),
+                items.map((i) => i.textContent).join(' | '));
+            env.calls.length = 0;
+            items[1].dispatchEvent(new w.Event('click', { bubbles: true }));
+            await flush();
+            eq('    点一个模型就写回模型框', cred.querySelector('input[data-field="model"]').value,
+                'deepseek-reasoner');
+            ok('      并顺手落盘', !!env.lastCmd('trans_set_cred'),
+                JSON.stringify(env.calls.map((c) => c.cmd)));
+        }
+
+        // 「同时翻译」多选：不含默认引擎；勾一家 → trans_set_multi 带回清洗后的名单
+        const chips = [...$('w-transMultiBox').querySelectorAll('.multi-chip')];
+        ok('  再点开时名单还是默认引擎之外的那几家',
+            chips.length === 10 && !!chips.find((c) => c.dataset.id === 'baidu'),
+            chips.map((c) => c.dataset.id).join(','));
+        env.calls.length = 0;
+        chips.find((c) => c.dataset.id === 'zhipu')
+            .dispatchEvent(new w.Event('click', { bubbles: true }));   // zhipu
+        await flush();
+        const ms = env.lastCmd('trans_set_multi');
+        ok('点胶囊走 trans_set_multi（把新勾的那家加进去）',
+            !!ms && JSON.stringify(ms.args.engines) === JSON.stringify(['zhipu']),
+            JSON.stringify(ms && ms.args));
+        ok('  后端回传后那一格点亮',
+            [...$('w-transMultiBox').querySelectorAll('.multi-chip')]
+                .filter((c) => c.classList.contains('on')).map((c) => c.dataset.id).join(',') === 'zhipu',
+            [...$('w-transMultiBox').querySelectorAll('.multi-chip')]
+                .map((c) => c.dataset.id + (c.classList.contains('on') ? '(on)' : '')).join(','));
+
+        // 默认目标语言
+        const tOpts = [...$('w-transTarget').querySelectorAll('option')].map((o) => o.value);
+        ok('默认目标语言下拉由后端语言表填充',
+            tOpts.join(',') === 'zh,zh-TW,en,ja', tOpts.join(','));
+        eq('  选中配置里的默认语言', $('w-transTarget').value, 'ja');
+        $('w-transTarget').value = 'zh';
+        $('w-transTarget').dispatchEvent(new w.Event('change', { bubbles: true }));
+        await flush();
+        const tl = env.lastCmd('set_setting');
+        ok('  切默认目标语言写配置',
+            !!tl && tl.args.key === 'transTarget' && tl.args.value === 'zh',
+            JSON.stringify(tl && tl.args));
+
+        // 「去控制台申请 Key」按钮已按用户要求删掉（每家引擎旁边本来就有
+        // 「?」和「文档」两颗按钮能直接跳转，不必再多一个）。
+        ok('不再有「去控制台申请 Key」按钮', !$('btnTransAk'));
+        // 那两颗跳转按钮必须真的挂上了（点一下要调后端命令）
+        const helps = [...$('w-transEngList').querySelectorAll('.eng-help')];
+        ok('每家引擎旁边都有「?」和「文档」两颗按钮',
+            helps.length >= 2 && helps.some((b) => b.textContent === '?')
+                && helps.some((b) => b.textContent === '文档'),
+            '按钮数 ' + helps.length);
+        /* 光"在"不算数 —— 用户原话是「每一个翻译引擎旁边的问号和文档按钮
+         * 点击后都没有生效」，所以这里真点一下，看后端命令有没有被调到、
+         * 带的是不是这一家的 id。命令本身已经在 Rust 侧改成
+         * `async` + `spawn_blocking`（不再阻塞主线程），这里只钉前端这条线。 */
+        const helpQ = helps.find((b) => b.textContent === '?');
+        helpQ.dispatchEvent(new w.Event('click', { bubbles: true }));
+        await flush();
+        const hCall = env.lastCmd('trans_open_help');
+        ok('  点「?」真的调到 trans_open_help 且带引擎 id',
+            !!hCall && !!hCall.args.engine, JSON.stringify(hCall && hCall.args));
+        const helpDoc = helps.find((b) => b.textContent === '文档');
+        helpDoc.dispatchEvent(new w.Event('click', { bubbles: true }));
+        await flush();
+        const dCall = env.lastCmd('trans_open_docs');
+        ok('  点「文档」真的调到 trans_open_docs 且带引擎 id',
+            !!dCall && !!dCall.args.engine, JSON.stringify(dCall && dCall.args));
+
+        ok('@trans 不在横条时「把翻译加进横条」按钮出现', $('btnTransInBar').hidden === false);
+        $('btnTransInBar').dispatchEvent(new w.Event('click', { bubbles: true }));
+        await flush();
+        const tb = env.lastCmd('toggle_bar_engine');
+        ok('  点它调 toggle_bar_engine 加 @trans',
+            !!tb && tb.args.engine === '@trans' && tb.args.on === true,
+            JSON.stringify(tb && tb.args));
+
+        // 引擎页横条列表：@trans 成员行（可拖 / 可换图标 / 可移出）
+        env.pushConfig(baseConf({ barList: ['百度', '@trans', 'Google'] }));
+        await flush();
+        const rows2 = [...$('barList').querySelectorAll('.trans-row-item')];
+        const members = rows2.filter((r) => !r.classList.contains('add-row'));
+        const adds = rows2.filter((r) => r.classList.contains('add-row'));
+        ok('引擎页横条列表渲染 @trans 成员行（可拖 / 可换图标 / 可移出）',
+            members.length === 1 && adds.length === 0,
+            '成员行 ' + members.length + ' / 入口行 ' + adds.length);
+        ok('  成员行名字显示为「翻译」',
+            members[0] && members[0].querySelector('.nm').textContent.indexOf('翻译') >= 0);
+        /* v1.5.17：@trans 成员行的图标也是那张内置的「翻译.png」
+         * （设置页和横条走同一个 qsTransIconNode，两边长得一样）。 */
+        const mImg = members[0] && members[0].querySelector('img');
+        ok('  成员行图标是内置的「翻译.png」',
+            !!mImg && /data\/icons\/trans\.png$/.test(mImg.getAttribute('src')),
+            mImg && mImg.getAttribute('src'));
+        ok('@trans 已在横条时翻译页的「加进横条」按钮隐藏', $('btnTransInBar').hidden === true);
+
+        env.pushConfig(baseConf({ barList: ['百度', 'Google'] }));
+        await flush();
+        const adds2 = [...$('barList').querySelectorAll('.trans-add-row')];
+        ok('@trans 不在横条时引擎页出现「＋ 加进横条」入口行', adds2.length === 1);
+        ok('  此时翻译页的按钮又出现', $('btnTransInBar').hidden === false);
+    }
+
+    console.log('');
+    console.log('=== 设置页：老牌翻译引擎的凭据（两家一起） ===');
+    /* ⑧b 百度 / 有道 的凭据是「主凭据 + 副凭据」成对的（APP ID + 密钥），
+     *   少一样签不出请求 —— 所以凭据区必须多出一个副凭据输入框。
+     *   谷歌只要一个 API Key，不该有多余的框。 */
+    {
+        const env = makeEnv('ui/settings.html', baseConf({
+            transEnable: true, transEngine: 'baidu', transMulti: [],
+            transTarget: 'zh',
+        }));
+        // 百度：APP ID + 密钥
+        env.pushConfig(baseConf({
+            transEnable: true, transEngine: 'baidu', transMulti: [],
+            transTarget: 'zh',
+            transCreds: { baidu: { key: '2024bdappid', secret: 'baidu-secret' } },
+        }));
+        runScripts(env, ['ui/shared.js', 'ui/settings.js']);
+        await flush();
+        await new Promise((r) => setTimeout(r, 60));
+        const { w } = env;
+        const $ = (id) => w.document.getElementById(id);
+        const cred = $('w-transCredBox');
+        const fld = (f) => cred.querySelector('input[data-field="' + f + '"]');
+        ok('百度的凭据区有「APP ID」和「密钥」两个密码框',
+            !!fld('key') && !!fld('secret')
+            && fld('key').type === 'password' && fld('secret').type === 'password');
+        ok('  标签分别是「APP ID」和「密钥」',
+            [...cred.querySelectorAll('.cred-row label')].map((l) => l.textContent).join('/')
+            === 'APP ID/密钥',
+            [...cred.querySelectorAll('.cred-row label')].map((l) => l.textContent).join('/'));
+        eq('  两个框都回填配置里的值', fld('key').value + '/' + fld('secret').value,
+            '2024bdappid/baidu-secret');
+        ok('  老牌引擎不渲染模型框（它们不靠模型名工作）', !fld('model'));
+        // 改副凭据 → trans_set_cred 要把 secret 一起发出去
+        env.calls.length = 0;
+        fld('secret').value = 'new-secret';
+        fld('secret').dispatchEvent(new w.Event('change', { bubbles: true }));
+        await flush();
+        const sc = env.lastCmd('trans_set_cred');
+        ok('  改副凭据走 trans_set_cred 且带上 secret',
+            !!sc && sc.args.engine === 'baidu' && sc.args.secret === 'new-secret',
+            JSON.stringify(sc && sc.args));
+
+        // 谷歌：只要一个 API Key，不该有副凭据框
+        env.pushConfig(baseConf({
+            transEnable: true, transEngine: 'google', transMulti: [],
+            transTarget: 'zh',
+            transCreds: { google: { key: 'g-key' } },
+        }));
+        await flush();
+        const cred2 = $('w-transCredBox');
+        ok('谷歌的凭据区只有一个 API Key，没有副凭据框',
+            !!cred2.querySelector('input[data-field="key"]')
+            && !cred2.querySelector('input[data-field="secret"]'));
+        eq('  标签是「API Key」',
+            cred2.querySelector('.cred-row label').textContent, 'API Key');
+    }
+
+    console.log('');
+    console.log('=== 横条上的翻译按钮 ===');
+    /* ⑨ index.html：@trans 渲染 / 点击带 currentText / 开关关闭时不渲染。
+     *   哨兵在配置里仍保留（用户下次开开关它就回到原位）。 */
+    {
+        const env = makeEnv('ui/index.html', baseConf({ barList: ['百度', '@trans', 'Google'] }));
+        runScripts(env, ['ui/shared.js', 'ui/bar.js', 'ui/glass.js']);
+        const { w } = env;
+        const $ = (id) => w.document.getElementById(id);
+        const styleEl = w.document.createElement('style');
+        styleEl.textContent = read('ui/bar.css');
+        w.document.head.appendChild(styleEl);
+        await flush();
+
+        const transBtn = () => $('engines').querySelector('.qs-trans-inbar');
+        ok('bar_list 里有 @trans 时横条渲染出翻译按钮', !!transBtn());
+        /* v1.5.17：默认图标换成了用户指定的那张图（内置在 data/icons/trans.png），
+         * 不再是「译」文字徽标。 */
+        const transImg = () => transBtn() && transBtn().querySelector('img');
+        ok('  默认图标是内置的「翻译.png」（<img>，不是文字徽标）',
+            !!transImg() && /data\/icons\/trans\.png$/.test(transImg().getAttribute('src')),
+            transImg() && transImg().getAttribute('src'));
+        ok('  徽标文字不再出现在按钮里',
+            transBtn() && transBtn().textContent.trim() === '',
+            transBtn() && transBtn().textContent);
+        ok('  右键菜单能认它（dataset.engine = @trans，可换图标 / 移出）',
+            transBtn() && transBtn().dataset.engine === '@trans');
+
+        /* 用户自己换过的图优先于内置默认图（overrideIcons > 内置图）。 */
+        env.pushConfig(baseConf({
+            barList: ['百度', '@trans', 'Google'],
+            overrideIcons: { '@trans': 'data:image/png;base64,iVBORw0KGgo=' },
+        }));
+        await flush();
+        const customImg = transBtn() && transBtn().querySelector('img');
+        ok('  用户换过图标时优先显示用户那张',
+            !!customImg && customImg.getAttribute('src').indexOf('base64') >= 0,
+            customImg && customImg.getAttribute('src'));
+        env.pushConfig(baseConf({ barList: ['百度', '@trans', 'Google'] }));
+        await flush();
+
+        // 模拟 Ctrl+C 带出一段文字，然后点翻译（用户的使用姿势）
+        const show = env.listeners.get('qs://show');
+        show({ payload: { text: 'translate me please', isUrl: false, ocrOnly: false } });
+        await flush();
+        env.calls.length = 0;
+        transBtn().dispatchEvent(new w.Event('click', { bubbles: true, cancelable: true }));
+        await flush();
+        const ts = env.lastCmd('trans_start');
+        ok('点横条翻译按钮调 trans_start，并带上横条此刻这段文字',
+            !!ts && ts.args.text === 'translate me please',
+            JSON.stringify(ts && ts.args));
+
+        env.pushConfig(baseConf({ barList: ['百度', '@trans', 'Google'], transEnable: false }));
+        await flush();
+        ok('翻译开关关掉后横条上的翻译按钮不渲染', !transBtn());
+        env.pushConfig(baseConf({ barList: ['百度', '@trans', 'Google'], transEnable: true }));
+        await flush();
+        ok('  开关打开后按钮回到原位', !!transBtn());
+    }
+}
 async function testOcrSettingsPage() {
     console.log('');
     console.log('=== 文字识别页：按钮显隐 ===');
@@ -3707,6 +4769,7 @@ async function testUpdateToken() {
         await testSettings();
         await testUpdateToken();
         await testOcrSettingsPage();
+        await testTrans();
         await testOcrDepCheck();
         await testIconEditorEntries();
         await testIconEditorPage();

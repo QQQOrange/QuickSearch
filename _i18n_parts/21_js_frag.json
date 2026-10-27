@@ -85,5 +85,7 @@
   "p:在文件管理器中打开：": "Open in File Explorer: ",
   "p:用默认程序打开：": "Open with the default program: ",
   "p:恢复「": "Restore “",
-  "p:拉取模型（": "Fetch models ("
+  "p:拉取模型（": "Fetch models (",
+  "p:保存同时翻译名单失败：": "Couldn't save the translate-together list: ",
+  "s:（它还没填凭据，那一格会显示失败原因）": " (it has no credentials yet — its box will show why it failed)"
 }

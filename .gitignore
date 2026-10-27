@@ -27,6 +27,9 @@ build-warmup.log
 electron-install.log
 fetch-icons.log
 
+# ---- 助手工作目录（本项目用它存会话记忆，不属于产品）----
+/.workbuddy/
+
 # ---- 编辑器 / 系统 ----
 .vscode/
 .idea/
@@ -52,8 +55,10 @@ tools/*.txt
 # 探针拍出来的对照图（r83 的圆角同心取证）：同样是"重跑就有"的产物。
 # ⚠ 只挡图片与 JSON 结果，**不挡脚本本身** —— tools/bar-radius-*.js
 #   是要入库的（它们是这次的验证手段，以后改圆角还能重跑）。
+#   v1.5.16：翻译 e2e 的 mock 请求流水是 .jsonl，一并挡掉。
 tools/_*.png
 tools/_*.json
+tools/_*.jsonl
 
 # ---- AI 推理运行时（r80）----
 # `onnxruntime.dll` 11.8MB：二进制不该进版本库（每次改动都产生新 blob，

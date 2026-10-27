@@ -63,6 +63,9 @@ function unifyIcons() {
 }
 
 function iconNode(name, size) {
+    /* 翻译按钮（@trans）不是真引擎，但也有默认图标了（v1.5.17）——
+     * 走共用实现，别落到下面的字母徽标分支去（那会画出一个 "T"）。 */
+    if (name === QS_TRANS) return window.qsTransIconNode();
     const eng = BY_NAME.get(name) || {};
     const custom = CONF.overrideIcons && CONF.overrideIcons[name];
     // #138：icons 目录里「文件名 = 引擎名」的默认图标，优先级夹在
@@ -145,6 +148,14 @@ function barItemIcon(name, size) {
             return svg;
         }
     }
+    /* v1.5.16：翻译按钮（@trans）—— 和 OCR 同一套：换过图标显示图，
+     * 没换显示默认图标。
+     * v1.5.17：默认图标从「译」文字徽标换成用户指定的「翻译.png」
+     * （内置在 data/icons/trans.png）。实现挪到 shared.js 的
+     * qsTransIconNode —— 和横条上那颗走同一个函数，三处长得一模一样。 */
+    if (name === QS_TRANS) {
+        return window.qsTransIconNode();
+    }
     return iconNode(name, size);
 }
 
@@ -198,6 +209,10 @@ function iconEditorEnabled() {
 function hasIconToEdit(key, engineName, extraSrc) {
     if (!iconEditorEnabled()) return false;
     if (iconEditSrc(key, engineName, extraSrc)) return true;
+    /* v1.5.17：翻译按钮（@trans）现在有**内置默认图**了（data/icons/trans.png），
+     * 所以它和真引擎一样有像素可编辑 —— 用户能在这张默认图上抠背景。
+     * 以前它只是一枚「译」字徽标，才落到下面这条「@ 开头一律不可编辑」里。 */
+    if (key === QS_TRANS) return true;
     if (key.indexOf('@') === 0) return false;
     const eng = BY_NAME.get(engineName || key);
     return !!(eng && eng.iconFile);
@@ -232,6 +247,17 @@ async function openIconEditor(key, engineName, extraSrc) {
                 toast('内置图标读不出来：' + ((e && e.message) || e));
                 return;
             }
+        }
+    }
+    /* v1.5.17：翻译按钮（@trans）的内置默认图也能进编辑器 ——
+     * 它不是真引擎（BY_NAME 里没有），走不到上面那条 iconFile 分支，
+     * 这里单独兜一次。取的是同一张 data/icons/trans.png。 */
+    if (!src && key === QS_TRANS && window.QS_TRANS_ICON) {
+        try {
+            src = await iconSrcDataUrl(window.QS_TRANS_ICON);
+        } catch (e) {
+            toast('内置图标读不出来：' + ((e && e.message) || e));
+            return;
         }
     }
     if (!src) {
@@ -385,8 +411,10 @@ function renderBarList() {
         const isSep = name === QS_SEP;
         const isOcr = name === QS_OCR;
         /* r72：识图按钮现在是横条成员（`@img`）—— 和普通引擎一样有抓手、
-         * ↑↓、拖拽、换图标 / 编辑 / 恢复默认 / 移出。 */
+         * ↑↓、拖拽、换图标 / 编辑 / 恢复默认 / 移出。
+         * v1.5.16：翻译按钮（@trans）同一套地位。 */
         const isImg = name === QS_IMG;
+        const isTrans = name === QS_TRANS;
         // 外部软件哨兵（@app:<id>）：要翻译成软件名，不然设置里显示一串乱码。
         const app = qsAppBySentinel(name);
         const isApp = !!app;
@@ -406,6 +434,7 @@ function renderBarList() {
         const row = document.createElement('div');
         row.className = 'item' + (isSep ? ' sep-row' : '') + (isOcr ? ' ocr-row' : '')
             + (isImg ? ' img-row-item' : '')
+            + (isTrans ? ' trans-row-item' : '')
             + (isFav ? ' fav-row-item' : '') + (isApp ? ' app-row-item' : '');
         row.dataset.idx = String(idx);
 
@@ -438,7 +467,8 @@ function renderBarList() {
         nm.textContent = isSep ? '分隔线'
             : (isOcr ? '识别图片文字'
                 : (isImg ? '识图搜索'
-                    : (isFav ? favGroup.name : (isApp ? app.name : name))));
+                    : (isTrans ? '翻译'
+                        : (isFav ? favGroup.name : (isApp ? app.name : name)))));
         if (isFav) {
             const em = document.createElement('em');
             em.textContent = '收藏夹目录 · 拖它可以改位置';
@@ -458,6 +488,12 @@ function renderBarList() {
             em.textContent = CONF.overrideIcons[QS_IMG]
                 ? '自定义图标 · 点一下框选搜索 · 拖它可以改位置'
                 : '点一下框选屏幕搜索 · 拖它可以改位置';
+            nm.appendChild(em);
+        } else if (isTrans) {
+            const em = document.createElement('em');
+            em.textContent = CONF.overrideIcons[QS_TRANS]
+                ? '自定义图标 · 点一下翻译横条上的文字 · 拖它可以改位置'
+                : '点一下翻译横条上的文字 · 拖它可以改位置';
             nm.appendChild(em);
         } else if (isApp) {
             const em = document.createElement('em');
@@ -666,6 +702,44 @@ function renderBarList() {
         add.appendChild(nm);
         add.appendChild(ops);
         box.appendChild(add);
+    }
+
+    /* v1.5.16：翻译按钮（@trans）的入口行 —— 和上面 OCR / 识图两条同一个道理：
+     * 横条里没有它时，在这一页给一个「＋ 加进横条」的入口，不然用户只能跑去
+     * 「翻译」页点按钮（那一页也有一颗，两处都能加）。 */
+    if (CONF && CONF.transEnable !== false && !list.some((x) => x.name === QS_TRANS)) {
+        const row = document.createElement('div');
+        row.className = 'item add-row trans-add-row';
+
+        const grip = document.createElement('span');
+        grip.className = 'grip';
+        grip.style.visibility = 'hidden';
+
+        const ic = document.createElement('span');
+        ic.className = 'ic';
+        ic.appendChild(barItemIcon(QS_TRANS, 24));
+
+        const nm = document.createElement('span');
+        nm.className = 'nm';
+        nm.textContent = '翻译';
+        const em = document.createElement('em');
+        em.textContent = '还没加进横条 · 加进来之后就能拖到任意位置、也能换图标';
+        nm.appendChild(em);
+
+        const ops = document.createElement('span');
+        ops.className = 'ops';
+        const b = document.createElement('button');
+        b.className = 'mini';
+        b.textContent = '＋ 加进横条';
+        b.title = '把翻译按钮放到横条上，之后可以拖到任意位置';
+        b.addEventListener('click', () => invoke('toggle_bar_engine', { engine: QS_TRANS, on: true }));
+        ops.appendChild(b);
+
+        row.appendChild(grip);
+        row.appendChild(ic);
+        row.appendChild(nm);
+        row.appendChild(ops);
+        box.appendChild(row);
     }
 }
 
@@ -2671,6 +2745,9 @@ const SWITCHES = [
     ['s-shadow', 'shadow'],
     ['s-aiCopyPrompt', 'aiCopyPrompt'],
     ['s-ocrEnable', 'ocrEnable'],
+    // v1.5.16：翻译总开关。默认**开**（与 config.rs 的 default_true 一致）——
+    // 真正的入口是横条上的 @trans 哨兵，用户不加进横条就看不见按钮。
+    ['s-transEnable', 'transEnable'],
     // v1.2.0：自动更新。⚠ 它不在「通用」页，而在「关于」页的更新区块里 ——
     // 但走同一张表、同一套绑定逻辑（少写一套状态同步）。
     ['s-autoUpdate', 'autoUpdate'],
@@ -2729,6 +2806,8 @@ const SWITCH_DEFAULT = {
     shadow: false,
     aiCopyPrompt: true,
     ocrEnable: true,
+    // v1.5.16：翻译默认开（老配置没有这个键时也当开，见 config.rs default_true）
+    transEnable: true,
     // v1.2.0：自动更新默认**开**。功能名就叫"自动更新"，默认不勾等于默认没这功能；
     // 用户取消勾选后彻底不检测（见 main.rs 的 auto_check_on_start）。
     autoUpdate: true,
@@ -3075,6 +3154,10 @@ const TEXTS = [
     ['s-imgPublicUrl', 'imgPublicUrl'],
     // ⚠ w-ocrKey / w-ocrSecret 已删除（需求 2）：百度只是十几家里的一家，
     //   它的 Key/Secret 现在由 renderOcrCred() 按注册表生成，走 ocr_set_cred 落盘。
+    // ⚠ v1.5.16 第二轮的 w-transApiKey / w-transModel / w-transBase 也一并删除：
+    //   翻译改成多引擎后，凭据按引擎 id 分 map 存（trans_keys/trans_bases/trans_models），
+    //   由 renderTransCred() 按注册表生成输入框、走 trans_set_cred 落盘 ——
+    //   和 OCR 那一栏完全同一个套路（见本文件「翻译（多引擎）」一节）。
 ];
 
 /* r76：AI 识图的两段延迟 —— [元素 id, 配置键, 默认值]。
@@ -3483,6 +3566,17 @@ function bindSwitches() {
     syncOcrEngineUI();
     // 引擎列表要单独拉一次（renderOcrEngines 只负责渲染，数据来自后端注册表）
     if (!bound) loadOcrEngines();
+
+    // v1.5.16 第二轮：翻译栏 —— 和 OCR 同一套（名单来自后端注册表）。
+    // 语言表只拉一次（transLangsFilled 守着），但「选中哪项」「加进横条按钮显不显」
+    // 「默认引擎是谁」每次广播都要刷。
+    if (!bound) loadTransEngs();
+    renderTransEngines();
+    renderTransCred();
+    renderTransMulti();
+    transFillLangs();
+    transSyncLang();
+    syncTransInBarBtn();
 
     for (const [id, valId, key, dflt] of SLIDERS) {
         const el = $(id);
@@ -4179,6 +4273,563 @@ function syncOcrInBarBtn() {
     const b = $('btnOcrInBar');
     if (!b) return;
     b.hidden = (CONF.barList || []).includes(QS_OCR);
+}
+
+/* ------------------------------------------------------------------ */
+/* 翻译（v1.5.16 第二轮：多引擎，整套对齐「识别引擎」那一栏）             */
+/* ------------------------------------------------------------------ */
+
+/* 用户原话（v1.5.16 第二轮）：「翻译不能只有内置一个模型，要跟文字识别的硅基流动
+ * 部分一样，能够拉取模型列表并选择一个；也要增加其他翻译引擎，像 OCR 识别一样
+ * 可以同时多选几个，同一个页面同时呈现出来。具体逻辑参照 OCR 识别部分。」
+ *
+ * 所以这一栏整套照 OCR 那一栏的路子来：
+ *   · 名单来自后端注册表（trans_engines_list），前端不自己维护；
+ *   · 点一行 = 设为默认引擎（写 transEngine，每次翻译一定用它）；
+ *   · 展开那一行填凭据（Key / 接口地址 / 模型 —— 填哪几样由注册表的
+ *     need_key / need_base / need_model 决定），模型行带「拉取模型」按钮 +
+ *     拉完**陈列**出来直接点选（方向与 OCR 相反：只要**对话**模型）；
+ *   · 「同时翻译」多选（trans_multi）= 额外和默认引擎一起翻的那几家，
+ *     后端 trans_set_multi 负责清洗（剔默认引擎 / 重复 / 不认识的 id）后回传。 */
+
+let TRANS_ENGS = [];
+
+async function loadTransEngs() {
+    try {
+        const list = await invoke('trans_engines_list');
+        TRANS_ENGS = Array.isArray(list) ? list : [];
+    } catch (e) {
+        TRANS_ENGS = [];
+    }
+    renderTransEngines();
+    renderTransCred();
+    renderTransMulti();
+}
+
+function transEngById(id) {
+    return TRANS_ENGS.find((e) => e.id === id) || null;
+}
+
+/* 引擎列表：点一行 = 设为默认引擎。展开的"身体"（凭据 + 同时翻译）只挂在
+ * 默认那一行下面 —— 凭据属于谁，摆在哪一行底下就说清楚了。 */
+function renderTransEngines() {
+    const box = $('w-transEngList');
+    if (!box) return;
+    const body = $('w-transBody');
+    const home = $('w-transBodyHome');
+    // 上一次可能把它搬进了某一行 → 先让它回家（DOM 只有一份）
+    if (body && home && body.parentElement !== home) home.appendChild(body);
+    if (!TRANS_ENGS.length) {
+        box.innerHTML = '<div class="dep-tip">读不到引擎列表（后端没起来？重开设置页试试）</div>';
+        return;
+    }
+    const cur = CONF.transEngine || 'siliconflow';
+    const multi = Array.isArray(CONF.transMulti) ? CONF.transMulti : [];
+    box.innerHTML = '';
+    for (const e of TRANS_ENGS) {
+        const isCur = e.id === cur;
+        const row = document.createElement('div');
+        row.className = 'eng-row' + (isCur ? ' on open' : '');
+        row.dataset.id = e.id;
+        if (!isCur) row.addEventListener('click', () => pickTransEngine(e.id));
+
+        const dot = document.createElement('span');
+        dot.className = 'eng-dot';
+        dot.setAttribute('aria-hidden', 'true');
+        row.appendChild(dot);
+
+        const name = document.createElement('button');
+        name.type = 'button';
+        name.className = 'eng-name';
+        name.title = isCur
+            ? `当前默认引擎：${e.name}${e.note ? '\n' + e.note : ''}`
+            : `设为默认引擎：${e.name}${e.note ? '\n' + e.note : ''}`;
+        const b = document.createElement('b');
+        b.textContent = e.name;
+        name.appendChild(b);
+        name.addEventListener('click', (ev) => {
+            ev.stopPropagation();
+            pickTransEngine(e.id);
+        });
+        row.appendChild(name);
+
+        if (isCur) {
+            row.appendChild(engTag('默认', '这一家是默认引擎：每次翻译一定用它'));
+        }
+        if (multi.indexOf(e.id) >= 0) {
+            row.appendChild(engTag(
+                '同时翻译',
+                e.ready
+                    ? '每次翻译都会连它一起翻'
+                    : '还没填凭据 —— 一起翻时它那一格会显示失败原因',
+                !e.ready
+            ));
+        }
+
+        if (e.signup) {
+            const help = document.createElement('button');
+            help.type = 'button';
+            help.className = 'eng-help';
+            help.textContent = '?';
+            help.title = `打开「${e.name}」申请 API 的官方页面`;
+            help.addEventListener('click', (ev) => {
+                ev.stopPropagation();
+                invoke('trans_open_help', { engine: e.id })
+                    .then((u) => toast('已打开申请页面：' + u))
+                    .catch((err) => toast('打不开浏览器：' + err));
+            });
+            row.appendChild(help);
+        }
+        if (e.docs) {
+            const doc = document.createElement('button');
+            doc.type = 'button';
+            doc.className = 'eng-help doc';
+            doc.textContent = '文档';
+            doc.title = `打开「${e.name}」的接口文档`;
+            doc.addEventListener('click', (ev) => {
+                ev.stopPropagation();
+                invoke('trans_open_docs', { engine: e.id })
+                    .then((u) => toast('已打开文档：' + u))
+                    .catch((err) => toast('打不开浏览器：' + err));
+            });
+            row.appendChild(doc);
+        }
+
+        const chev = document.createElement('span');
+        chev.className = 'eng-chev';
+        chev.textContent = '▾';
+        row.appendChild(chev);
+
+        box.appendChild(row);
+
+        if (isCur && body) {
+            row.appendChild(body);
+            body.hidden = false;
+        }
+    }
+}
+
+/* 「同时翻译」多选。默认引擎**不在这里**（它一定参与），这里只列"另外还要
+ * 一起翻"的那几家；勾选结果原样发给 trans_set_multi，后端清洗后回传。 */
+function renderTransMulti() {
+    const box = $('w-transMultiBox');
+    if (!box) return;
+    const cur = CONF.transEngine || 'siliconflow';
+    const multi = Array.isArray(CONF.transMulti) ? CONF.transMulti : [];
+    const others = TRANS_ENGS.filter((e) => e.id !== cur);
+    box.innerHTML = '';
+    if (!others.length) {
+        box.innerHTML = '<div class="dep-tip">引擎名单还没读到…</div>';
+        return;
+    }
+    for (const e of others) {
+        const on = multi.indexOf(e.id) >= 0;
+        const chip = document.createElement('button');
+        chip.type = 'button';
+        chip.className = 'multi-chip' + (on ? ' on' : '') + (on && !e.ready ? ' warn' : '');
+        chip.dataset.id = e.id;
+        chip.title = on
+            ? `取消勾选：下次翻译不再连「${e.name}」一起翻`
+            : `勾上：每次翻译都连「${e.name}」一起翻` +
+              (e.ready ? '' : '（它还没填凭据，那一格会显示失败原因）');
+        const tick = document.createElement('span');
+        tick.className = 'multi-tick';
+        tick.textContent = on ? '✓' : '+';
+        chip.appendChild(tick);
+        const nm = document.createElement('span');
+        nm.textContent = e.name;
+        chip.appendChild(nm);
+        if (!e.ready) {
+            const w = document.createElement('i');
+            w.className = 'multi-warn';
+            w.textContent = '没配';
+            chip.appendChild(w);
+        }
+        chip.addEventListener('click', () => toggleTransMulti(e.id));
+        box.appendChild(chip);
+    }
+    const tip = $('w-transMultiTip');
+    if (tip) tip.textContent = '';
+}
+
+function toggleTransMulti(id) {
+    const list = Array.isArray(CONF.transMulti) ? CONF.transMulti.slice() : [];
+    const i = list.indexOf(id);
+    if (i >= 0) list.splice(i, 1);
+    else list.push(id);
+    saveTransMulti(list);
+}
+
+/** 存名单。后端回传**清洗过**的名单，拿它覆盖本地 CONF。 */
+function saveTransMulti(list) {
+    invoke('trans_set_multi', { engines: list })
+        .then((cleaned) => {
+            CONF.transMulti = Array.isArray(cleaned) ? cleaned : [];
+            renderTransEngines();
+            renderTransMulti();
+        })
+        .catch((e) => toast('保存同时翻译名单失败：' + e));
+}
+
+function pickTransEngine(id) {
+    if ((CONF.transEngine || 'siliconflow') === id) return;
+    invoke('set_setting', { key: 'transEngine', value: id })
+        .then(() => {
+            CONF.transEngine = id;
+            renderTransEngines();
+            renderTransCred();
+            renderTransMulti();
+            // 新默认引擎原来可能在「同时翻译」名单里（名单不含默认引擎）→
+            // 让后端把它剔掉，别让配置文件里留一条永远不生效的勾
+            if (Array.isArray(CONF.transMulti) && CONF.transMulti.indexOf(id) >= 0) {
+                saveTransMulti(CONF.transMulti);
+            }
+        })
+        .catch((e) => toast('切换失败：' + e));
+}
+
+/* 当前引擎要填的凭据。填哪几样由**注册表**决定（need_key / need_base /
+ * need_model），所以按 need* 逐个生成输入框 —— 加一家引擎不用改界面代码。 */
+function renderTransCred() {
+    const box = $('w-transCredBox');
+    if (!box) return;
+    /* ⚠ 正在这个框里打字时**不许重建**（凭据的落库时机是 change，而配置广播
+     * 很频繁；无条件重建会把刚敲的字冲掉）。同 renderOcrCred 的教训。 */
+    if (qsEditingIn('w-transCredBox')) return;
+    const title = $('w-transCredTitle');
+    const tip = $('w-transCredTip');
+    const e = transEngById(CONF.transEngine || 'siliconflow');
+    box.innerHTML = '';
+    if (!e) {
+        if (title) title.textContent = '凭据';
+        if (tip) tip.textContent = '';
+        return;
+    }
+    if (title) title.textContent = `${e.name} 的凭据`;
+    if (tip) tip.textContent = '';
+
+    const creds = (CONF.transCreds || {})[e.id] || {};
+    const fields = [];
+    if (e.needKey) {
+        // 标签按引擎来：百度是「APP ID」、有道是「应用 ID」，其余是「API Key」。
+        const keyLabel = e.id === 'baidu' ? 'APP ID'
+            : e.id === 'youdao' ? '应用 ID' : 'API Key';
+        fields.push(['key', keyLabel, creds.key, true, '粘贴 ' + keyLabel]);
+    }
+    // 副凭据：百度要「密钥」、有道要「应用密钥」—— 少一样都签不出请求。
+    if (e.needSecret) {
+        const secLabel = e.id === 'baidu' ? '密钥' : '应用密钥';
+        fields.push(['secret', secLabel, creds.secret, true, '粘贴 ' + secLabel]);
+    }
+    if (e.needBase) fields.push(['base', '接口地址', creds.base, false, e.base || 'https://…/v1']);
+    // 模型那一栏：注册表说"这家靠模型名工作"（modelRow）或强制要填（needModel）就显示。
+    // 翻译全部走对话模型，所以「拉取模型」拉回来的就是能对话的那批（后端已过滤）。
+    if (e.modelRow || e.needModel) {
+        fields.push(['model', '模型名', creds.model, false,
+            e.model || (e.needModel ? '填模型名或接入点 ID' : '模型名')]);
+    }
+
+    const pulled = TRANS_MODELS[e.id] || [];
+    for (const [f, label, val, secret, ph] of fields) {
+        const row = document.createElement('div');
+        row.className = 'cred-row';
+        const lab = document.createElement('label');
+        lab.textContent = label;
+        const inp = document.createElement('input');
+        inp.className = 'txt';
+        inp.spellcheck = false;
+        if (secret) inp.type = 'password';
+        inp.placeholder = ph;
+        inp.value = val || '';
+        inp.dataset.field = f;
+        inp.addEventListener('change', () => saveTransCred(e.id));
+        row.appendChild(lab);
+        if (secret) {
+            const wrap = document.createElement('span');
+            wrap.className = 'cred-eye-wrap';
+            wrap.appendChild(inp);
+            const eye = document.createElement('button');
+            eye.type = 'button';
+            eye.className = 'cred-eye-btn';
+            eye.tabIndex = -1;
+            eye.title = '显示 / 隐藏';
+            eye.setAttribute('aria-label', '显示或隐藏');
+            eye.innerHTML = '<svg class="ic-eye" viewBox="0 0 24 24" fill="none" '
+                + 'stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
+                + '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>'
+                + '<svg class="ic-eye-off" viewBox="0 0 24 24" fill="none" '
+                + 'stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
+                + '<path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94'
+                + 'M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19'
+                + 'm-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>';
+            eye.addEventListener('click', () => {
+                inp.type = inp.type === 'password' ? 'text' : 'password';
+                eye.classList.toggle('on', inp.type === 'text');
+                inp.focus();
+            });
+            wrap.appendChild(eye);
+            row.appendChild(wrap);
+        } else {
+            row.appendChild(inp);
+        }
+        if (f === 'model') {
+            inp.setAttribute('list', 'transModelList');
+            let dl = document.getElementById('transModelList');
+            if (!dl) {
+                dl = document.createElement('datalist');
+                dl.id = 'transModelList';
+                document.body.appendChild(dl);
+            }
+            const ids = pulled.map((m) => m.id);
+            if (e.model && ids.indexOf(e.model) < 0) ids.unshift(e.model);
+            dl.innerHTML = '';
+            for (const id of ids) {
+                const o = document.createElement('option');
+                o.value = id;
+                dl.appendChild(o);
+            }
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'dep-btn ghost cred-pull';
+            btn.textContent = pulled.length ? `拉取模型（${pulled.length}）` : '拉取模型';
+            btn.title = pulled.length
+                ? `已拉到 ${pulled.length} 个模型（列在下面，点一下就能选用）；再点一次重新拉`
+                : '按上面填的 Key 去这家拉一次模型列表，然后就能在这里挑';
+            btn.addEventListener('click', () => pullTransModels(e.id));
+            row.appendChild(btn);
+        }
+        box.appendChild(row);
+    }
+
+    if (pulled.length) {
+        renderTransModelPanel(box, e.id, pulled,
+            box.querySelector('input[data-field="model"]'));
+    }
+
+    // 状态行 + 「测试连接」：填完 Key 点一下就知道到底通不通
+    const st = document.createElement('div');
+    st.className = 'cred-foot';
+    const test = document.createElement('button');
+    test.type = 'button';
+    test.className = 'dep-btn';
+    test.textContent = '测试连接';
+    test.title = '真翻一句固定的话，确认 Key / 地址 / 模型名是不是真的能用';
+    test.addEventListener('click', () => runTransTest(e.id, test, st));
+    const hint = document.createElement('span');
+    hint.className = 'cred-status';
+    hint.textContent = '';
+    st.appendChild(test);
+    st.appendChild(hint);
+    box.appendChild(st);
+}
+
+/** 把拉到的模型列表**陈列**在模型行下方，点一下选用（同 OCR 那一套：
+ *  WebView2 的 datalist 没有可见下拉入口，光塞进去用户不知道去哪挑）。 */
+function renderTransModelPanel(box, id, models, inp) {
+    const wrap = document.createElement('div');
+    wrap.className = 'cred-models';
+    wrap.dataset.engine = id;
+
+    const h = document.createElement('div');
+    h.className = 'cred-models-h';
+    h.setAttribute('role', 'button');
+    h.tabIndex = 0;
+    const ht = document.createElement('b');
+    ht.textContent = '模型列表';
+    const hn = document.createElement('small');
+    const chat = models.filter((m) => m.chat).length;
+    hn.textContent = `${models.length} 个 · ${chat} 个能对话 · 点一下选用`;
+    const arrow = document.createElement('i');
+    arrow.className = 'cm-arrow';
+    arrow.textContent = '▾';
+    h.appendChild(ht);
+    h.appendChild(hn);
+    h.appendChild(arrow);
+    const toggle = () => wrap.classList.toggle('shut');
+    h.addEventListener('click', toggle);
+    h.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); toggle(); }
+    });
+
+    const body = document.createElement('div');
+    body.className = 'cred-models-b';
+    for (const m of models) {
+        const it = document.createElement('button');
+        it.type = 'button';
+        it.className = 'cred-model-item'
+            + (m.chat ? ' vis' : '')
+            + (inp && inp.value === m.id ? ' sel' : '');
+        it.title = m.chat ? '选用这个模型（名字看着能对话）' : '选用这个模型';
+        const nm = document.createElement('span');
+        nm.className = 'cm-id';
+        nm.textContent = m.id;
+        it.appendChild(nm);
+        if (m.chat) {
+            const b = document.createElement('i');
+            b.className = 'v-badge';
+            b.textContent = '对话';
+            it.appendChild(b);
+        }
+        it.addEventListener('click', () => {
+            if (inp) {
+                inp.value = m.id;
+                inp.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+            body.querySelectorAll('.cred-model-item').forEach((x) => x.classList.remove('sel'));
+            it.classList.add('sel');
+        });
+        body.appendChild(it);
+    }
+
+    wrap.appendChild(h);
+    wrap.appendChild(body);
+    box.appendChild(wrap);
+}
+
+/* ------------------------------------------------------------------ */
+/* 测试连接 / 拉取模型                                                  */
+/* ------------------------------------------------------------------ */
+
+let TRANS_MODELS = {};    // engineId -> [{id, chat}]
+let transTestBusy = false;
+
+/* trans_test 是**一问一答**的命令（后端真翻一句固定的话），结果直接在返回值里，
+ * 不像 OCR 那样走事件 —— 翻译没有"异步回推"的必要。 */
+async function runTransTest(id, btn, st) {
+    if (transTestBusy) return;
+    transTestBusy = true;
+    const old = btn.textContent;
+    btn.textContent = '测试中…';
+    st.className = 'cred-status';
+    st.textContent = '正在真翻一句…';
+    try {
+        const out = await invoke('trans_test', { engine: id });
+        st.className = 'cred-status ok';
+        st.textContent = '✓ ' + String(out || '');
+    } catch (e) {
+        st.className = 'cred-status bad';
+        st.textContent = '✗ ' + String(e || '').slice(0, 160);
+    } finally {
+        btn.textContent = old;
+        transTestBusy = false;
+    }
+}
+
+async function pullTransModels(id) {
+    const e = transEngById(id);
+    if (!e) return;
+    // 先用界面上**当前**的值存一次：用户可能刚改了 Key 还没失焦
+    saveTransCred(id);
+    toast('正在拉模型列表…');
+    try {
+        /* 翻译方向只要**对话**模型（后端 list_models 已按 looks_chat 过滤排序），
+         * 所以不像 OCR 那样传 visionOnly —— 这里没有可传的开关，口径在后端。 */
+        await invoke('trans_list_models', { engine: id });
+    } catch (err) {
+        toast('拉模型列表失败：' + err);
+    }
+}
+
+function onTransModels(p) {
+    if (!p || !p.ok) {
+        toast('拉不到模型列表：' + ((p && p.msg) || '未知原因'));
+        return;
+    }
+    TRANS_MODELS[p.engine] = p.models || [];
+    toast(p.msg);
+    renderTransCred();
+}
+
+/* 存某家引擎的凭据：三样一起发给后端（它按注册表决定用哪几样），空串 = 清掉。
+ * 存完重新拉一次注册表 —— ready 标记（"已填好 / 还没填全"）要跟着变。 */
+function saveTransCred(id) {
+    const box = $('w-transCredBox');
+    if (!box || !transEngById(id)) return;
+    const get = (f) => {
+        const el = box.querySelector(`input[data-field="${f}"]`);
+        return el ? el.value : '';
+    };
+    const body = {
+        engine: id,
+        key: get('key'),
+        secret: get('secret'),
+        base: get('base'),
+        model: get('model'),
+    };
+    invoke('trans_set_cred', body)
+        .then(() => invoke('trans_engines_list'))
+        .then((list) => {
+            TRANS_ENGS = Array.isArray(list) ? list : TRANS_ENGS;
+            CONF.transCreds = CONF.transCreds || {};
+            CONF.transCreds[id] = {
+                key: body.key,
+                secret: body.secret,
+                base: body.base,
+                model: body.model,
+            };
+            renderTransCred();
+            renderTransEngines();
+            renderTransMulti();
+        })
+        .catch((err) => toast('保存失败：' + err));
+}
+
+/* 默认目标语言下拉框。
+ *
+ * 语言表**只有 Rust 一份**（`trans::LANGS`），这里启动时拉一次 `trans_langs`
+ * 现填 —— 以后加语言只改 Rust，界面不用动。填充只做一次（options 建好就
+ * 不动了）：每次配置广播都重建会把人正在看的选项晃没。 */
+let transLangsFilled = false;
+async function transFillLangs() {
+    const sel = $('w-transTarget');
+    if (!sel || transLangsFilled) return;
+    let langs = [];
+    try { langs = await invoke('trans_langs'); } catch (e) { langs = []; }
+    langs = Array.isArray(langs) ? langs : [];
+    sel.textContent = '';
+    for (const l of langs) {
+        const o = document.createElement('option');
+        o.value = l.code;
+        o.textContent = l.label;
+        sel.appendChild(o);
+    }
+    transLangsFilled = true;
+    transSyncLang();
+}
+
+/* 把下拉框刷成配置里的默认语言。
+ *  ⚠ 聚焦时不刷：用户正开着下拉选呢，一广播就把人家选中的项跳回去了。
+ *  ⚠ 配置里的值不在选项里（脏配置 / 后端归一失败）时落回 'zh'。 */
+function transSyncLang() {
+    const sel = $('w-transTarget');
+    if (!sel || !sel.options.length) return;
+    if (document.activeElement === sel) return;
+    const codes = Array.prototype.map.call(sel.options, (o) => o.value);
+    let want = CONF.transTarget;
+    if (codes.indexOf(want) < 0) want = codes.indexOf('zh') >= 0 ? 'zh' : codes[0];
+    if (want) sel.value = want;
+}
+
+/* 「把翻译加进横条」：加的是 @trans 哨兵，加完就是横条里的一分子，
+ * 去「引擎」页拖它就能改位置。已经在横条里时按钮隐藏（同 OCR 那颗）。 */
+$('btnTransInBar').addEventListener('click', async () => {
+    await invoke('toggle_bar_engine', { engine: QS_TRANS, on: true });
+    toast('已加进横条，去「引擎」页拖它可以改位置');
+});
+
+function syncTransInBarBtn() {
+    const b = $('btnTransInBar');
+    if (!b) return;
+    b.hidden = (CONF.barList || []).includes(QS_TRANS);
+}
+
+/* 目标语言下拉的 change：写配置 + 立刻更新本地 CONF（不能等广播）。 */
+{
+    const sel = $('w-transTarget');
+    if (sel) sel.addEventListener('change', () => {
+        invoke('set_setting', { key: 'transTarget', value: sel.value });
+        if (window.CONF) window.CONF.transTarget = sel.value;
+    });
 }
 
 /* 选了「Windows 本地」引擎时，百度云那几个配置项（API Key / Secret Key /
@@ -6911,6 +7562,17 @@ function webviewLabel() {
  *  发新版时**同时**加一条，对不上就是漏了。 */
 const CHANGELOG = [
     {
+        ver: 'v1.5.16',
+        en: 'Translation is no longer "one engine, one model": eight engines share one list in Settings (pick a default, tick a few extras), models can be pulled from your account instead of typed by hand, and every engine now gets its own box in the translation window, filled in parallel. When one engine fails, only its own box goes red — the others still deliver.',
+        items: [
+            '<b>翻译不再是"只有一家、只有一个模型"</b> —— 设置页的翻译栏现在和「文字识别」一个路子：<b>八家引擎</b>（硅基流动 / 智谱 GLM / 通义千问 / DeepSeek / Kimi / 火山方舟 / OpenAI / 自定义）排成一列，<b>点一行就是把它设为默认引擎</b>；每家的 API Key、接口地址、模型名<b>各自一份</b>，换一家不用重新填一遍。',
+            '<b>模型名可以「拉取」了</b> —— 以前只能手敲，敲错一个字母就报错。现在和识别一样，点「拉取模型」把这家账号下能用的模型列出来（只列<b>能对话</b>的那些，带「对话」小标），点一下就选用，还能顺手「测试连接」真翻一句话确认 Key 通不通。',
+            '<b>可以几家一起翻，结果并排摆开</b> —— 勾上「同时翻译」，一次翻译会<b>并行</b>问好几家；翻译窗里<b>一家一个框</b>并排呈现，框顶上写着引擎名和模型，各自的状态（等待中 / 已完成 / 失败）各自标，<b>一家的译文不会盖掉另一家</b>。',
+            '<b>一家出错，不连坐其他家</b> —— Key 过期、额度用完、网络不通，只有那一家的框变红，并在它自己下面写清楚原因（比如「API Key 不对或已失效（401）」）；别家该出译文照常出。底部汇总条会告诉你几家没翻出来、第一家是什么原因。',
+            '<b>翻译窗本身也顺过了</b> —— 默认尺寸放宽到 860×600（两家并排不用换行，最小仍是 520×320）；点过哪个框，「复制译文」就复制哪个框的；切目标语言会<b>按新语言重翻</b>，不是只改个标题；Ctrl+Enter 直接翻，Esc 关窗。',
+        ],
+    },
+    {
         ver: 'v1.5.15',
         en: 'If the Microsoft Edge WebView2 runtime is missing, the app now says so in plain words and offers a one-click trip to the official Microsoft download page, instead of doing nothing at all when you double-click it.',
         items: [
@@ -7978,6 +8640,10 @@ listen('qs://ocr', (ev) => {
 /* r46：「测试连接」和「拉取模型」的结果都走事件回来（后端异步跑，不卡设置页）。 */
 listen('qs://ocr-test', (ev) => onOcrTestResult(ev.payload || {}));
 listen('qs://ocr-models', (ev) => onOcrModels(ev.payload || {}));
+
+/* v1.5.16 第二轮：翻译的「拉取模型」同样异步回事件（后端可能拉几百个模型）。
+ * 「测试连接」不走事件 —— trans_test 是一问一答的命令，返回值里就有结果。 */
+listen('qs://trans-models', (ev) => onTransModels(ev.payload || {}));
 
 listen('qs://ensure-rect', (ev) => reportRects(String(ev.payload || '')));
 

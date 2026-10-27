@@ -4,6 +4,7 @@
 //! （第一是别在主线程上等网络）。原因见下。
 
 use std::net::{SocketAddr, ToSocketAddrs};
+use std::time::Duration;
 
 /// DNS 解析器：把 IPv4 地址排到 IPv6 前面（给 `ureq::AgentBuilder::resolver` 用）。
 ///
@@ -46,6 +47,44 @@ pub(crate) fn ipv4_first(netloc: &str) -> std::io::Result<Vec<SocketAddr>> {
     let mut addrs: Vec<SocketAddr> = netloc.to_socket_addrs()?.collect();
     addrs.sort_by_key(|a| a.is_ipv6());
     Ok(addrs)
+}
+
+/// 翻译专用 Agent：**复用连接池**。
+///
+/// # 为什么它和 OCR 那条路不一样
+///
+/// `ocr::agent()` 的注释写着「故意每次新建 Agent，别改成 static」—— 那是给
+/// **识图/识别**这类"点一次发一发"的请求做的取舍：省一次握手不值当为
+/// 「复用到服务器已经关掉的空闲连接」冒风险。
+///
+/// 翻译的用法完全不同：用户会**连着翻好几次**（改两个词再翻、换个语言再翻、
+/// 同时翻三四家），而且一次翻译里还会跑 A/B 两家对比。这时候每条请求都重新
+/// DNS + TCP + TLS（境内 60~150ms，境外 200~400ms）就是实打实压在用户身上的
+/// 等待 —— 一次翻译体感上的"卡一下"，很大一块在这里。
+///
+/// 复用的风险（空闲连接被对端关掉）用**一次重试**兜住，见
+/// [`crate::trans::translate_stream`] 与 [`crate::trans_vendor`] 的 `post_form`：
+/// 真撞上就直接重发一次，代价是一轮 RTT，比每次都付握手便宜得多。
+///
+/// # 超时为什么这么给
+///
+/// · `timeout_read` 60s：**流式**响应里两个 chunk 之间的最长间隔，不是总时长。
+///   模型偶尔"想一想"才吐下一个字，60 秒足够宽容，又不会真卡死。
+/// · `timeout` 180s：整轮上限。长段落逐字生成可能超过 45 秒（OCR 那边的口径），
+///   卡在 45 秒会把好端端的长文翻译掐断。
+pub(crate) fn trans_agent() -> ureq::Agent {
+    static A: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    A.get_or_init(|| {
+        ureq::AgentBuilder::new()
+            // 同 ipv4_first 的理由：假 IPv6 会让每条请求先白等 6 秒
+            .resolver(ipv4_first)
+            .timeout_connect(Duration::from_secs(6))
+            .timeout_read(Duration::from_secs(60))
+            .timeout(Duration::from_secs(180))
+            .user_agent("QuickSearch/1.0 (Windows)")
+            .build()
+    })
+    .clone()
 }
 
 #[cfg(test)]
