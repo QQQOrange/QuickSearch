@@ -80,7 +80,9 @@ async function connect(sub) {
         trans_enable: true,
         trans_engine: 'deepseek',
         trans_keys: { deepseek: 'sk-probe' },
-        bar_list: ['@trans'],
+        bar_list: ['@trans', '@img'],
+        img_enable: true,
+        img_add_to_bar: true,
         bar_idle_sec: 0,
         bar_away_px: 0,
         shadow: false,
@@ -123,10 +125,37 @@ async function connect(sub) {
     })()`);
     rec('横条翻译按钮：' + JSON.stringify(r1));
     ok(r1.found, '横条渲染出翻译按钮');
-    ok(r1.imgCount === 1 && /data\/icons\/trans\.png$/.test(r1.imgSrc || ''),
-        '  按钮里是内置的「翻译.png」<img>', r1.imgSrc);
+    /* v1.5.19：图标改成**内嵌**的 base64 data URI —— 断言也从"路径是
+     * data/icons/trans.png"改成"是 data:image/png;base64,"。
+     * 外链 PNG 一旦断掉，界面会悄悄退回「译」字徽标，很难看出根因。 */
+    ok(r1.imgCount === 1 && /^data:image\/png;base64,/.test(r1.imgSrc || ''),
+        '  按钮里是**内嵌**的「翻译-copy.png」<img>', String(r1.imgSrc).slice(0, 48));
     ok(r1.natural && r1.natural !== '0x0', '  这张图**真的加载出来了**', r1.natural);
     ok(!r1.badgeText, '  没有退回「译」文字徽标', String(r1.badgeText));
+
+    /* ①b 横条上的识图按钮 —— 默认图标也必须是内嵌的那张「识图键.png」 */
+    const r1b = await evalJs(ws, `(function(){
+      var b = document.querySelector('#engines .qs-img-inbar');
+      if (!b) return { found:false };
+      var img = b.querySelector('img');
+      var svg = b.querySelector('svg');
+      var badge = b.querySelector('.letter');
+      return {
+        found: true,
+        imgSrc: img ? img.getAttribute('src') : null,
+        natural: img ? img.naturalWidth + 'x' + img.naturalHeight : null,
+        hasSvg: !!svg,
+        badge: badge ? badge.textContent : null,
+        imgCount: b.querySelectorAll('img').length,
+      };
+    })()`);
+    rec('横条识图按钮：' + JSON.stringify(r1b));
+    ok(r1b.found, '横条渲染出识图按钮');
+    ok(r1b.imgCount === 1 && /^data:image\/png;base64,/.test(r1b.imgSrc || ''),
+        '  按钮里是**内嵌**的「识图键.png」<img>', String(r1b.imgSrc).slice(0, 48));
+    ok(r1b.natural && r1b.natural !== '0x0', '  这张图**真的加载出来了**', r1b.natural);
+    ok(!r1b.hasSvg, '  不再是原来的内联 SVG', 'hasSvg=' + r1b.hasSvg);
+    ok(!r1b.badge, '  没有退回「识」文字徽标', String(r1b.badge));
 
     /* ② 换一张自定义图：用户的图必须优先于内置默认图 */
     await evalJs(ws, `(function(){
@@ -184,8 +213,8 @@ async function connect(sub) {
         })()`);
         rec('设置页 @trans 成员行：' + JSON.stringify(r4));
         ok(r4.found, '设置页渲染出 @trans 成员行');
-        ok(r4.imgCount === 1 && /data\/icons\/trans\.png$/.test(r4.imgSrc || ''),
-            '  成员行图标是内置的「翻译.png」', r4.imgSrc);
+        ok(r4.imgCount === 1 && /^data:image\/png;base64,/.test(r4.imgSrc || ''),
+            '  成员行图标是**内嵌**的「翻译-copy.png」', String(r4.imgSrc).slice(0, 48));
         ok(r4.natural && r4.natural !== '0x0', '  设置页那张图也真的加载出来了', r4.natural);
     }
 

@@ -127,25 +127,17 @@ function barItemIcon(name, size) {
     }
     /* r72：识图按钮成了横条成员（`@img`）—— 设置里这张脸要和横条上一致：
      * 换过图标显示那张图，没换显示内置的「四角取景框 + 放大镜」。 */
+    /* v1.5.19：默认图标从「四角取景框 + 放大镜」内联 SVG 换成用户指定的
+     * 「识图键.png」（base64 内嵌）。实现和横条那颗共用 shared.js 的
+     * qsImgIconNode —— 设置页列表 / 设置页预览 / 横条，三处一模一样。 */
     if (name === QS_IMG) {
+        if (window.qsImgIconNode) return window.qsImgIconNode();
         const custom = CONF.overrideIcons && CONF.overrideIcons[QS_IMG];
         if (custom) {
             const img = document.createElement('img');
             img.src = custom;
             qsApplyOpticalScale(img, unifyIcons());
             return img;
-        }
-        const holder = document.createElement('span');
-        holder.innerHTML = window.QS_IMG_SVG || '';
-        const svg = holder.querySelector('svg');
-        if (svg) {
-            svg.style.width = '100%';
-            svg.style.height = '100%';
-            svg.style.display = 'block';
-            svg.style.fill = 'currentColor';
-            svg.style.color = 'var(--fg-dim)';
-            qsApplyOpticalScale(svg, unifyIcons());
-            return svg;
         }
     }
     /* v1.5.16：翻译按钮（@trans）—— 和 OCR 同一套：换过图标显示图，
@@ -209,17 +201,23 @@ function iconEditorEnabled() {
 function hasIconToEdit(key, engineName, extraSrc) {
     if (!iconEditorEnabled()) return false;
     if (iconEditSrc(key, engineName, extraSrc)) return true;
-    /* v1.5.17：翻译按钮（@trans）现在有**内置默认图**了（data/icons/trans.png），
+    /* v1.5.17：翻译按钮（@trans）现在有**内置默认图**了，
      * 所以它和真引擎一样有像素可编辑 —— 用户能在这张默认图上抠背景。
-     * 以前它只是一枚「译」字徽标，才落到下面这条「@ 开头一律不可编辑」里。 */
+     * 以前它只是一枚「译」字徽标，才落到下面那条「@ 开头一律不可编辑」里。
+     * v1.5.19：识图（@img）同理 —— 有了内置默认图「识图键.png」，也能编辑。 */
     if (key === QS_TRANS) return true;
+    if (key === QS_IMG) return true;
     if (key.indexOf('@') === 0) return false;
     const eng = BY_NAME.get(engineName || key);
     return !!(eng && eng.iconFile);
 }
 
-/** 把页面内的图片（内置 `data/icons/xxx.png`）读成 data URL。 */
+/** 把页面内的图片（内置 `data/icons/xxx.png`）读成 data URL。
+ *
+ *  v1.5.19：已经是 data URI 的（翻译 / 识图那两颗内置图就是内嵌 base64）
+ *  直接原样返回 —— 不必再 fetch 一趟把同样的字节搬一遍。 */
 async function iconSrcDataUrl(rel) {
+    if (String(rel).indexOf('data:') === 0) return String(rel);
     const r = await fetch(rel);
     if (!r.ok) throw new Error('读不到 ' + rel);
     const b = await r.blob();
@@ -251,10 +249,14 @@ async function openIconEditor(key, engineName, extraSrc) {
     }
     /* v1.5.17：翻译按钮（@trans）的内置默认图也能进编辑器 ——
      * 它不是真引擎（BY_NAME 里没有），走不到上面那条 iconFile 分支，
-     * 这里单独兜一次。取的是同一张 data/icons/trans.png。 */
-    if (!src && key === QS_TRANS && window.QS_TRANS_ICON) {
+     * 这里单独兜一次。
+     * v1.5.19：两张内置图都改成 base64 **内嵌**（不再是 data/icons/*.png
+     * 路径），但对编辑器来说没区别 —— 递进去的都还是 data URL。 */
+    const builtinIcon = key === QS_TRANS ? window.QS_TRANS_ICON
+        : (key === QS_IMG ? window.QS_IMG_ICON : null);
+    if (!src && builtinIcon) {
         try {
-            src = await iconSrcDataUrl(window.QS_TRANS_ICON);
+            src = await iconSrcDataUrl(builtinIcon);
         } catch (e) {
             toast('内置图标读不出来：' + ((e && e.message) || e));
             return;

@@ -3079,11 +3079,13 @@ async function testTrans() {
         ok('  成员行名字显示为「翻译」',
             members[0] && members[0].querySelector('.nm').textContent.indexOf('翻译') >= 0);
         /* v1.5.17：@trans 成员行的图标也是那张内置的「翻译.png」
-         * （设置页和横条走同一个 qsTransIconNode，两边长得一样）。 */
+         * （设置页和横条走同一个 qsTransIconNode，两边长得一样）。
+         * v1.5.19：图标改成**内嵌**的 base64 data URI —— 契约从
+         * 「src 指向 data/icons/trans.png」改成「src 是内嵌 data URI」。 */
         const mImg = members[0] && members[0].querySelector('img');
-        ok('  成员行图标是内置的「翻译.png」',
-            !!mImg && /data\/icons\/trans\.png$/.test(mImg.getAttribute('src')),
-            mImg && mImg.getAttribute('src'));
+        ok('  成员行图标是**内嵌**的「翻译-copy.png」',
+            !!mImg && /^data:image\/png;base64,/.test(mImg.getAttribute('src')),
+            mImg && String(mImg.getAttribute('src')).slice(0, 48));
         ok('@trans 已在横条时翻译页的「加进横条」按钮隐藏', $('btnTransInBar').hidden === true);
 
         env.pushConfig(baseConf({ barList: ['百度', 'Google'] }));
@@ -3167,12 +3169,13 @@ async function testTrans() {
 
         const transBtn = () => $('engines').querySelector('.qs-trans-inbar');
         ok('bar_list 里有 @trans 时横条渲染出翻译按钮', !!transBtn());
-        /* v1.5.17：默认图标换成了用户指定的那张图（内置在 data/icons/trans.png），
-         * 不再是「译」文字徽标。 */
+        /* v1.5.17：默认图标换成了用户指定的那张图，不再是「译」文字徽标。
+         * v1.5.19：图标改成**内嵌**的 base64 data URI —— 契约从
+         * 「src 指向 data/icons/trans.png」改成「src 是内嵌 data URI」。 */
         const transImg = () => transBtn() && transBtn().querySelector('img');
-        ok('  默认图标是内置的「翻译.png」（<img>，不是文字徽标）',
-            !!transImg() && /data\/icons\/trans\.png$/.test(transImg().getAttribute('src')),
-            transImg() && transImg().getAttribute('src'));
+        ok('  默认图标是**内嵌**的「翻译-copy.png」（<img>，不是文字徽标）',
+            !!transImg() && /^data:image\/png;base64,/.test(transImg().getAttribute('src')),
+            transImg() && String(transImg().getAttribute('src')).slice(0, 48));
         ok('  徽标文字不再出现在按钮里',
             transBtn() && transBtn().textContent.trim() === '',
             transBtn() && transBtn().textContent);
@@ -4764,6 +4767,117 @@ async function testUpdateToken() {
 }
 
 /* ================================================================== */
+
+/* ================================================================== */
+/*  v1.5.19 内置默认图标：翻译 / 识图                                    */
+/* ================================================================== */
+
+/* 用户连着说了三句：
+ *   「把这个图标作为翻译的默认图标」「这个作为识图搜索的默认图标」
+ *   「要让这些图标变成内嵌的图标」「把这两个图标代替现在的图标，
+ *    变成默认的图标」
+ *
+ *  合起来是一条硬要求，拆成三个可测的点：
+ *    ① 翻译的默认图标 = 用户给的「翻译-copy.png」，顶掉原来的「译」字徽标；
+ *    ② 识图的默认图标 = 用户给的「识图键.png」，顶掉原来的内联 SVG；
+ *    ③ 两张图**内嵌**（base64），运行时不去读任何外部图片文件。
+ *
+ *  为什么盯得这么死：外链 PNG 那条路一旦断掉（打包漏文件、路径解析错），
+ *  界面会**悄悄**退回文字徽标 —— 用户看到的只是"图标怎么变成字了"，
+ *  根本不会想到是图标没加载出来。内嵌之后这条路就不存在了。 */
+function testBuiltinIcons() {
+    console.log('');
+    console.log('=== 内置默认图标（翻译 / 识图，v1.5.19）===');
+
+    const shared = read('ui/shared.js');
+    const bar = read('ui/bar.js');
+    const setjs = read('ui/settings.js');
+    const sethtml = read('ui/settings.html');
+
+    const grab = (src, name) => {
+        const m = src.match(new RegExp('window\\.QS_' + name + '_ICON\\s*=\\s*\'([^\']+)\''));
+        return m ? m[1] : null;
+    };
+
+    const tUri = grab(shared, 'TRANS');
+    const iUri = grab(shared, 'IMG');
+
+    ok('翻译默认图标已内嵌（data URI，不是外部路径）',
+        !!tUri && /^data:image\/png;base64,/.test(tUri), (tUri || '(没找到)').slice(0, 44));
+    ok('识图默认图标已内嵌（data URI，不是外部路径）',
+        !!iUri && /^data:image\/png;base64,/.test(iUri), (iUri || '(没找到)').slice(0, 44));
+    ok('两张不是同一张图', !!tUri && !!iUri && tUri !== iUri);
+
+    /* base64 必须能还原成合法 PNG —— 编码过程最容易出的错就是截断/串位，
+     * 而这种错在界面上表现成"图裂了"，极难定位。 */
+    const pngOf = (uri) => {
+        if (!uri || !/^data:image\/png;base64,/.test(uri)) return null;
+        const b = Buffer.from(uri.split(',')[1], 'base64');
+        if (b.length < 24 || b.slice(0, 8).toString('hex') !== '89504e470d0a1a0a') return null;
+        return b;
+    };
+    const tPng = pngOf(tUri);
+    const iPng = pngOf(iUri);
+    ok('翻译图标能还原成合法 PNG', !!tPng, tPng ? tPng.length + ' 字节' : '解码失败');
+    ok('识图图标能还原成合法 PNG', !!iPng, iPng ? iPng.length + ' 字节' : '解码失败');
+
+    /* 再和素材原图逐字节比对 —— 内嵌的必须是用户给的那两张，一模一样。 */
+    const srcT = fs.existsSync(path.join(ROOT, 'ui/data/icons/trans.png'))
+        ? fs.readFileSync(path.join(ROOT, 'ui/data/icons/trans.png')) : null;
+    const srcI = fs.existsSync(path.join(ROOT, 'ui/data/icons/imgsearch.png'))
+        ? fs.readFileSync(path.join(ROOT, 'ui/data/icons/imgsearch.png')) : null;
+    ok('翻译图标与素材原图逐字节一致',
+        !!tPng && !!srcT && tPng.equals(srcT),
+        tPng && srcT ? ('内嵌 ' + tPng.length + 'B / 素材 ' + srcT.length + 'B') : '素材缺失');
+    ok('识图图标与素材原图逐字节一致',
+        !!iPng && !!srcI && iPng.equals(srcI),
+        iPng && srcI ? ('内嵌 ' + iPng.length + 'B / 素材 ' + srcI.length + 'B') : '素材缺失');
+
+    /* 四个渲染入口都得走新图，不能一处换了另一处还是老样子。 */
+    ok('shared.js 里有共用的 qsImgIconNode（识图）',
+        /window\.qsImgIconNode\s*=\s*function/.test(shared));
+    ok('shared.js 里有共用的 qsTransIconNode（翻译）',
+        /window\.qsTransIconNode\s*=\s*function/.test(shared));
+    ok('横条识图图标节点走共用实现',
+        /if \(window\.qsImgIconNode\) return window\.qsImgIconNode\(\);/.test(bar));
+    ok('横条固定位那颗也换成内置图（不再是内联 SVG 骨架）',
+        /btnImg\.dataset\.builtin/.test(bar));
+    ok('设置页识图图标走共用实现',
+        /if \(window\.qsImgIconNode\) return window\.qsImgIconNode\(\);/.test(setjs));
+
+    /* 设置页左侧两个 tab 的图标也换成内嵌 PNG。 */
+    const tabRe = /data-tab="([a-z]+)"><span class="tb-i[^"]*"[^>]*><img alt="" src="(data:image\/png;base64,[A-Za-z0-9+/=]+)"[^>]*><\/span>/g;
+    const tabs = {};
+    let m;
+    while ((m = tabRe.exec(sethtml))) tabs[m[1]] = m[2];
+    ok('设置页「翻译」tab 用的是内嵌图', tabs.trans === tUri, (tabs.trans || '(没找到)').slice(0, 44));
+    ok('设置页「识图搜索」tab 用的是内嵌图', tabs.imgsearch === iUri, (tabs.imgsearch || '(没找到)').slice(0, 44));
+    ok('两个 tab 不再用 emoji 占位',
+        !/tb-i[^"]*">🌐/.test(sethtml) && !/tb-i[^"]*">\u{1F5BC}/u.test(sethtml));
+
+    /* 真跑一遍 DOM：共用函数必须吐出 <img>，src 就是那张内嵌图，
+     * 而不是又变回「译」字徽标 / 内联 SVG。 */
+    try {
+        const env = makeEnv('ui/settings.html', baseConf({}));
+        runScripts(env, ['ui/shared.js']);
+        const w = env.w;
+        const tNode = w.qsTransIconNode();
+        const iNode = w.qsImgIconNode();
+        ok('翻译按钮节点是 <img> 且 src 是内嵌图',
+            tNode && tNode.tagName === 'IMG' && tNode.getAttribute('src') === tUri,
+            tNode ? tNode.tagName + ' / ' + String(tNode.getAttribute('src')).slice(0, 44) : 'null');
+        ok('识图按钮节点是 <img> 且 src 是内嵌图',
+            iNode && iNode.tagName === 'IMG' && iNode.getAttribute('src') === iUri,
+            iNode ? iNode.tagName + ' / ' + String(iNode.getAttribute('src')).slice(0, 44) : 'null');
+        ok('识图按钮不再是内联 SVG（用户指定的新图真的顶上去了）',
+            iNode && iNode.tagName !== 'svg' && !iNode.querySelector('svg'));
+        ok('翻译按钮不再是「译」字徽标',
+            tNode && tNode.tagName === 'IMG' && !tNode.textContent.includes('译'));
+    } catch (e) {
+        ok('共用图标函数能正常跑起来', false, e && (e.stack || String(e)));
+    }
+}
+
 (async function main() {
     try {
         await testSettings();
@@ -4785,6 +4899,7 @@ async function testUpdateToken() {
         await testFavTools();
         await testPanelNoFlicker();
         await testCatJump();
+        await testBuiltinIcons();
     } catch (e) {
         ok('测试过程中不应抛异常', false, e && (e.stack || String(e)));
     }

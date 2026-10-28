@@ -1932,6 +1932,19 @@ body.idx-on .to-top { bottom: 56px; }
 }
 .tabs button.on .tb-i { filter: none; opacity: 1; }
 
+/* v1.5.19：「翻译」「识图搜索」两个 tab 改用内置 PNG 图标（base64 内嵌）。
+ *
+ *  emoji 图标统一 grayscale 变灰，是为了让十几个 tab 的彩色 emoji 视觉齐平；
+ *  但这两颗是**品牌图标**（蓝色系），灰化之后跟旁边的 🎨 ✂️ 挤在一起反而
+ *  看不出是什么 —— 所以带图的这两颗单独去掉灰度。 */
+.tabs .tb-i-img { filter: none; }
+.tabs .tb-i-img img {
+    width: 14px;
+    height: 14px;
+    object-fit: contain;
+    display: block;
+}
+
 /* 目录的滚动条收窄：默认 10px 那条在 168px 的侧栏里太占地 */
 .tabs::-webkit-scrollbar { width: 6px; }
 .tabs::-webkit-scrollbar-thumb {

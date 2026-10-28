@@ -2537,6 +2537,13 @@ btnLink.addEventListener('click', () => {
  *  脸"抽出来复用 —— 固定位那颗 `#btnImg` 与引擎区里那颗 `@img` 用同一份逻辑，
  *  换图标 / 恢复默认之后两处不会出现"一个变了另一个还是老样子"。 */
 function imgIconNode() {
+    /* v1.5.19：默认图标从「内联 SVG」换成用户指定的「识图键.png」（base64 内嵌）。
+     *
+     *  实现搬到 shared.js 的 qsImgIconNode —— 和翻译那颗（qsTransIconNode）
+     *  同一套结构：横条固定位那颗、横条 bar_list 里那颗、设置页列表、
+     *  设置页预览，四处长得一模一样，不会"一个换了另一个还是老样子"。
+     *  shared.js 没加载上（理论上不可能）才退回下面这段老逻辑。 */
+    if (window.qsImgIconNode) return window.qsImgIconNode();
     const custom = CONF && CONF.overrideIcons && CONF.overrideIcons[window.QS_IMG];
     const unify = !window.CONF || window.CONF.unifyIcons !== false;
     if (custom) {
@@ -2618,15 +2625,23 @@ function syncImgBtn() {
          *      序列化 → 同一条 canvas 测量管线 → 系数写回 --qs-optical。
          * 这颗内置 SVG 的 viewBox 留白约 12%（四角取景框不占满），量出来的系数
          * 会把主体撑到和铺满型图标一致。 */
-        if (btnImg.dataset.custom) {
-            // 换回内置：清掉标记，恢复 SVG
+        /* v1.5.19：内置默认图标从「内联 SVG」换成用户指定的「识图键.png」
+         *  （base64 内嵌，见 shared.js 的 QS_IMG_ICON）。
+         *
+         *  两种情况下要重建按钮内容：
+         *    ① 刚从「用户自定义图」切回默认 —— dataset.custom 标记还在；
+         *    ② 第一次渲染 —— 按钮里还是 index.html 里那份静态 SVG 骨架。
+         *  用 dataset.builtin 打标记，避免每次 syncImgBtn 都重建（重建会让
+         *  <img> 重新解码，肉眼能看见闪一下）。 */
+        if (btnImg.dataset.custom || !btnImg.dataset.builtin) {
             delete btnImg.dataset.custom;
-            const back = builtinImgSvg();
-            if (back) btnImg.innerHTML = back;
+            btnImg.innerHTML = '';
+            btnImg.dataset.builtin = '1';
+            btnImg.appendChild(imgIconNode());
         }
-        const svg = btnImg.querySelector('svg');
-        if (svg && window.qsApplyOpticalScale) {
-            window.qsApplyOpticalScale(svg, window.CONF ? window.CONF.unifyIcons !== false : true);
+        const im = btnImg.querySelector('img');
+        if (im && window.qsApplyOpticalScale) {
+            window.qsApplyOpticalScale(im, window.CONF ? window.CONF.unifyIcons !== false : true);
         }
     }
 }
