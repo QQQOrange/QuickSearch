@@ -163,6 +163,14 @@ static GEN: AtomicUsize = AtomicUsize::new(0);
 /// 主观上就是「横条会莫名其妙地出来」。
 static DISMISS_EPOCH: AtomicUsize = AtomicUsize::new(0);
 
+/// 「用户又操作了鼠标 / 按了 Esc」的计数（v1.5.22）。
+///
+/// 取词是否作废，以前看 `DISMISS_EPOCH` —— 但那个会被**程序性**收起也加
+/// （比如 `capture_by_ocr` 发现横条挡住裁图时会自己 dismiss 一次），于是
+/// "明明选到了文字也不弹"（用户报的 bug）。现在改看这个：只有用户在取词期间
+/// **又松了一次鼠标**（点别处 / 重新划选）或**按了 Esc** 才作废。
+static INPUT_EPOCH: AtomicUsize = AtomicUsize::new(0);
+
 /// 剪贴板操作的串行锁。
 ///
 /// 为什么要它：取词有**两条**路径会同时动剪贴板 —— 拖选那条要先模拟 Ctrl+C
@@ -2143,7 +2151,10 @@ fn capture_by_ocr(drag: (i32, i32, i32, i32)) -> Option<String> {
             &jpg,
             &cfg.ocr_lang,
             cfg.ocr_accurate,
-            20,
+            // v1.5.22：划词取词只等 4 秒。以前给 20 秒，远程引擎一慢就把 BUSY
+            // 占住 —— 后面 4.5 秒内的划选全被"上一次取词未结束"放弃，表现是
+            // "选中文字一直不弹"。4s < BUSY 等待 4.5s，不会再堵住下一次。
+            4,
             &ocr_engines::OcrUrls::default(),
         )
         .map(|o| o.text);
@@ -2621,7 +2632,7 @@ fn start_capture(target_pid: u32, drag: (i32, i32, i32, i32)) {
             /* 取词开始时的"用户收起过几次"。三条通道（编辑控件 → UIA → OCR）
              * 加起来可能要几百毫秒，这期间用户完全可能点了别处、按了 Esc ——
              * 那他就不要这条了，读完也别再弹（见 DISMISS_EPOCH 的注释）。 */
-            let epoch0 = DISMISS_EPOCH.load(Ordering::SeqCst);
+            let epoch0 = INPUT_EPOCH.load(Ordering::SeqCst);
             /* QS_FORCE_COPY=1：**仅测试用**，走"模拟复制 + 还原"的老通道 ——
              * 用来把 UIA 通道的结果和老通道并排对比。平时永远走下面那条。 */
             let out = if std::env::var("QS_FORCE_COPY").map(|v| v == "1").unwrap_or(false) {
@@ -2698,8 +2709,8 @@ fn start_capture(target_pid: u32, drag: (i32, i32, i32, i32)) {
             /* ⚠ 取词的这几百毫秒里，用户可能已经点了别处 / 按了 Esc —— 那说明
              * 他不要这条。此时再弹出来，主观上就是「横条会莫名其妙地冒出来」
              * （而且是在他已经去干别的之后）。作废这一次。 */
-            if DISMISS_EPOCH.load(Ordering::SeqCst) != epoch0 {
-                win::log("start_capture: 取词期间用户收了条/点了别处 —— 这一次不弹");
+            if INPUT_EPOCH.load(Ordering::SeqCst) != epoch0 {
+                win::log("start_capture: 取词期间你又点击/划选了一次 —— 这一次不弹");
                 return;
             }
             /* 把这次拖选的矩形一并带过去：浏览器里真光标取不到，
@@ -3410,6 +3421,9 @@ fn spawn_detector() {
                     }
                     Ev::Up(x, y, t) => {
                         let d = down.take();
+                        // v1.5.22：任何一次松手都算"用户又操作了" —— 取词期间
+                        // 若有新的 Up，说明他已经去点别处 / 重新划选了。
+                        INPUT_EPOCH.fetch_add(1, Ordering::SeqCst);
                         /* ══════════════════════════════════════════════════
                          * r93：**拖动判定不能只靠 Move 事件**（用户报"有时候不弹"）
                          *
@@ -3504,6 +3518,10 @@ fn spawn_detector() {
                         }
                     }
                     Ev::KeyDown(vk, seq0, ctrl, alt, shift, win, ours) => {
+                        // v1.5.22：取词期间按 Esc = 用户主动取消这次划选
+                        if vk == VK_ESCAPE.0 as u32 {
+                            INPUT_EPOCH.fetch_add(1, Ordering::SeqCst);
+                        }
                         /* ⚠ ctrl / alt 是**钩子回调当时**读到的状态（见 hook.rs 的
                          * Ev::KeyDown 注释），不是这里现读的 —— 消费线程是异步的，
                          * 等排到这条事件时用户可能已经把 Ctrl 松开了，现读会得到 false，
