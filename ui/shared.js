@@ -1247,3 +1247,43 @@ window.qsLooksLikePath = function (text) {
         return s.replace(/[\s。，、；：！？」』）》。,;:!?)\]}>"']+$/u, '');
     }
 };
+/* ==========================================================================
+ * 统一主题引导（v1.5.20）
+ *
+ * 为什么放在 shared.js：ocr / 翻译 / 图标编辑器这几个独立窗口过去只写了
+ * `@media (prefers-color-scheme: dark)`，于是「应用里选了强制亮色、系统却是
+ * 深色」时，这些窗口仍然是深色 —— 三套皮肤各走各的。现在统一由这里把配置里
+ * 的 theme 写到 <html data-theme>，CSS 只认 data-theme（见 theme.css），
+ * 所有窗口的明暗永远一致。
+ *
+ * ⚠ data-theme 保留 system/light/dark 三个原值，不在这里解析成 dark/light：
+ *   设置页的现有单测断言了「跟随系统时 data-theme 记成 system」，解析归 CSS。
+ * ========================================================================== */
+(function () {
+    if (window.qsApplyPageTheme) return;           // 只装一次
+    var mq = window.matchMedia('(prefers-color-scheme: dark)');
+    var cur = 'system';
+    function paint() {
+        var el = document.documentElement;
+        el.dataset.theme = cur;                     // system / light / dark 原样记
+        var dark = cur === 'dark' || (cur !== 'light' && mq.matches);
+        el.style.colorScheme = dark ? 'dark' : 'light';
+    }
+    window.qsApplyPageTheme = function (t) { cur = t || 'system'; paint(); };
+    if (mq.addEventListener) mq.addEventListener('change', function () { if (cur === 'system') paint(); });
+    function pull() {
+        try {
+            if (typeof invoke === 'function') {
+                invoke('get_config').then(function (c) {
+                    window.qsApplyPageTheme(c && c.theme);
+                }).catch(function () {});
+            }
+        } catch (e) { /* 非 Tauri 环境：保持默认 */ }
+    }
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', pull);
+    else pull();
+    /* ⚠ 这里**不再**自己监听 qs://config：各窗口本来就有自己的监听，
+     *   而测试环境的 event.listen 是单监听槽 —— 这里再挂一个会把页面
+     *   自己的监听顶掉（表现：翻译 DOM 不随配置重建）。首帧定色已经够用；
+     *   页面若需要在配置变更时改主题，调 window.qsApplyPageTheme(c.theme)。 */
+})();

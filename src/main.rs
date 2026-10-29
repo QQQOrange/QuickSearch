@@ -18378,6 +18378,42 @@ mod tests {
                 "accurate=false 时应当走标准版：{second}");
     }
 
+    /// 「切换精度档」必须真的换接口、换结果 —— 不是摆设。
+    ///
+    /// 直接回答用户那个问题：设置页点「高精度」和「标准」，同一张图走到的是
+    /// 两个不同端点，返回的文本和标签都不同。任何一个环节断了（前端没送
+    /// bool / 后端没透传 / 端点选错），这条都会红。
+    #[test]
+    fn ocr_accuracy_switch_changes_endpoint_and_result() {
+        let (base, rx) = mock_split(
+            r#"{"access_token":"T-SW","expires_in":2592000}"#,
+            // 高精度档（accurate_basic）才给这一行
+            r#"{"words_result":[{"words":"高精度档才认得出的这一行"}]}"#,
+            // 标准档（general_basic）
+            r#"{"words_result":[{"words":"标准档的结果"}]}"#,
+        );
+        let ep = mock_endpoints(&base);
+
+        let hi = ocr::recognize_with("k-sw-hi", "s-sw-hi", &fake_png(), "CHN_ENG", true, 10, &ep)
+            .expect("高精度档应当成功");
+        let lo = ocr::recognize_with("k-sw-lo", "s-sw-lo", &fake_png(), "CHN_ENG", false, 10, &ep)
+            .expect("标准档应当成功");
+
+        assert_eq!(hi.engine, "高精度版", "选了高精度，标签就该是高精度版");
+        assert_eq!(lo.engine, "标准版", "选了标准，标签就该是标准版");
+        assert_ne!(hi.text, lo.text, "两档必须拿到不同结果，否则「切换」就是摆设");
+
+        // 端点也要分开：一个 accurate_basic、一个 general_basic
+        let mut seen = Vec::new();
+        while let Ok(r) = rx.recv_timeout(std::time::Duration::from_millis(300)) {
+            seen.push(r);
+        }
+        assert!(seen.iter().any(|r| r.starts_with("POST /rest/2.0/ocr/v1/accurate_basic")),
+                "没看到高精度端点请求：{seen:?}");
+        assert!(seen.iter().any(|r| r.starts_with("POST /rest/2.0/ocr/v1/general_basic")),
+                "没看到标准版端点请求：{seen:?}");
+    }
+
     /// 一个字都没认出来时，提示要引导用户换区域，而不是显示一个空框
     #[test]
     fn ocr_mock_empty_result_asks_user_to_retry() {

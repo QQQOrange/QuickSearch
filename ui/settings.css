@@ -4,61 +4,6 @@
 
 * { box-sizing: border-box; }
 
-:root {
-    --bg: #F5F6F8;
-    --card: #FFFFFF;
-    --fg: #1B1D23;
-    --fg-dim: #6B6F7A;
-    --line: #E4E6EB;
-    --hover: rgba(15, 20, 40, .055);
-    --accent: #3B7DFF;
-    --danger: #E5484D;
-    --shadow: 0 1px 2px rgba(16, 24, 40, .05), 0 6px 20px -12px rgba(16, 24, 40, .24);
-}
-
-/* 主题三档：跟随系统（默认）/ 亮色 / 暗色，由 JS 把 data-theme 写在 <html> 上。
- *
- * 关键点：强制亮色时要能**盖掉**下面那条跟随系统的深色规则，所以
- *   · 深色规则只在 :root:not([data-theme="light"]) 下生效；
- *   · 强制暗色再单独写一份 :root[data-theme="dark"]（不受系统深浅影响）。
- * 两套深色值必须保持一致，改一处要记得改另一处。
- */
-@media (prefers-color-scheme: dark) {
-    :root:not([data-theme="light"]) {
-        --bg: #17181C;
-        --card: #1E1F24;
-        --fg: #ECEDF1;
-        --fg-dim: #A0A4AF;
-        --line: rgba(255, 255, 255, .12);
-        --hover: rgba(255, 255, 255, .08);
-        --accent: #6FA1FF;
-        --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 8px 24px -14px rgba(0, 0, 0, .6);
-    }
-}
-
-:root[data-theme="dark"] {
-    --bg: #17181C;
-    --card: #1E1F24;
-    --fg: #ECEDF1;
-    --fg-dim: #A0A4AF;
-    --line: rgba(255, 255, 255, .12);
-    --hover: rgba(255, 255, 255, .08);
-    --accent: #6FA1FF;
-    --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 8px 24px -14px rgba(0, 0, 0, .6);
-}
-
-/* 强制亮色：系统虽然是深色，这里也要拉回浅色一套 */
-:root[data-theme="light"] {
-    --bg: #F5F6F8;
-    --card: #FFFFFF;
-    --fg: #1B1D23;
-    --fg-dim: #6B6F7A;
-    --line: #E4E6EB;
-    --hover: rgba(15, 20, 40, .055);
-    --accent: #3B7DFF;
-    --shadow: 0 1px 2px rgba(16, 24, 40, .05), 0 6px 20px -12px rgba(16, 24, 40, .24);
-}
-
 html, body {
     margin: 0;
     height: 100%;
@@ -155,7 +100,7 @@ main::-webkit-scrollbar-thumb:hover { background: var(--fg-dim); }
 .card {
     background: var(--card);
     border: 1px solid var(--line);
-    border-radius: 12px;
+    border-radius: var(--radius-lg);
     box-shadow: var(--shadow);
     padding: 14px 16px 16px;
 }
@@ -244,7 +189,7 @@ main::-webkit-scrollbar-thumb:hover { background: var(--fg-dim); }
     width: 18px; height: 18px;
     border-radius: 50%;
     background: #fff;
-    box-shadow: 0 1px 3px rgba(0, 0, 0, .3);
+    box-shadow: var(--elev-1);
     transition: transform .16s cubic-bezier(.22, 1, .36, 1);
 }
 .sw input:checked + i { background: var(--accent); }
@@ -265,7 +210,7 @@ input[type=range]::-webkit-slider-thumb {
     border-radius: 50%;
     background: var(--accent);
     border: 2px solid var(--card);
-    box-shadow: 0 1px 4px rgba(0, 0, 0, .32);
+    box-shadow: var(--elev-1);
     cursor: pointer;
 }
 
@@ -556,9 +501,9 @@ input[type=range]::-webkit-slider-thumb {
     font: inherit;
     font-size: 11.5px;
     cursor: pointer;
-    box-shadow: 0 4px 16px rgba(0, 0, 0, .14);
-    transition: background-color .12s ease, color .12s ease, border-color .12s ease,
-                transform .12s ease;
+    box-shadow: var(--elev-2);
+    transition: background-color .16s var(--ease), color .16s var(--ease), border-color .16s var(--ease),
+                transform .16s var(--ease);
 }
 .idx-fab[hidden] { display: none; }
 .idx-fab:hover { background: var(--hover); color: var(--fg); transform: translateY(-1px); }
@@ -669,7 +614,7 @@ input[type=range]::-webkit-slider-thumb {
     font: inherit;
     font-size: 11.5px;
     cursor: pointer;
-    box-shadow: 0 4px 16px rgba(0, 0, 0, .14);
+    box-shadow: var(--elev-2);
     opacity: 0;
     transform: translateY(8px);
     pointer-events: none;
@@ -1902,7 +1847,7 @@ body.idx-on .to-top { bottom: 56px; }
     cursor: pointer;
     border-radius: 8px;
     white-space: nowrap;
-    transition: color .14s ease, background-color .14s ease;
+    transition: color .14s var(--ease), background-color .14s var(--ease);
 }
 .tabs button:hover { color: var(--fg); background: var(--hover); }
 
@@ -1934,10 +1879,10 @@ body.idx-on .to-top { bottom: 56px; }
 
 /* v1.5.19：「翻译」「识图搜索」两个 tab 改用内置 PNG 图标（base64 内嵌）。
  *
- *  emoji 图标统一 grayscale 变灰，是为了让十几个 tab 的彩色 emoji 视觉齐平；
- *  但这两颗是**品牌图标**（蓝色系），灰化之后跟旁边的 🎨 ✂️ 挤在一起反而
- *  看不出是什么 —— 所以带图的这两颗单独去掉灰度。 */
-.tabs .tb-i-img { filter: none; }
+ *  尺寸跟其它 emoji tab 的 tb-i 对齐；灰度走上面的统一规则 ——
+ *  未选中时灰掉（grayscale），选中那颗恢复彩色，扫过去时颜色也是一层提示。
+ *  v1.5.20 修正：之前给这两颗单独写了 filter:none，于是它们任何状态都是彩色、
+ *  跟旁边 tab 的明暗逻辑对不上 —— 现在不再覆盖，交给 .tb-i 的统一规则。 */
 .tabs .tb-i-img img {
     width: 14px;
     height: 14px;
@@ -3011,12 +2956,6 @@ body.fav-item-dragging * { cursor: grabbing !important; }
 /* ------------------------ 本地 OCR 环境检测卡片 ------------------------
    语义色（就绪 / 待补充）三套主题各定义一份，和 --shadow 同一套路：
    浅色下深字、深色下亮字，保证文字和底色的对比度两边都够。 */
-:root {
-    --ok: #2E9E4F;
-    --ok-bg: rgba(46, 158, 79, .09);
-    --warn: #B26A00;
-    --warn-bg: rgba(214, 138, 10, .11);
-}
 @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
         --ok: #52BE71;

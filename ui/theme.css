@@ -1,0 +1,106 @@
+/* ============================================================
+   Quick Search —— 设计令牌（Design Tokens）
+   ============================================================
+
+   所有窗口（设置 / 识别结果 / 翻译 / 图标编辑器）共用这一份颜色与
+   尺寸令牌，页面自己只写布局和组件样式。
+
+   为什么抽出来（v1.5.20）：
+   · 以前 --bg/--card/--fg/--line/--hover/--accent 在 4 个文件里各抄一份，
+     深色再各自抄一遍。结果已经**漂移**了：settings.css 的 --hover 是 .055，
+     另外三个窗口是 .06；--danger 一边 #E5484D 一边 #C42B1C。
+   · 改一个颜色要翻 5 个文件、8 处，必然越改越乱。
+
+   主题三档：跟随系统（默认，data-theme="system"）/ 亮色 / 暗色。
+   JS 把 data-theme 写在 <html> 上（见 shared.js 的统一主题引导）。
+   · 深色规则带 `:root:not([data-theme="light"])`，强制亮色时能盖掉系统深色；
+   · 强制暗色单独一份 `:root[data-theme="dark"]`，不受系统深浅影响。
+   ============================================================ */
+
+:root {
+    /* ---------- 中性色 / 品牌色（浅色默认） ---------- */
+    --bg: #F5F6F8;
+    --card: #FFFFFF;
+    --fg: #1B1D23;
+    --fg-dim: #6B6F7A;
+    --line: #E4E6EB;
+    --hover: rgba(15, 20, 40, .055);
+    --accent: #3B7DFF;
+    --danger: #E5484D;
+    --shadow: 0 1px 2px rgba(16, 24, 40, .05), 0 6px 20px -12px rgba(16, 24, 40, .24);
+    --elev-1: 0 1px 3px rgba(16, 24, 40, .18);
+    --elev-2: 0 4px 16px rgba(16, 24, 40, .10);
+
+    /* ---------- 语义色（就绪 / 待补充） ---------- */
+    --ok: #2E9E4F;
+    --ok-bg: rgba(46, 158, 79, .09);
+    --warn: #B26A00;
+    --warn-bg: rgba(214, 138, 10, .11);
+
+    /* ---------- UI 令牌：统一圆角与过渡曲线 ----------
+     * 以前圆角散落成 4/6/8/10/12/14px 各种值，过渡曲线也各写各的。
+     * 这里收敛成三档圆角 + 一条 ease，组件按语义挑档位。 */
+    --radius-sm: 6px;
+    --radius-md: 10px;
+    --radius-lg: 12px;
+    --ease: cubic-bezier(.2, .7, .3, 1);
+}
+
+/* 跟随系统深色（未强制亮色时生效） */
+@media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+        --bg: #17181C;
+        --card: #1E1F24;
+        --fg: #ECEDF1;
+        --fg-dim: #A0A4AF;
+        --line: rgba(255, 255, 255, .12);
+        --hover: rgba(255, 255, 255, .08);
+        --accent: #6FA1FF;
+        --danger: #FF6B5E;
+        --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 8px 24px -14px rgba(0, 0, 0, .6);
+    --elev-1: 0 1px 3px rgba(0, 0, 0, .45);
+    --elev-2: 0 6px 20px rgba(0, 0, 0, .50);
+        --ok: #52BE71;
+        --ok-bg: rgba(82, 190, 113, .13);
+        --warn: #E0A33C;
+        --warn-bg: rgba(224, 163, 60, .13);
+    }
+}
+
+/* 强制暗色（系统是浅色也照暗） */
+:root[data-theme="dark"] {
+    --bg: #17181C;
+    --card: #1E1F24;
+    --fg: #ECEDF1;
+    --fg-dim: #A0A4AF;
+    --line: rgba(255, 255, 255, .12);
+    --hover: rgba(255, 255, 255, .08);
+    --accent: #6FA1FF;
+    --danger: #FF6B5E;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 8px 24px -14px rgba(0, 0, 0, .6);
+    --elev-1: 0 1px 3px rgba(0, 0, 0, .45);
+    --elev-2: 0 6px 20px rgba(0, 0, 0, .50);
+    --ok: #52BE71;
+    --ok-bg: rgba(82, 190, 113, .13);
+    --warn: #E0A33C;
+    --warn-bg: rgba(224, 163, 60, .13);
+}
+
+/* 强制亮色（系统是深色也照亮） */
+:root[data-theme="light"] {
+    --bg: #F5F6F8;
+    --card: #FFFFFF;
+    --fg: #1B1D23;
+    --fg-dim: #6B6F7A;
+    --line: #E4E6EB;
+    --hover: rgba(15, 20, 40, .055);
+    --accent: #3B7DFF;
+    --danger: #E5484D;
+    --shadow: 0 1px 2px rgba(16, 24, 40, .05), 0 6px 20px -12px rgba(16, 24, 40, .24);
+    --elev-1: 0 1px 3px rgba(16, 24, 40, .18);
+    --elev-2: 0 4px 16px rgba(16, 24, 40, .10);
+    --ok: #2E9E4F;
+    --ok-bg: rgba(46, 158, 79, .09);
+    --warn: #B26A00;
+    --warn-bg: rgba(214, 138, 10, .11);
+}

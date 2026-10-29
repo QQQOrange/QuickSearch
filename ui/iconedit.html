@@ -4,36 +4,13 @@
 <meta charset="utf-8">
 <meta name="color-scheme" content="light dark">
 <title>编辑图标</title>
+<link rel="stylesheet" href="theme.css">
 <style>
 /* 图标编辑器（#143）：换图标后一键消除背景 + 前后对比 + 保存/取消。
  * 独立窗口、独立文件（和 ocr.html 同款做法）：这个页面的版式
  * 「标题 → 前后对比 → 控制行 → 底部按钮」和设置页差得远，塞不进去。
  * 主题跟随系统（和 OCR 结果窗同一套 CSS 变量口径）。 */
 * { box-sizing: border-box; }
-
-:root {
-    --bg: #F5F6F8;
-    --card: #FFFFFF;
-    --fg: #1B1D23;
-    --fg-dim: #6B6F7A;
-    --line: #E4E6EB;
-    --hover: rgba(15, 20, 40, .06);
-    --accent: #3B7DFF;
-    --danger: #C42B1C;
-}
-
-@media (prefers-color-scheme: dark) {
-    :root {
-        --bg: #17181C;
-        --card: #1E1F24;
-        --fg: #ECEDF1;
-        --fg-dim: #A0A4AF;
-        --line: rgba(255, 255, 255, .12);
-        --hover: rgba(255, 255, 255, .09);
-        --accent: #6FA1FF;
-        --danger: #FF6B5E;
-    }
-}
 
 html, body {
     margin: 0;
