@@ -292,13 +292,37 @@ for (const ev of ['pointermove', 'pointerdown', 'pointerup', 'wheel', 'keydown',
 }
 
 
-/** 横条待机淡度的唯一落点：该淡的时候挂 `qs-dim`，不该淡的时候摘。
+/** 横条待机淡度的唯一落点（v1.5.21：改成「延迟渐隐」）。
  *
- *  「不该淡」的两种情况：① 鼠标正压在横条上；② 面板开着 —— 用户正在面板里
- *  点东西，背后的横条淡下去只会让人找不着北（轮 27 需求：悬停平滑过渡到
- *  完全不透明，默认 100 时这套机制等于不存在）。 */
+ *  行为：横条弹出后先按 --qs-alpha 全不透明显示，过了 barDimDelayMs 才平滑
+ *  淡到 --qs-dim-alpha。
+ *  旧实现是登场那一帧就挂 qs-dim + qs-dim-noanim —— 于是「一出现就是半透明的」，
+ *  正是用户报的问题。现在「何时开始淡」由 barDimDelayMs 决定，0 = 立即淡。
+ *
+ *  「不该淡」的三种情况：① 指针在横条上；② 面板开着（用户正在里面点东西）；
+ *  ③ barDimAlpha = 100（这套机制被关掉）。落到不该淡时立刻撤掉 qs-dim ——
+ *  悬停必须马上变亮，不能等延迟。
+ */
+let dimTimer = 0;
+function dimPct() {
+    return Math.max(10, Math.min(100, Number(CONF && CONF.barDimAlpha) || 45));
+}
+function dimAllowed() {
+    return panelEl.hidden && !barHovered && dimPct() < 100;
+}
 function syncDim() {
-    barEl.classList.toggle('qs-dim', panelEl.hidden && !barHovered);
+    if (dimTimer) { clearTimeout(dimTimer); dimTimer = 0; }
+    if (!dimAllowed()) { barEl.classList.remove('qs-dim'); return; }
+    /* 已经淡着就保持 —— 面板开合 / 布局重排会重复调 syncDim，
+     * 每次都"先亮一下再重新计时"会闪。 */
+    if (barEl.classList.contains('qs-dim')) return;
+    const ms = Math.max(0, Math.min(10_000, Number(CONF && CONF.barDimDelayMs)));
+    const delay = Number.isFinite(ms) ? ms : 1500;
+    if (delay <= 0) { barEl.classList.add('qs-dim'); return; }
+    dimTimer = setTimeout(() => {
+        dimTimer = 0;
+        if (dimAllowed()) barEl.classList.add('qs-dim');
+    }, delay);
 }
 /** 收藏面板是否钉在屏幕上（后端 FAV_PINNED 同步）。 */
 let favPinned = false;
@@ -3224,20 +3248,14 @@ listen('qs://show', (ev) => {
     if (!barVisible) {
         barVisible = true;
         replayBarIn();
-        /* 待机淡度：出现的那一帧就该是淡的。挂 qs-dim-noanim 把过渡掐掉 ——
-         * 窗口隐藏期间的样式变更会被浏览器当成一次过渡的起点，不掐的话
-         * 每次弹出都先"从全不透明淡到待机淡"闪一下，与需求相反。
-         * 两帧之后摘掉它：之后的悬停/离开照常平滑过渡。
-         * ⚠ 指针可能已经在横条上方（横条就是照着它弹出来的）：这时不该淡着
-         * 等一次不一定来的 mouseenter，直接按「已悬停」处理。 */
+        /* v1.5.21：弹出时**先保持不透明**，过了 barDimDelayMs 才平滑淡到
+         * --qs-dim-alpha。
+         * 旧写法是登场那一帧就 add('qs-dim','qs-dim-noanim') —— 于是横条
+         * 「一出现就是半透明的」，与用户要的"先亮着、过一会再淡"相反。
+         * ⚠ 指针可能已经在横条上方（横条就是照着它弹出来的）：这时不该淡。 */
         barHovered = barEl.matches(':hover');
-        if (barHovered) {
-            barEl.classList.remove('qs-dim');
-        } else {
-            barEl.classList.add('qs-dim', 'qs-dim-noanim');
-            requestAnimationFrame(() => requestAnimationFrame(
-                () => barEl.classList.remove('qs-dim-noanim')));
-        }
+        barEl.classList.remove('qs-dim');   // 复用窗口时清掉上一轮的残留
+        syncDim();                          // 延迟计时从这一帧开始
     }
     /* 只有**真的换了一次触发**才收起面板。
      * 同一次触发的重复 show（鼠标挪一下就再来一条）不该动用户已经打开的东西 ——

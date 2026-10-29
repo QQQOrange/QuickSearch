@@ -226,6 +226,10 @@
             <div class="rt"><b>悬停前透明度</b><small><span id="s-barDimAlphaVal">45</span> % · 鼠标没移上去时的淡度；100% = 关掉这套行为</small></div>
             <input type="range" id="s-barDimAlpha" min="10" max="100" step="1">
         </div>
+        <div class="row col">
+            <div class="rt"><b>渐隐延迟</b><small><span id="s-barDimDelayVal">1.5 秒</span> · 横条弹出后先保持不透明，过这么久才渐渐变淡到上面的「悬停前透明度」· 0 = 立即变淡</small></div>
+            <input type="range" id="s-barDimDelay" min="0" max="5000" step="250">
+        </div>
         <div class="row">
             <div class="rt"><b>界面动画</b><small>关闭后横条不再有浮现动画</small></div>
             <label class="sw"><input type="checkbox" id="s-animations"><i></i></label>

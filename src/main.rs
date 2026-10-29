@@ -3719,6 +3719,8 @@ fn config_view() -> Value {
         "alpha": cfg.alpha,
         // 待机（鼠标没悬停）时的横条不透明度。设成 100 就等于关掉这套行为。
         "barDimAlpha": cfg.bar_dim_alpha,
+        // 渐隐延迟（毫秒）：弹出后先不透明，过了它才淡到 barDimAlpha。
+        "barDimDelayMs": cfg.bar_dim_delay_ms,
         // 液态玻璃一组。前端按这些参数驱动 WebGL2 渲染器（liquidGL 移植版数学）。
         "barGlass": cfg.bar_glass,
         "barGlassRefraction": cfg.bar_glass_refraction,
@@ -3901,6 +3903,7 @@ fn apply_view(v: &Value, cfg: &mut config::Config) {
     // 待机透明度允许压得更低（最低 10%），但夹在 10-100：0% 会让横条直接
     // 消失看不见，和「它在那儿只是淡」是两回事。
     if let Some(x) = n("barDimAlpha") { cfg.bar_dim_alpha = x.clamp(10, 100) as u32; }
+    if let Some(x) = n("barDimDelayMs") { cfg.bar_dim_delay_ms = x.min(10_000) as u32; }
     // 玻璃一组：恢复备份时原样灌回（老备份没有这些键 → 保持默认，不强行开）
     if let Some(x) = b("barGlass") { cfg.bar_glass = x; }
     if let Some(x) = n("barGlassRefraction") { cfg.bar_glass_refraction = x.clamp(0, 60) as u32; }
@@ -4353,6 +4356,10 @@ fn apply_one_setting(cfg: &mut config::Config, key: &str, value: Value) -> Resul
         // 10 —— 压得太低横条会"几乎看不见"，用户主动要求时也随他。
         "barDimAlpha" => {
             cfg.bar_dim_alpha = value.as_u64().unwrap_or(45).clamp(10, 100) as u32;
+        }
+        // 渐隐延迟（毫秒）：0 = 立即淡；上限 10 秒（和 sanitize 同一口径）。
+        "barDimDelayMs" => {
+            cfg.bar_dim_delay_ms = value.as_u64().unwrap_or(1500).min(10_000) as u32;
         }
         // 液态玻璃一组。set_setting 是白名单式的，不登记就是"看着有反应其实没存"。
         "barGlass" => cfg.bar_glass = value.as_bool().unwrap_or(true),

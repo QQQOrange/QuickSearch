@@ -2800,6 +2800,7 @@ const SWITCH_DEFAULT = {
     triggerCopy: true,
     // 2026-10-23：划选没取到文字就不弹（与 config.rs 的 serde 默认值一致）
     barNeedText: true,
+    barDimDelayMs: 1500,
     anchorAtMouse: false,
     autoStart: false,
     autoElevate: true,
@@ -3109,6 +3110,8 @@ const SLIDERS = [
     ['s-itemRadius', 's-itemRadiusVal', 'itemRadius', 9],
     ['s-alpha', 's-alphaVal', 'alpha', 100],
     ['s-barDimAlpha', 's-barDimAlphaVal', 'barDimAlpha', 45],
+    // v1.5.21：渐隐延迟（毫秒）—— 0 = 弹出即淡，默认 1.5 秒后才淡
+    ['s-barDimDelay', 's-barDimDelayVal', 'barDimDelayMs', 1500],
     ['s-delay', 's-delayVal', 'delayMs', 0],
     // 2026-10-23：横条自己收起来的两条阈值（0 = 不收起）
     ['s-barIdle', 's-barIdleVal', 'barIdleSec', 5],
@@ -3136,6 +3139,7 @@ const SLIDER_LABEL = {
      * 以为"立刻收"，必须显式说出来。 */
     barIdleSec: (v) => (Number(v) === 0 ? '不收起' : v + ' 秒'),
     barAwayPx: (v) => (Number(v) === 0 ? '不收起' : v + ' px'),
+    barDimDelayMs: (v) => (Number(v) === 0 ? '立即' : (Number(v) / 1000) + ' 秒'),
     barGlassFrost: (v) => (v === 0 ? '关' : v + ' px'),
     barGlassRefraction: (v) => v + ' ‰',
     barGlassBevel: (v) => v + ' ‰',

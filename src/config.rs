@@ -737,6 +737,14 @@ pub struct Config {
     ///    看不见的程度；想要旧行为把滑块拉到 100 即可）。
     #[serde(default = "default_dim_alpha")]
     pub bar_dim_alpha: u32,
+    /// 渐隐延迟（毫秒）：横条弹出后**先保持不透明**，过了这么久才平滑淡到
+    /// `bar_dim_alpha`。0 = 立即变淡（v1.5.20 及以前的旧行为）。
+    ///
+    /// 用户原话：「初始应为不透明，经过一段时间后才逐渐变为透明」。
+    /// 以前只有"淡到多少"，没有"何时开始淡"，于是 bar.js 在登场那一帧就挂
+    /// qs-dim —— 横条一出现就是半透明的。
+    #[serde(default = "default_dim_delay_ms")]
+    pub bar_dim_delay_ms: u32,
     /// 液态玻璃总开关。开 = 横条弹出时抓一块背后的桌面当纹理，由前端 WebGL2
     /// 按 liquidGL 同款数学渲染（真折射 / 倒角 / 色差 / 高光）。
     /// 关 = 回到普通磨砂底板（`data-blur` 那套）。
@@ -1309,6 +1317,7 @@ impl Default for Config {
             icon_size: 30,
             alpha: 100,
             bar_dim_alpha: 45,
+            bar_dim_delay_ms: default_dim_delay_ms(),
             bar_glass: true,
             // 与 settings.js GLASS_PRESETS 的 standard 档一致（#133 质感重调）——
             // 两边对不上的话，新装机的预设徽标会显示「自定义」而不是「标准」。
@@ -2214,6 +2223,12 @@ fn default_dim_alpha() -> u32 {
     45
 }
 
+/// 渐隐延迟默认 1.5 秒：够看清横条内容，又不至于长时间亮着挡视线。
+/// 0 = 立即变淡（旧行为）；上限 10 秒，见 sanitize。
+fn default_dim_delay_ms() -> u32 {
+    1500
+}
+
 /// 新增的布尔开关默认值（老配置里没有这个键时取 `true`）。
 /// 目前只有 `ocr_stay_default` / `img_enable` / `img_add_to_bar` / `bar_need_text` 用它。
 fn default_true() -> bool {
@@ -2538,6 +2553,13 @@ pub(crate) fn sanitize(mut c: Config) -> Config {
      * 界面上是滑块，但配置文件是明文可编辑的，读的时候还得夹一道。
      *   · 0 一律保留 —— 那是"关掉这条"的合法值；
      *   · 秒数上限 300（5 分钟），像素上限 4000（够大屏）。 */
+    if c.bar_dim_delay_ms > 10_000 {
+        crate::win::log(&format!(
+            "config: 渐隐延迟 {} ms 太离谱，夹到 10000 ms",
+            c.bar_dim_delay_ms
+        ));
+        c.bar_dim_delay_ms = 10_000;
+    }
     if c.bar_idle_sec > 300 {
         crate::win::log(&format!(
             "config: 无操作收起 {} 秒太离谱，夹到 300 秒",

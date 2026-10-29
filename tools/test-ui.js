@@ -1723,67 +1723,47 @@ async function testBar() {
         bar.classList.remove = origRemove;
     }
 
-    /* ---- 悬停淡度：默认淡着、鼠标上来就全不透明 ----
-     * 用户需求原话：「横条的透明度，默认透明程度很高，但是当我鼠标移上去的
-     * 时候，就会变得完全不透明」。
-     * 实现：applyLook 把 barDimAlpha 写进 --qs-dim-alpha；qs://show 的
-     * 隐藏→弹出 跳变上挂 .qs-dim（同时挂两帧 .qs-dim-noanim 掐掉过渡，
-     * 免得窗口隐藏期间攒下的样式变更被当成"从全不透明淡下来"）；
-     * mouseenter 摘类、mouseleave 挂回；面板开着时保持不透明。 */
+    /* ---- 悬停淡度：弹出先不透明，延迟后才淡，鼠标上来立刻全不透明 ----
+     * 用户需求（v1.5.21）：「初始不透明，经过一段时间后才逐渐变为透明」。
+     * 实现：applyLook 把 barDimAlpha 写进 --qs-dim-alpha，barDimDelayMs 决定
+     * 何时开始淡；syncDim 在弹出/离开时起延迟计时器，到点才挂 .qs-dim；
+     * mouseenter 立刻摘类；面板开着 / barDimAlpha=100 时永不淡。 */
     {
         const bar = $('bar');
         const showFn = env.listeners.get('qs://show');
         const hideFn = env.listeners.get('qs://hidden');
-        // 每轮先合上面板，从"横条单独弹出"这个基准态开始
-        env.pushConfig(baseConf({ barDimAlpha: 40 }));
+        // 延迟压到 30ms，断言不用等真实 1.5 秒
+        env.pushConfig(baseConf({ barDimAlpha: 40, barDimDelayMs: 30 }));
         await flush();
 
-        // ① 弹出来就是淡的（待机态），且挂着 noanim（出现那帧不许过渡）
-        //
-        // ⚠ 这里必须**接管 rAF** 再断言，否则是概率性失败：实现是「挂上
-        //   qs-dim-noanim → 两帧后摘掉」，而 jsdom 的 rAF 走 16ms 定时器，
-        //   flush() 只排 20 个 setImmediate —— 机器一忙 16ms 先到，类已经摘了，
-        //   「挂着」这条就假失败（实测 3 次里挂 1 次）。接管之后第几帧由测试
-        //   自己决定，断言变成确定的。
-        const rafQ = [];
-        const origRaf = w.requestAnimationFrame;
-        const origCaf = w.cancelAnimationFrame;
-        w.requestAnimationFrame = (cb) => { rafQ.push(cb); return rafQ.length; };
-        w.cancelAnimationFrame = () => {};
-        /** 走 n 轮动画帧（实现是 rAF 套 rAF，所以一轮不够） */
-        const drainRaf = (rounds = 4) => {
-            for (let k = 0; k < rounds && rafQ.length; k++) {
-                const batch = rafQ.splice(0, rafQ.length);
-                for (const cb of batch) cb(w.performance.now());
-            }
-        };
-        try {
-            hideFn();
-            await flush();
-            showFn({ payload: { text: '淡度', isUrl: false, ocrOnly: false } });
-            await flush();
-            ok('弹出即待机淡度：横条挂着 qs-dim', bar.classList.contains('qs-dim'));
-            ok('  出现那帧掐掉过渡（qs-dim-noanim 挂着）',
-                bar.classList.contains('qs-dim-noanim'),
-                'class=' + bar.className + ' rafQ=' + rafQ.length);
-            // 走两帧：noanim 应该被摘掉，之后的悬停/离开照常平滑
-            drainRaf();
-            ok('  两帧后摘掉 qs-dim-noanim（之后过渡平滑）',
-                !bar.classList.contains('qs-dim-noanim'));
-        } finally {
-            w.requestAnimationFrame = origRaf;
-            w.cancelAnimationFrame = origCaf;
-        }
+        // ① 弹出：先保持不透明
+        hideFn();
+        await flush();
+        showFn({ payload: { text: '淡度', isUrl: false, ocrOnly: false } });
+        await flush();
+        ok('弹出先不透明：不挂 qs-dim', !bar.classList.contains('qs-dim'),
+            'class=' + bar.className);
+        ok('  不再挂 qs-dim-noanim（延迟渐隐不掐过渡）',
+            !bar.classList.contains('qs-dim-noanim'));
 
-        // ② 鼠标悬停 → 立刻全不透明（摘 qs-dim）
+        // ② 过了延迟 → 挂上 qs-dim
+        await new Promise((r) => setTimeout(r, 60));
+        await flush();
+        ok('过了渐隐延迟：挂上 qs-dim（淡到待机透明度）',
+            bar.classList.contains('qs-dim'), 'class=' + bar.className);
+
+        // ③ 鼠标悬停 → 立刻全不透明
         bar.dispatchEvent(new w.Event('mouseenter'));
         await flush();
-        ok('鼠标移上来：摘掉 qs-dim（过渡到 --qs-alpha 全不透明）',
+        ok('鼠标移上来：立刻摘掉 qs-dim（全不透明）',
             !bar.classList.contains('qs-dim'));
-        // ③ 鼠标离开 → 挂回待机淡
+        // ④ 鼠标离开 → 延迟未到不淡，满延迟后挂回
         bar.dispatchEvent(new w.Event('mouseleave'));
         await flush();
-        ok('鼠标离开：挂回 qs-dim（回到待机淡）', bar.classList.contains('qs-dim'));
+        ok('鼠标刚离开：延迟未到，还不淡', !bar.classList.contains('qs-dim'));
+        await new Promise((r) => setTimeout(r, 60));
+        await flush();
+        ok('离开满延迟：挂回 qs-dim', bar.classList.contains('qs-dim'));
 
         // ④ 滑块写进 CSS 变量（10-100 夹取，默认 45）
         env.pushConfig(baseConf({ barDimAlpha: 40 }));
@@ -1798,7 +1778,7 @@ async function testBar() {
         await flush();
         eq('  下限夹到 10（0 会让横条整个看不见，和"淡"是两回事）',
             $('stage').style.getPropertyValue('--qs-dim-alpha'), '0.10');
-        env.pushConfig(baseConf({ barDimAlpha: 40 }));
+        env.pushConfig(baseConf({ barDimAlpha: 40, barDimDelayMs: 30 }));
         await flush();
 
         // ⑤ 面板开着时不该淡：点「展开」按钮走真的 togglePanel 链路
@@ -1806,7 +1786,10 @@ async function testBar() {
         await flush();
         showFn({ payload: { text: '面板', isUrl: false, ocrOnly: false } });
         await flush();
-        ok('  再次弹出后又回到待机淡', bar.classList.contains('qs-dim'));
+        ok('  再次弹出先不透明（延迟未到）', !bar.classList.contains('qs-dim'));
+        await new Promise((r) => setTimeout(r, 60));
+        await flush();
+        ok('  再次弹出后延迟到时：回到待机淡', bar.classList.contains('qs-dim'));
         const moreBtn = bar.querySelector('#btnMore') || w.document.getElementById('btnMore');
         ok('  找到展开面板的按钮（#btnMore）', !!moreBtn);
         if (moreBtn) {
