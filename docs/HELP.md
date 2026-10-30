@@ -1,6 +1,6 @@
 # Quick Search 使用帮助
 
-适用版本：**v2.0.0**（Windows 10 / 11）
+适用版本：**v2.1.0**（Windows 10 / 11）
 返回：[项目介绍](../README.md) ｜ [English](HELP.en.md)
 
 ---

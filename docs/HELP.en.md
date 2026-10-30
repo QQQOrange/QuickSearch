@@ -1,6 +1,6 @@
 # Quick Search — User Help
 
-Applies to: **v2.0.0** (Windows 10 / 11)
+Applies to: **v2.1.0** (Windows 10 / 11)
 Back to: [Project overview](../README.en.md) ｜ [中文](HELP.md)
 
 ---
