@@ -1,6 +1,6 @@
 # Quick Search — User Help
 
-Applies to: **v2.5.0** (Windows 10 / 11)
+Applies to: **v2.6.0** (Windows 10 / 11)
 Back to: [Project overview](../README.en.md) ｜ [中文](HELP.md)
 
 ---
@@ -82,10 +82,13 @@ There are **two** surfaces, with separate content, styling and settings:
 
 **Working directly on the grid page**:
 
-- The **⚙** at the top-right jumps straight to this settings tab;
-- Clicking an **empty tile** opens an *Add content* panel with three groups: **built-in features**
-  (text recognition / translation / image search), **Smart Launch**, and **engines** (searchable).
-  Pick one and it fills that tile — no trip to Settings needed;
+- Two buttons at the top-right: **✏️ Edit** (every tile gets an **×**; click it to remove that tile,
+  click the button again to leave edit mode) and **⚙ Settings** (jump to this settings tab).
+- Clicking an **empty tile** opens the *Add content* panel; pick one and it fills that tile.
+- The same window is in Settings: **Grid page → Tiles → ＋ Add content** (search box on top,
+  grouped into *Extras / Smart Launch / Engines*, with the same icons as everywhere else);
+- Faster still: click **Add to grid / ＋grid** right on an engine row, a Smart Launch row or the
+  Wrap symbols page — click again to remove;
 - Tiles show **readable names**: internal ids like `@ocr` or `@//ocr/` appear as "Text recognition",
   `@trans` as "Translation"; Smart Launch entries, external apps and favorites show your own names;
 - If you selected text before pressing the hotkey, clicking an engine searches **that text directly**
@@ -96,6 +99,9 @@ There are **two** surfaces, with separate content, styling and settings:
 ---
 
 ### Wrapping symbols (put a pair of brackets around the selection)
+
+Find it under **Settings → ➕ Extras → 🧷 Wrap symbols**; the page has *Add to bar* /
+*Add to grid page*, and once added the **`[ ]`** button appears on the bar or the grid.
 
 Select some text and the bar shows a **`[ ]`** button — click it to wrap the text in a pair of
 symbols; click the same pair again to unwrap.

@@ -8,7 +8,7 @@
 A Windows 10 / 11 desktop app built on a **native host (wry + system WebView2)**, with no
 bundled runtime dependencies.
 
-> **Size (v2.5.0)**: a single **6.68 MiB** executable with the frontend embedded and
+> **Size (v2.6.0)**: a single **6.68 MiB** executable with the frontend embedded and
 > compressed — copy one `.exe` anywhere and it runs, with no resource folder beside it.
 >
 > The inference runtime (`onnxruntime.dll`) and models used by **AI matting** are **not**
@@ -76,17 +76,9 @@ keep working (but see the backup password note below).
 | 🧩 Grid page | Live preview, rows / cells / gap / radius, enable & click behaviour, tiles |
 | 🚫 Scope | Windows / apps where the bar should not appear (blacklist and whitelist) |
 | 🔎 Engines | Bar members, ordering, custom engines, icons |
-| 🤖 AI tools | AI endpoints and prompts |
-| ✂️ Matting | Matting model download and parameters |
-| 🔤 OCR | OCR engines, credentials, multi-engine mode, text cleanup |
-| 🌐 Translation | Translation engines, credentials, streaming switch |
-| 🖼 Image search | Image search engines and credentials |
-| 🎯 Smart Launch | Entries for apps / URLs / files: auto-detected type, validation, notes, per-type default icons, ordering, pin to bar |
-| ⭐ Favorites | Folders, items, ordering |
-| 📦 Data | Import / export, cleanup, data folder |
-| ☁️ Backup | Local backups, backup password, WebDAV sync |
-| 📖 Help | Built-in help entry |
-| ℹ️ About | Version, build time, auto-update, developer |
+| ➕ Extras | 8 sub-pages: AI tools, Smart Launch, Matting, OCR, Translation, Image search, Favorites, Wrap symbols |
+| 📦 Data | 2 sub-pages: data & import/export, backup & sync (local backups, password, WebDAV) |
+| ℹ️ About | 2 sub-pages: about & updates, help |
 
 ---
 
@@ -104,7 +96,7 @@ keep working (but see the backup password note below).
 ## Upgrading from 1.x
 
 - **Configuration and backup formats are fully compatible**: 1.5.x `config.json` files and
-  `.QuickSearch` backups can be read and restored by 2.5.0 directly.
+  `.QuickSearch` backups can be read and restored by 2.6.0 directly.
 - The data folder location is unchanged (still `Quick search data` next to the executable), so
   replacing the executable is all that is needed — no migration.
 - **Custom icons carry over automatically**: on first launch the new version reads your icon
@@ -116,7 +108,7 @@ keep working (but see the backup password note below).
 
 ## Building (this repository)
 
-This repository holds the **frontend assets and the historical Tauri sources**; the v2.5.0
+This repository holds the **frontend assets and the historical Tauri sources**; the v2.6.0
 release artifact is produced by the native-host version.
 
 ```powershell
