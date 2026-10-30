@@ -143,7 +143,7 @@ function barItemIcon(name, size) {
     /* v1.5.16：翻译按钮（@trans）—— 和 OCR 同一套：换过图标显示图，
      * 没换显示默认图标。
      * v1.5.17：默认图标从「译」文字徽标换成用户指定的「翻译.png」
-     * （内置在 data/icons/trans.png）。实现挪到 shared.js 的
+     * （base64 内嵌在 shared.js 的 QS_TRANS_ICON）。实现挪到 shared.js 的
      * qsTransIconNode —— 和横条上那颗走同一个函数，三处长得一模一样。 */
     if (name === QS_TRANS) {
         return window.qsTransIconNode();

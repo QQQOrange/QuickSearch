@@ -165,7 +165,7 @@ function ocrIconNode() {
  *  v1.5.16：和 ocrIconNode 同一套规矩 —— 用户换过图标（overrideIcons['@trans']）
  *  就显示那张图，没换就是一枚「译」文字徽标。一个字而不是「翻译」两个字：
  *  横条图标只有 ~28px，「翻译」两个字缩进去会糊成一团。
- *  v1.5.17：默认徽标换成用户指定的「翻译.png」（内置在 data/icons/trans.png），
+ *  v1.5.17：默认徽标换成用户指定的「翻译.png」（v1.5.19 起已 base64 内嵌，不读外部文件），
  *  实现挪到 shared.js 的 qsTransIconNode —— 设置页列表 / 预览也走同一个函数，
  *  三处才不会一个图一个样。图读不出来时它自己退回「译」字。 */
 function transIconNode() {
