@@ -1,6 +1,6 @@
 # Quick Search — User Help
 
-Applies to: **v2.3.0** (Windows 10 / 11)
+Applies to: **v2.3.1** (Windows 10 / 11)
 Back to: [Project overview](../README.en.md) ｜ [中文](HELP.md)
 
 ---
@@ -67,6 +67,13 @@ There are **two** surfaces, with separate content, styling and settings:
   **drag any row up or down to reorder — released order is saved immediately**. Tiles shown =
   rows × columns; extras are hidden and empty slots render as dashed boxes.
 - Every change takes effect **immediately** (no restart); *Preview* shows it right away.
+- If nothing happens, click **Hotkey self-check**: it reports which step blocks you
+  (bad combination / master switch off / paused / current app blacklisted).
+- Tiles show **readable names**: internal ids like `@ocr` or `@//ocr/` are shown as
+  "Text recognition", `@trans` as "Translation"; launch entries, external apps and
+  favorites show the names you gave them.
+- If you selected text before pressing the hotkey, clicking a search engine searches
+  **that text directly** (no copy needed); without text, a click opens the engine home page.
 
 > The grid follows the bar theme (light / dark / system) — no separate colour settings.
 
