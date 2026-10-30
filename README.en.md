@@ -8,7 +8,7 @@
 A Windows 10 / 11 desktop app built on a **native host (wry + system WebView2)**, with no
 bundled runtime dependencies.
 
-> **Size (v2.2.0)**: a single **6.68 MiB** executable with the frontend embedded and
+> **Size (v2.3.0)**: a single **6.68 MiB** executable with the frontend embedded and
 > compressed — copy one `.exe` anywhere and it runs, with no resource folder beside it.
 >
 > The inference runtime (`onnxruntime.dll`) and models used by **AI matting** are **not**
@@ -31,6 +31,7 @@ bundled runtime dependencies.
 | **Translation** | Translate the selected text right from the bar, with streaming output |
 | **Favorites** | Two-level folders for text / images / rich text, drag to reorder |
 | **Smart Launch** | Paste one address — app, URL, or file is detected for you; name, note and icon are pre-filled; pin it to the bar and open it with one click |
+| **Two pop-ups** | Selecting text shows the thin bar; a hotkey (Ctrl+C by default) opens a **grid page** — rows/columns, cell size and items are configured separately |
 | **Icon editor** | AI auto-matting (optional models) + brush touch-up + re-run with another model + export |
 | **Custom icons** | Any engine / OCR / translation / favorite item can use your own image, and **your icons carry over across upgrades** |
 | **Backup & sync** | Local encrypted backups (AES-256-GCM + Argon2id), WebDAV cloud sync |
@@ -59,7 +60,7 @@ keep working (but see the backup password note below).
 ## Getting started
 
 1. **Select text**: select a piece of text in any app — the bar pops up → click an icon to search.
-2. **Hotkeys**: you can also use Ctrl + double-click or Ctrl + C (configurable in Settings → General).
+2. **Hotkeys**: Ctrl + double-click shows the bar; **Ctrl + C opens the grid page** (a tile panel with its own hotkey, rows/columns, cell size and items). The two surfaces are fully independent — see [Help](docs/HELP.en.md#two-different-pop-ups-important).
 3. **OCR**: click the OCR button on the bar (it shows your own icon if you customized it) → select a screen region.
 4. **Open Settings**: double-click the tray icon, or right-click it → Settings.
 
@@ -101,7 +102,7 @@ keep working (but see the backup password note below).
 ## Upgrading from 1.x
 
 - **Configuration and backup formats are fully compatible**: 1.5.x `config.json` files and
-  `.QuickSearch` backups can be read and restored by 2.2.0 directly.
+  `.QuickSearch` backups can be read and restored by 2.3.0 directly.
 - The data folder location is unchanged (still `Quick search data` next to the executable), so
   replacing the executable is all that is needed — no migration.
 - **Custom icons carry over automatically**: on first launch the new version reads your icon
@@ -113,7 +114,7 @@ keep working (but see the backup password note below).
 
 ## Building (this repository)
 
-This repository holds the **frontend assets and the historical Tauri sources**; the v2.2.0
+This repository holds the **frontend assets and the historical Tauri sources**; the v2.3.0
 release artifact is produced by the native-host version.
 
 ```powershell

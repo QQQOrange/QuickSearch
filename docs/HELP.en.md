@@ -1,6 +1,6 @@
 # Quick Search — User Help
 
-Applies to: **v2.2.0** (Windows 10 / 11)
+Applies to: **v2.3.0** (Windows 10 / 11)
 Back to: [Project overview](../README.en.md) ｜ [中文](HELP.md)
 
 ---
@@ -33,7 +33,7 @@ on-screen OCR, translation, screenshot image search, favorites, and encrypted ba
 |---|---|
 | **Select text** in any application | The bar pops up automatically |
 | **Ctrl + double-click** | Bring the bar up manually |
-| **Ctrl + C** | Copy and show the bar at the same time (can be disabled in Settings) |
+| **Ctrl + C** (default) | Opens the **grid page** (a tile panel) — a separate surface from the selection bar |
 | Click an icon on the bar | Search / open with that engine |
 | **Double-click the tray icon** | Open Settings |
 | **Right-click the tray icon** | Menu (Settings, Exit, …) |
@@ -42,6 +42,33 @@ Triggers and hotkeys are configured in **Settings → ⚙️ General**.
 
 If the bar appears where you do not want it, add that application to the blacklist in
 **Settings → 🚫 Scope**.
+
+---
+
+### Two different pop-ups (important)
+
+There are **two** surfaces, with separate content, styling and settings:
+
+| | Selection bar | Grid page |
+|---|---|---|
+| Opened by | Selecting text / Ctrl+double-click | A hotkey (default **Ctrl+C**) |
+| Looks like | A thin strip with engines in a row | A grid panel of tiles |
+| Items | Bar members (Settings → 🔎 Engines) | Its **own separate** list (below) |
+| What a click searches | The selected text | Text **already** in the clipboard; otherwise the engine home page |
+
+**Configuring the grid** (Settings → ⚙️ General → "Grid page (Ctrl+C)"):
+
+- **Hotkey**: `ctrl+c` by default; any combination such as `ctrl+shift+g` or `alt+space` works.
+  Once changed, **Ctrl+C no longer opens it**. Conflicts with the Favorites hotkey or the
+  reserved `Ctrl+Alt+O` (region OCR) are rejected with a clear message.
+- **Rows / columns**: 1–10 × 1–10 — 3×3, 3×4, 4×4 are all fine.
+- **Cell size**: width 40–260 px, height 40–200 px.
+- **Tiles**: a list **separate from the bar**. Add items one by one, or click *Import from bar*;
+  **drag any row up or down to reorder — released order is saved immediately**. Tiles shown =
+  rows × columns; extras are hidden and empty slots render as dashed boxes.
+- Every change takes effect **immediately** (no restart); *Preview* shows it right away.
+
+> The grid follows the bar theme (light / dark / system) — no separate colour settings.
 
 ---
 
