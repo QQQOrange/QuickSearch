@@ -1,6 +1,6 @@
 # Quick Search — User Help
 
-Applies to: **v2.3.1** (Windows 10 / 11)
+Applies to: **v2.4.0** (Windows 10 / 11)
 Back to: [Project overview](../README.en.md) ｜ [中文](HELP.md)
 
 ---
@@ -56,24 +56,40 @@ There are **two** surfaces, with separate content, styling and settings:
 | Items | Bar members (Settings → 🔎 Engines) | Its **own separate** list (below) |
 | What a click searches | The selected text | Text **already** in the clipboard; otherwise the engine home page |
 
-**Configuring the grid** (Settings → ⚙️ General → "Grid page (Ctrl+C)"):
+**Configuring the grid** (Settings → 🧩 **Grid page**). This tab has four cards:
+*Live preview / Appearance / Behaviour / Tiles*.
 
-- **Hotkey**: `ctrl+c` by default; any combination such as `ctrl+shift+g` or `alt+space` works.
-  Once changed, **Ctrl+C no longer opens it**. Conflicts with the Favorites hotkey or the
-  reserved `Ctrl+Alt+O` (region OCR) are rejected with a clear message.
-- **Rows / columns**: 1–10 × 1–10 — 3×3, 3×4, 4×4 are all fine.
-- **Cell size**: width 40–260 px, height 40–200 px.
-- **Tiles**: a list **separate from the bar**. Add items one by one, or click *Import from bar*;
+- **Live preview**: what you see *is* the grid page — it loads the grid's own stylesheet and the
+  same markup, so layout, size, spacing, corner radius, colours and shadow match the pop-up
+  **exactly**. Any change below is reflected instantly.
+- **Appearance**: 1–10 rows × 1–10 columns (3×3, 3×4, 4×4…); cell 40–260 px wide, 40–200 px tall;
+  gap 0–24 px; cell radius 0–24 px. Colours, shadow and blur are shared with **Bar appearance** —
+  the grid has no colour settings of its own.
+- **Behaviour**:
+  - **Enable grid page** — turn it off and the hotkey stops opening it; content and settings stay;
+  - **Clicking an empty tile adds content** — turn it off to make empty tiles inert (avoids misclicks);
+  - **Click behaviour** — *search the selected text* (default) or *always open the engine home page*
+    (use the grid as a bookmark panel);
+  - **Hotkey** — `ctrl+c` by default; any combination such as `ctrl+shift+g` or `alt+space`.
+    Once changed, **Ctrl+C no longer opens it**; clashes with the Favorites hotkey or the reserved
+    `Ctrl+Alt+O` are rejected with a message;
+  - **Hotkey self-check** — reports which step blocks you (bad combination / master switch off /
+    paused / current app blacklisted).
+- **Tiles**: a list **separate from the bar**. Add items one by one, or *Import from bar*;
   **drag any row up or down to reorder — released order is saved immediately**. Tiles shown =
-  rows × columns; extras are hidden and empty slots render as dashed boxes.
-- Every change takes effect **immediately** (no restart); *Preview* shows it right away.
-- If nothing happens, click **Hotkey self-check**: it reports which step blocks you
-  (bad combination / master switch off / paused / current app blacklisted).
-- Tiles show **readable names**: internal ids like `@ocr` or `@//ocr/` are shown as
-  "Text recognition", `@trans` as "Translation"; launch entries, external apps and
-  favorites show the names you gave them.
-- If you selected text before pressing the hotkey, clicking a search engine searches
-  **that text directly** (no copy needed); without text, a click opens the engine home page.
+  rows × columns.
+- Every change takes effect **immediately** (no restart).
+
+**Working directly on the grid page**:
+
+- The **⚙** at the top-right jumps straight to this settings tab;
+- Clicking an **empty tile** opens an *Add content* panel with three groups: **built-in features**
+  (text recognition / translation / image search), **Smart Launch**, and **engines** (searchable).
+  Pick one and it fills that tile — no trip to Settings needed;
+- Tiles show **readable names**: internal ids like `@ocr` or `@//ocr/` appear as "Text recognition",
+  `@trans` as "Translation"; Smart Launch entries, external apps and favorites show your own names;
+- If you selected text before pressing the hotkey, clicking an engine searches **that text directly**
+  (no copy needed); with *always open home page* it ignores the text.
 
 > The grid follows the bar theme (light / dark / system) — no separate colour settings.
 
@@ -148,7 +164,25 @@ All three can be edited.
 
 ### Icons
 
-Leave it empty to use the default (apps get the icon extracted from the exe; URLs and files get a letter badge).
+Leave it empty to use a **default icon picked by type**:
+
+| Type | Default icon |
+|---|---|
+| URL | globe |
+| Folder | folder |
+| App (exe/lnk/bat…) | the program's own icon (extracted from the exe); the app icon if that fails |
+| Text / Markdown / config | document with text lines |
+| Image | picture frame |
+| Video | player |
+| Audio | music note |
+| PDF | document marked PDF |
+| Archive | archive box |
+| Source code | `<>` |
+| Office document | document with a list |
+| Anything else | generic file |
+
+The type is computed **live from the target** (folder check, file extension), so renaming
+`.txt` to `.mp4` changes the icon automatically — no need to set it again.
 
 Two ways to customise:
 
