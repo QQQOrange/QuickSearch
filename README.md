@@ -1,20 +1,18 @@
 # Quick Search 桌面版
 
-> 在任意软件里选中文字或按下快捷键，屏幕上方就会弹出一条搜索横条：点一颗图标就把
-> 选中的词交给那个网站 / 软件 / 快捷键去处理。另有截图识图、屏幕文字识别、收藏夹、
-> 图标编辑器、加密备份与 WebDAV 同步。
+> 在任意软件里选中文字，或按下快捷键，屏幕上方会弹出一条搜索横条：点一颗图标，就把选中的
+> 词交给那个网站 / 软件 / 快捷键去处理。另有屏幕文字识别（OCR）、翻译、截图识图、
+> 收藏夹、图标编辑器、加密备份与 WebDAV 同步。
 
-Windows 10/11 桌面应用，**Tauri 2 + Rust + WebView2**，无运行时装依赖，单个 exe 即可运行。
+Windows 10 / 11 桌面应用，**原生宿主（wry + 系统 WebView2）**，无运行时装依赖。
 
-> **体积说明（v1.2.0）**：程序本体 **12.27MB**（不含任何 AI 模型）。
-> 「AI 抠图」要用到的推理运行库（`onnxruntime.dll`，11.84MB）与模型
-> **都不打进安装包**，由你在设置里点「下载」时一起下到
-> `<程序目录>/抠图模型/` —— 下完即刻可用（**不需要重启程序**）。
-> 不打开 AI 抠图的话，这些一个都不下。
+> **体积（v2.0.0）**：单文件 **6.68 MiB**，前端已压缩内嵌 —— 拷走一个 exe 就能跑，
+> 不需要旁边的资源目录。
 >
-> ⚠ **模型资产固定在 v1.1.1 那个发布页**（一共 300+ MB，不随每个小版本重传）。
-> 程序会自己去那里下，你不需要手动找：`src/aimodels.rs` 的 `ASSET_RELEASE_TAG`
-> 就是那个 tag，且有一条单测钉着"程序版本"与"资产版本"不会脱节。
+> 「AI 抠图」用到的推理运行库（`onnxruntime.dll`）与模型**不打进安装包**，
+> 由你在设置里点「下载」时才下到 `<程序目录>/抠图模型/`。不用这个功能就一个都不下。
+
+**中文** | [English](README.en.md) ｜ [使用帮助](docs/HELP.md) ｜ [更新记录](CHANGELOG.md)
 
 ---
 
@@ -22,208 +20,156 @@ Windows 10/11 桌面应用，**Tauri 2 + Rust + WebView2**，无运行时装依�
 
 | 能力 | 说明 |
 |---|---|
-| **划词横条** | 选中文字自动弹出（或 Ctrl+双击 / Ctrl+C 触发），点图标即搜索 |
-| **多引擎** | 内置 **777 个**引擎（27 个大类），支持自定义网页引擎 / 软件直达 / 快捷键引擎 |
-| **经典别名** | 85% 的引擎带别名，搜「B站」能找到哔哩哔哩、「度娘」找到百度 |
-| **截图识图** | 框选屏幕区域 → 12 家识图引擎（百度 / Yandex / SauceNAO / trace.moe / 6 家 AI） |
-| **文字识别 OCR** | 框选读字，本地离线 + 十余家在线引擎，支持**多引擎同时识别**（并排多框展示） |
+| **划词横条** | 选中文字自动弹出，也可用快捷键触发；点图标即搜索 |
+| **多引擎** | 内置 **780+ 个引擎条目**（27 个大类），支持自定义网页引擎 / 软件直达 / 快捷键引擎 |
+| **经典别名** | 大量引擎带别名，搜「B站」能找到哔哩哔哩、「度娘」找到百度 |
+| **截图识图** | 框选屏幕区域 → 多家识图引擎（百度 / Yandex / SauceNAO / trace.moe / AI 视觉模型） |
+| **文字识别 OCR** | 框选读字，**本地离线引擎 + 多家在线引擎**，支持多引擎同时识别（并排多框） |
+| **翻译** | 横条上直接翻译选中内容，支持流式输出 |
 | **收藏夹** | 两级目录，文字 / 图片 / 富文本，可拖拽排序 |
-| **图标编辑器** | AI 自动抠图（可选模型）+ 涂抹修饰（保留/擦除，可放大 1~8×）+ 换模型重抠 + 导出 |
-| **备份** | 本地加密备份（AES-256-GCM + Argon2id）、WebDAV 云端同步 |
-| **自动更新** | 「关于」里可勾选的自动检查；发现新版**在程序内**下载、校验、替换旧程序（v1.2.0 新） |
+| **图标编辑器** | AI 自动抠图（可选模型）+ 涂抹修饰 + 换模型重抠 + 导出 |
+| **自定义图标** | 任意引擎 / OCR / 翻译 / 收藏夹条目都能换成自己的图，**换新版本自动继承** |
+| **备份与同步** | 本地加密备份（AES-256-GCM + Argon2id）、WebDAV 云端同步 |
+| **自动更新** | 「关于」里可勾选自动检查；发现新版在程序内下载、校验、替换 |
 | **主题** | 亮 / 暗 / 跟随系统，横条支持液态玻璃（WebGL2 真折射） |
+
+---
+
+## 下载与安装
+
+1. 到 [Release 页面](https://github.com/QQQOrange/QuickSearch/releases/latest) 下载 `QuickSearch.exe`。
+2. 放到你喜欢的目录（建议单独一个文件夹），双击运行。
+3. **首次运行没有窗口**，程序常驻托盘 —— 在任务栏右下角的托盘区（可能折叠在 `^` 里）找到它的图标。
+
+不需要安装程序，不需要 .NET，也不需要另装 WebView2（Win10/11 一般已内置）。
+
+### 数据放在哪
+
+便携式：配置、图标、日志都在 exe 同级的 `Quick search data\` 里，备份在 `QuickSearch back\`。
+把整个文件夹拷到另一台机器就能接着用（**备份密码另见下**）。
+
+---
+
+## 快速上手
+
+1. **划词**：在任意软件里选中一段文字，横条自动弹出 → 点图标搜索。
+2. **快捷键**：也可以用 Ctrl + 双击 或 Ctrl + C 触发（可在「设置 → 通用」里调整）。
+3. **文字识别**：点横条上的 OCR 按钮（若已自定义图标，显示的就是你自己那张图）→ 框选屏幕区域。
+4. **进设置**：双击托盘图标，或右键托盘图标 → 设置。
+
+---
+
+## 设置页结构
+
+| 分页 | 主要用途 |
+|---|---|
+| ⚙️ 通用 | 触发方式、快捷键、开机自启、横条行为 |
+| 🎨 外观 | 主题、配色、圆角、液态玻璃、横条尺寸 |
+| 🚫 范围 | 哪些窗口 / 程序里不弹横条（黑名单与白名单） |
+| 🔎 引擎 | 横条成员、引擎排序、自定义引擎、图标 |
+| 🤖 AI 工具 | AI 相关接口与提示词 |
+| ✂️ 抠图 | 抠图模型下载与参数 |
+| 🔤 文字识别 | OCR 引擎、凭据、同时识别、文本整理 |
+| 🌐 翻译 | 翻译引擎、凭据、流式开关 |
+| 🖼 识图 | 识图引擎与凭据 |
+| ⭐ 收藏夹 | 分组、条目、排序 |
+| 📦 数据 | 导入 / 导出、清理、数据目录 |
+| ☁️ 备份 | 本地备份、备份密码、WebDAV 同步 |
+| 📖 帮助 | 内置帮助入口 |
+| ℹ️ 关于 | 版本、构建时间、自动更新、开发者 |
+
+---
+
+## 数据安全
+
+- **配置文件本身是加密的**：以 `{"qsEnc":1,"kdf":"argon2id",…}` 信封保存，密钥由本机 DPAPI 保护。
+- **备份可加密**：设置备份密码后，导出的 `.QuickSearch` 备份可在别的机器上恢复 —— **密码丢了就解不开**，请自行保管。
+- **换机器**：优先用「备份 → 导出 + 恢复」，而不是直接拷 `config.json`（后者依赖本机密钥）。
+
+---
+
+## 从 1.x 升级
+
+- **配置与备份格式完全兼容**：1.5.x 的 `config.json`、`.QuickSearch` 备份可直接被 2.0.0 读取与恢复。
+- 数据目录位置不变（仍是 exe 同级的 `Quick search data`），所以覆盖 exe 即可，不需要迁移。
+- **自定义图标会自动继承**：新版首次启动会从旧安装读取你的图标覆盖表。
+- 本版把默认 OCR 引擎改为**本地引擎**（在线引擎按量计费，避免误耗额度）；需要在线识别可在设置里自行切换。
+
+---
+
+## 构建（本仓库）
+
+本仓库保存**前端资源与历史 Tauri 源码**；v2.0.0 的发布产物由原生宿主版本构建。
+
+```powershell
+cargo test             # 单元测试
+cargo clippy           # 静态检查
+cargo build --release  # 产物：target\release\QuickSearch.exe
+```
+
+发布配置见 `Cargo.toml` 的 `[profile.release]`：`opt-level` + `lto="fat"` +
+`codegen-units=1` + `strip=true`。
+
+### 自动更新怎么测
+
+「发现新版 → 下载 → 校验 → 替换正在运行的 exe」这条链不能等真版本，所以留了两个
+run-and-exit 探针和两个仅测试用的地址逃生口（`QS_UPDATE_API` / `QS_UPDATE_WEB`）：
+
+```powershell
+$env:QS_UPDATE_API = 'http://127.0.0.1:8731/api/repos/x/releases/latest'
+$env:QS_UPDATE_WEB = 'http://127.0.0.1:8731/web/releases/latest'
+
+QuickSearch.exe --update-probe     # 只查一次，输出 NEWER/TAG/SIZE/SHA
+QuickSearch.exe --update-install   # 真下载 + 真替换（只在隔离目录里跑）
+```
 
 ---
 
 ## 仓库结构
 
 ```
-src/              Rust 源码（Tauri 后端）
-  main.rs           主程序：窗口 / 命令 / 横条布局 / 识图 / OCR 调度（约 1.4 万行）
-  config.rs         配置结构与持久化（原子写 + 备份）
+src/              Rust 源码
+  main.rs           主程序：窗口 / 命令 / 横条布局 / 识图 / OCR 调度
+  config.rs         配置结构与持久化（原子写 + 备份 + 加密）
   win.rs            Win32 封装：窗口、UIA、键盘钩子、截图
-  ocr.rs            百度 OCR
-  ocr_engines.rs    OCR 引擎注册表（十余家）
+  ocr.rs / ocr_engines.rs        OCR 与引擎注册表
+  trans.rs / trans_engines.rs    翻译与引擎注册表
   imgsearch.rs      识图引擎注册表
   engines.rs        搜索引擎解析
-  clip.rs           剪贴板（含 DIB 图像）
-  glass.rs          横条背景抓屏
-  hook.rs           全局键盘 / 鼠标钩子
-  paths.rs          路径与环境变量解析
-  iconedit.rs       图标编辑器（会话状态 + 涂抹修饰的合成）
-  matting.rs        抠图的**边缘处理器**（AI 给的 alpha 分辨率低，边缘去色靠它）
-  cleanup.rs        临时文件清理
-  crypto.rs         备份加密
+  iconedit*.rs      图标编辑器（含 AI 抠图胶水）
+  matting.rs        抠图边缘处理
+  crypto.rs         备份加密（AES-256-GCM + Argon2id）
   export.rs         配置导入导出
   webdav.rs         WebDAV 客户端
-  aimodels.rs       AI 模型清单 / 下载（**模型资产固定在 v1.1.1 发布页**，见 ASSET_RELEASE_TAG）
-  aimatte.rs        ONNX 推理（U²-Net / RMBG）
-  iconedit_ai.rs    抠图的"AI 出语义 + 本地出边缘"胶水
-  update.rs         自动更新（查 GitHub → 程序内下载 → 校验 → 替换正在运行的 exe）
+  update.rs         自动更新
 ui/               前端（原生 JS + CSS，无框架）
-  index.html       横条页面
-  bar.js/.css      横条交互（约 190KB / 63KB）
-  settings.html    设置页（10 个分页）
-  settings.js/.css 设置页逻辑与样式
-  ocr.html         OCR 结果窗
-  iconedit.html    图标编辑器
-  region.html      框选遮罩
-  shared.js        横条与设置页共用逻辑
-  glass.js         液态玻璃渲染
-  data/engines.json  777 个引擎的注册表（含别名）
-  data/icons/        图标资源
+  index.html        横条页面
+  bar.js / bar.css  横条交互
+  settings.html     设置页
+  ocr.html          OCR 结果窗
+  iconedit.html     图标编辑器
+  shared.js         横条与设置页共用逻辑
+  data/engines.json 引擎注册表
+  data/icons/       图标资源（402 个）
 docs/
-  PRD.md           产品需求文档（目标 / 页面结构 / 功能边界 / 验收标准）
-  RELEASE-v1.2.0.md 这一版的发布说明（含修掉的 93 处缺陷、验证记录）
-  RELEASE-v1.1.x.md 往期发布说明
-  PUSH-GUIDE.md    GitHub 推送指引
-  probes/          探针说明（为什么用 CDP、踩过的坑）
-  evidence/        历史实测截图 —— **不入库**，见下方"关于证据"
-tools/             验证脚本（探针）
-  probe-out/       探针输出的实测日志 —— **不入库**
-验收报告.md         逐轮开发与验收记录（r1 ~ r78）
-```
-
-### 关于证据
-
-`docs/evidence/`（22MB 截图）与 `tools/probe-out/`（16MB 探针日志）**不纳入版本
-控制** —— 它们是历史实测结果，重跑探针即可再生成。需要追溯时去
-`D:\Local AI\git\QuickSearch-evidence-archive`（已归档 r1 ~ r78 全部证据）。
-
----
-
-## 构建
-
-### 前置
-
-- Rust 1.70+（本项目用 `C:\Users\<you>\.cargo\bin` 下的 cargo）
-- WebView2 Runtime（Win10/11 通常已内置）
-- Node 仅用于跑 `tools/` 下的验证探针，构建本身不需要
-
-### 命令
-
-```powershell
-cargo test            # 274 个单元测试
-cargo clippy          # 0 warning
-cargo build --release # 产物：target\release\QuickSearch.exe
-```
-
-发布配置见 `Cargo.toml` 的 `[profile.release]`：`opt-level="s"` + `lto="fat"` +
-`codegen-units=1` + `strip=true`。**没有用 `panic="abort"`** —— 单线程 panic 不该把
-整个程序带走，配了自定义 panic hook 写日志。
-
-> ⚠ `panic` hook 走的是 **`log_sync`**（同步落盘），不是后台队列版 —— 否则
-> panic 之后进程立刻退出，那一行日志根本没机会写下去，排查时"程序没了但日志里
-> 什么都没有"，比崩溃本身更难查。
-
-### 自动更新怎么测（v1.2.0）
-
-「发现新版 → 下载 → 校验 → 替换正在运行的 exe」这条链没法等 GitHub 上真出现
-一个更高版本才测，所以留了两个 **run-and-exit 探针** + 两个**仅测试用**的地址逃生口：
-
-```powershell
-# QS_UPDATE_API / QS_UPDATE_WEB 指向一个本地假服务（见 tools/fake-github-update.py）
-$env:QS_UPDATE_API = 'http://127.0.0.1:8731/api/repos/x/releases/latest'
-$env:QS_UPDATE_WEB = 'http://127.0.0.1:8731/web/releases/latest'
-
-QuickSearch.exe --update-probe     # 只查一次，把 NEWER/TAG/SIZE/SHA 打到 stdout
-QuickSearch.exe --update-install   # 真下载 + 真替换（**只在隔离目录里跑！**）
-```
-
-实测记录（替换那一步是整条链里风险最高的）：
-
-```
-update: 检查完成 —— 远端 v9.9.9，当前 1.2.0，有新版=true
-DOWNLOADED=…\QuickSearch.exe.new
-OK old=…\QuickSearch.exe.old
-update: 已清理残留 …\QuickSearch.exe.old   ← 下次启动自动清
+  HELP.md / HELP.en.md       使用帮助（中 / 英）
+  PRD.md                     产品需求文档
+  PUSH-GUIDE.md              发布流程
+  RELEASE-v*.md              各版本发布说明
+CHANGELOG.md       更新记录
 ```
 
 ---
 
-## 验证
+## 文档
 
-项目采用「单元测试 + 真机探针」双层验证。探针通过 CDP（Chrome DevTools Protocol）
-驱动真实 WebView，比外部注入鼠标可靠得多。
-
-```powershell
-# 设置页内建自检（33 项）
-node tools/run-settings-selfcheck.js
-
-# 分功能探针
-node tools/r73-lib-probe.js          # 引擎库下钻 + 首字母索引（24 项）
-node tools/r72-bar-img-probe.js      # 横条识图哨兵（15 项）
-node tools/r72-ocr-models-probe.js   # OCR 模型清单（24 项）
-node tools/r71-verify.js             # 识图引擎设置（15 项）
-node tools/r78-probe.js              # 多框并排 / 页面瘦身（15 项）
-
-# 用桌面 exe 做冒烟（不影响正在运行的实例）
-node tools/r75-deployed-smoke.js
-```
-
-探针都支持 `QS_INSTANCE_TAG` 环境变量另起隔离实例，**不会干扰用户正在运行的
-QuickSearch**（它通常是管理员权限、脚本杀不掉）。
+- [使用帮助（中文）](docs/HELP.md) ｜ [Help (English)](docs/HELP.en.md)
+- [更新记录](CHANGELOG.md)
+- [产品需求文档](docs/PRD.md)
+- [发布流程](docs/PUSH-GUIDE.md)
 
 ---
 
-## 设计取舍（踩过的坑）
+## 许可
 
-几处不那么直观、但**故意如此**的设计，改之前请先读代码注释：
-
-1. **`ureq` 用同步阻塞**，不用 tokio —— 丢进后台线程即可，省一整个运行时。
-2. **命令必须脱开调用栈**：`ocr_start` / `open_settings` / `img_start` 都 `spawn`
-   一个线程再建窗口，否则主线程建 WebView2 会死锁（症状：窗口建出来但不显示）。
-3. **所有窗口必须用同一套 WebView2 参数**（`wv_args()`），否则环境冲突、
-   `HRESULT 0x8007139F` 窗口建不起来。
-4. **框选遮罩有四层兜底**：心跳、30 秒总闸、置顶重申、裸 HWND 强杀 ——
-   它铺满全屏，留着就等于锁死鼠标。
-5. **配置原子写**：临时文件 + rename，崩溃只会留一份 `.tmp`，正式文件永远完整。
-6. **OCR「同时识别」默认并排多框**，不再只显示默认引擎那一家。
-7. **抠图改成"AI 为主 + 本地补边缘"**（r80 定案，推翻了上面那条的设计）：
-   早期试过照 pymatting 实现完整的 Closed-Form Matting（matting Laplacian + 共轭梯度），
-   实测真实图标未知率 11~17%、耗时 132~394ms，且迭代 12→300 轮结果几乎不变 ——
-   CF 的"局部颜色线"假设是为自然图像（毛发/烟雾）设计的，对平涂图标没有发挥空间。
-   随后试的**纯颜色解混**（`I = αF + (1-α)B` 逐像素反解）虽然快（17~39ms），但
-   在"主体与背景同色"这类图上**数学上无解** —— 用户报「当前的完全用不了」。
-   最终改为：**AI（U²-Net / RMBG）出 alpha，本地那套只做边缘去色**。
-   分工见 `src/matting.rs` 与 `src/iconedit_ai.rs` 的模块注释。
-   ⚠ 这是本项目里**最反复的一个决定**，三轮才定；把过程留下是因为
-   "为什么不用某个方案"和"用了什么"同样重要。
-8. **未知带要"两侧都腐蚀"**，不能"前景腐蚀 + 背景膨胀"：膨胀会把边界外侧的
-   抗锯齿像素吞成背景，主体边缘少一圈 → 锯齿 + 白边。这是 r79 实测抓到的（扫描线证据）。
-
----
-
-## 许可与致谢
-
-本项目采用 **[PolyForm Noncommercial License 1.0.0](LICENSE)**。
-
-一句话说清楚：
-
-- ✅ **可以**：个人使用、学习、研究、修改、分发（含改过的版本）、业余爱好项目
-- ✅ **可以**：慈善机构、学校、公立研究机构、公益/公共安全/环保组织、政府机构使用
-- ❌ **不可以**：任何**商业用途**。想商用需要另行取得授权（联系作者）
-
-分发时请带上 `LICENSE`（或它的链接），并保留文件里的 `Required Notice:` 那行。
-
-### 为什么不是 MIT
-
-v1.0.0 用的是 MIT（允许商用）。改这一条是作者的明确要求：
-**允许个人自由使用、修改、分发，但不允许商用。**
-
-### ⚠ 关于 AI 抠图模型（使用前请留意）
-
-"AI 抠图"功能的**模型文件不由本项目分发**，是程序在你点「下载」时从
-Hugging Face / ModelScope 等上游取的，它们各自带自己的许可条款：
-
-- **RMBG-1.4 / BRIA RMBG**（`rmbg-*` 那几个）—— BRIA 的许可**明确禁止商用**，
-  且有其自己的使用条件。本项目把它们列为可选项，但**你要自行确认**是否符合你的用途。
-- **U²-Net / u2netp**（推荐项）—— Apache-2.0，限制宽松。
-
-**本项目的 Noncommercial 许可与上游模型的许可是两件事**，各自独立生效。
-如果你要商用，这两条都得先解决。
-
-引擎表（`ui/data/engines.json`）的 URL 与图标版权归各站点所有，此处仅作跳转索引使用。
-
-图标来源：各站点 favicon / [Iconify](https://iconify.design/)。
-液态玻璃折射的数学移植自开源项目 [liquidGL](https://github.com/naver/liquidGL) 的思路。
+见 [LICENSE](LICENSE)。
