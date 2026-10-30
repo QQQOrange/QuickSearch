@@ -1,6 +1,6 @@
 # Quick Search — User Help
 
-Applies to: **v2.4.0** (Windows 10 / 11)
+Applies to: **v2.5.0** (Windows 10 / 11)
 Back to: [Project overview](../README.en.md) ｜ [中文](HELP.md)
 
 ---
@@ -92,6 +92,55 @@ There are **two** surfaces, with separate content, styling and settings:
   (no copy needed); with *always open home page* it ignores the text.
 
 > The grid follows the bar theme (light / dark / system) — no separate colour settings.
+
+---
+
+### Wrapping symbols (put a pair of brackets around the selection)
+
+Select some text and the bar shows a **`[ ]`** button — click it to wrap the text in a pair of
+symbols; click the same pair again to unwrap.
+
+| Group | Symbols | Name |
+|---|---|---|
+| Quotes | `“text”` `‘text’` `「text」` | Double / single / corner quotes |
+| Special | `《text》` `〈text〉` `【text】` | Title marks / single title mark / lenticular |
+| Brackets | `（text）` `[text]` `{text}` | Parentheses / square / curly |
+| ASCII | `"text"` `'text'` `` `text` `` | Double / single quote / backtick |
+
+**How to use**
+
+1. Select text → the bar appears → click `[ ]`;
+2. Pick a pair (or press **1–9** while the menu is open);
+3. The result is **copied to the clipboard** immediately and the bar shows *Wrapped (copied)*;
+4. Go back and press **Ctrl+V** to replace the original.
+
+**Same pair toggles**
+
+| Current text | You click | Result |
+|---|---|---|
+| `hello` | Double quotes | `“hello”` |
+| `“hello”` | Double quotes | `hello` (unwrapped) |
+| `““hello””` | Double quotes | `hello` (**all nested layers removed**) |
+| `《hello》` | Double quotes | `“hello”` (**outer pair replaced**, never stacked) |
+| `hello` | Square brackets | `[hello]` |
+
+Leading/trailing whitespace stays **outside** the symbols; a half pair (only a trailing `”`)
+does not count as wrapped, so it gets a fresh pair.
+
+**With nothing selected**: the `[ ]` button **does not appear** (same rule as 🔗 / 📁 / 📄).
+If triggered anyway, you get "select some text first" instead of producing an empty `“”`.
+
+**Consistency with the other actions**
+
+- It only reads the current text — it never touches another program's selection;
+- The result goes to the **clipboard** (the same outlet as copy-capture), so closing the menu
+  never affects what was already copied;
+- **Esc closes the menu only** (the bar stays); selecting different text closes it automatically
+  so you cannot wrap the wrong thing.
+
+> **Why not replace the text in place?** The app cannot write back into other programs (that needs
+> simulated typing, which interrupts your work and pollutes the undo stack). It hands you the result
+> via the clipboard instead — one keystroke away, with no collateral damage.
 
 ---
 

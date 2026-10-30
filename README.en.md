@@ -8,7 +8,7 @@
 A Windows 10 / 11 desktop app built on a **native host (wry + system WebView2)**, with no
 bundled runtime dependencies.
 
-> **Size (v2.4.0)**: a single **6.68 MiB** executable with the frontend embedded and
+> **Size (v2.5.0)**: a single **6.68 MiB** executable with the frontend embedded and
 > compressed — copy one `.exe` anywhere and it runs, with no resource folder beside it.
 >
 > The inference runtime (`onnxruntime.dll`) and models used by **AI matting** are **not**
@@ -32,6 +32,7 @@ bundled runtime dependencies.
 | **Favorites** | Two-level folders for text / images / rich text, drag to reorder |
 | **Smart Launch** | Paste one address — app, URL, or file is detected for you; name, note and icon are pre-filled; pin it to the bar and open it with one click |
 | **Two pop-ups** | Selecting text shows the thin bar; a hotkey (Ctrl+C by default) opens a **grid page** — rows/columns, cell size and items are configured separately |
+| **Wrap symbols** | Wrap the selection in “” 《》 【】 `[ ]` `{ }` pairs in one click; the same pair unwraps, another pair replaces the outer one, result is copied |
 | **Icon editor** | AI auto-matting (optional models) + brush touch-up + re-run with another model + export |
 | **Custom icons** | Any engine / OCR / translation / favorite item can use your own image, and **your icons carry over across upgrades** |
 | **Backup & sync** | Local encrypted backups (AES-256-GCM + Argon2id), WebDAV cloud sync |
@@ -103,7 +104,7 @@ keep working (but see the backup password note below).
 ## Upgrading from 1.x
 
 - **Configuration and backup formats are fully compatible**: 1.5.x `config.json` files and
-  `.QuickSearch` backups can be read and restored by 2.4.0 directly.
+  `.QuickSearch` backups can be read and restored by 2.5.0 directly.
 - The data folder location is unchanged (still `Quick search data` next to the executable), so
   replacing the executable is all that is needed — no migration.
 - **Custom icons carry over automatically**: on first launch the new version reads your icon
@@ -115,7 +116,7 @@ keep working (but see the backup password note below).
 
 ## Building (this repository)
 
-This repository holds the **frontend assets and the historical Tauri sources**; the v2.4.0
+This repository holds the **frontend assets and the historical Tauri sources**; the v2.5.0
 release artifact is produced by the native-host version.
 
 ```powershell
