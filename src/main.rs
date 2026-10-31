@@ -6673,7 +6673,14 @@ fn apply_one_setting(cfg: &mut config::Config, key: &str, value: Value) -> Resul
         "ocrEnable" => cfg.ocr_enable = value.as_bool().unwrap_or(true),
         "ocrKey" => cfg.ocr_key = value.as_str().unwrap_or("").trim().to_string(),
         "ocrSecret" => cfg.ocr_secret = value.as_str().unwrap_or("").trim().to_string(),
-        "autoElevate" => cfg.auto_elevate = value.as_bool().unwrap_or(true),
+        "autoElevate" => {
+            let on = value.as_bool().unwrap_or(true);
+            cfg.auto_elevate = on;
+            /* v2.11.8：**同时**记到本机标记文件里。
+             * 配置文件会被云端整份恢复、也会被前端保存的旧快照覆盖，
+             * 而"这台机器要不要管理员"是纯粹的本地决定，不该跟着配置走。 */
+            write_local_elevate_pref(on);
+        }
         // r80：AI 抠图开关。默认 false —— 不开时走本地算法，不该替用户默认开启
         //      （它需要额外下载模型，见 config.rs 字段上的取舍说明）。
         "aiMattingEnable" => cfg.ai_matting_enable = value.as_bool().unwrap_or(false),
@@ -8205,6 +8212,30 @@ fn webdav_sync_on_start() {
 ///
 /// 只动这两项、只在真的不一致时才落盘，避免每次启动都白写一次配置文件
 /// （写盘会刷新 mtime，进而影响下次"云端较新"的判定）。
+/// 「这台机器要不要以管理员身份运行」的本地标记（`elevate.pref`）。
+///
+/// 为什么不用配置文件里的 `autoElevate`：那一份会被云端备份整份恢复、也会被
+/// 前端保存的旧快照覆盖（2026-10-31 实测：勾上之后下次启动又被翻回 false，
+/// 进程降权 → 微信里钩子收不到输入 → 划词/快捷键全哑）。
+/// 这一项本来就只属于这台机器，单独存一个文件最稳。
+fn local_elevate_pref_path() -> std::path::PathBuf {
+    config::data_dir().join("elevate.pref")
+}
+
+fn read_local_elevate_pref() -> Option<bool> {
+    let s = std::fs::read_to_string(local_elevate_pref_path()).ok()?;
+    match s.trim() {
+        "1" | "true" | "on" => Some(true),
+        "0" | "false" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+fn write_local_elevate_pref(on: bool) {
+    config::ensure_dirs();
+    let _ = std::fs::write(local_elevate_pref_path(), if on { "1" } else { "0" });
+}
+
 fn restore_local_only_settings(elevate: bool, autostart: bool) {
     let mut changed = Vec::new();
     {
@@ -8213,6 +8244,7 @@ fn restore_local_only_settings(elevate: bool, autostart: bool) {
         };
         if c.auto_elevate != elevate {
             c.auto_elevate = elevate;
+            write_local_elevate_pref(elevate);
             changed.push(format!("autoElevate={elevate}"));
         }
         if c.auto_start != autostart {
@@ -19136,7 +19168,27 @@ fn main() {
     // 2. 默认以管理员跑（这样才能把 Ctrl+C 送进同样是管理员的程序里）。
     //    设置面板里可以关掉，所以要**先把配置文件读出来**再决定 —— 这一步只读磁盘，
     //    不需要 STATE 就绪。
-    let elevate_wanted = config::load().auto_elevate && !QS_LITE_PORTABLE;
+    /* v2.11.8：提权开关的判定顺序 = 本机标记 → 构建默认 与 配置。
+     *
+     * 这里连着踩了两个坑，都是"设置里勾了但根本不提权"，用户那边看到的是
+     * 微信里划词不弹条、快捷键不弹网格（微信是管理员权限，UIPI 让普通权限
+     * 进程的全局钩子收不到它的任何输入）：
+     *
+     *   ① **配置会被覆盖**：用户勾上之后，启动时"云端那份较新"会整份恢复，
+     *      `autoElevate` 被翻回 false（日志 `云端「config(...)」较新，已恢复到本机`）。
+     *      → 所以这一项改成优先读本机标记文件 `elevate.pref`（不进云端备份）。
+     *   ② **构建开关把它钉死了**：本仓库是便携测试版（`QS_LITE_PORTABLE = true`），
+     *      原来这里写成 `... && !QS_LITE_PORTABLE`，于是**任何设置都不生效**。
+     *      而设置面板上那个「默认以管理员身份运行」还照常显示 —— 一个死开关。
+     *      → 现在只有"用户从没表达过意愿"时才回落到构建默认；
+     *      用户一旦明确打开/关闭过（标记文件存在），就按用户说的办。
+     *
+     * 测试实例不受影响：它们的数据目录是独立的，没有这个标记文件。
+     */
+    let elevate_wanted = match read_local_elevate_pref() {
+        Some(v) => v,
+        None => !QS_LITE_PORTABLE && config::load().auto_elevate,
+    };
     if !no_elevate && elevate_wanted && !win::is_admin() {
         win::log("not admin, trying to relaunch as admin");
         if win::relaunch_as_admin() {
@@ -19145,7 +19197,9 @@ fn main() {
         }
         win::log("elevation refused, continue as normal user");
     } else if !elevate_wanted {
-        win::log("auto-elevate 已在设置里关闭，以普通权限运行");
+        win::log("auto-elevate 未开启，以普通权限运行（设置 → 通用 → 默认以管理员身份运行）");
+    } else {
+        win::log("已是管理员权限，无需提权");
     }
 
     init_state();
