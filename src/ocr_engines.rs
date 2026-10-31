@@ -238,7 +238,11 @@ pub static ENGINES: &[EngineInfo] = &[
         need_model: false,
         need_base: false,
         base: "https://api.siliconflow.cn/v1",
-        model: "Qwen/Qwen2.5-VL-32B-Instruct",
+        /* ⚠ v2.11.3：原来写的是 `Qwen/Qwen2.5-VL-32B-Instruct`，硅基流动已
+         *   2026-04-29 下线该模型（连同 Qwen2.5-VL-72B / Qwen2-VL-72B）。
+         *   结果就是"框选完什么都没有"——接口回 400，正文为空。
+         *   换成现在模型广场里状态为 Available 的 Qwen3-VL-30B-A3B（便宜、支持图片输入）。 */
+        model: "Qwen/Qwen3-VL-30B-A3B-Instruct",
         note: "国内直连、聚合了很多开源视觉模型，小模型有免费额度",
     },
     EngineInfo {
@@ -1128,7 +1132,22 @@ pub fn parse_openai(v: &Value) -> Result<String, String> {
             .and_then(|x| x.as_str())
             .unwrap_or_else(|| err.as_str().unwrap_or("原因未知"));
         let code = err.get("code").map(|c| c.to_string()).unwrap_or_default();
-        return Err(format!("接口报错：{msg} {code}").trim().to_string());
+        let mut m = format!("接口报错：{msg} {code}").trim().to_string();
+        /* v2.11.3：模型下线/写错是最常见的一类失败（硅基流动 2026-04 下线了
+         * Qwen2.5-VL 全系，用户点完识别只看到空白）。API 原话往往很含糊
+         * （Model does not exist / 404 model not found），这里补一句能照做的提示。 */
+        let low = m.to_lowercase();
+        if low.contains("model")
+            && (low.contains("not exist")
+                || low.contains("not found")
+                || low.contains("not support")
+                || low.contains("invalid")
+                || low.contains("404")
+                || low.contains("不存在"))
+        {
+            m.push_str("（该模型可能已下线或名称填错，去 设置 → 附加功能 → 文字识别 里换一个）");
+        }
+        return Err(m);
     }
     let c = v.pointer("/choices/0/message/content");
     let raw = match c {
@@ -1508,6 +1527,28 @@ mod tests {
     }
 
     #[test]
+    /// 模型下线/写错时，错误信息要能指导用户下一步（v2.11.3）。
+    ///
+    /// 场景来源：硅基流动 2026-04-29 下线 `Qwen/Qwen2.5-VL-32B-Instruct`，
+    /// 而它当时正是我们的默认模型 —— 用户点完识别只看到"框选后什么都没有"。
+    /// API 原话是 "Model does not exist"，光看这句根本不知道该干什么。
+    #[test]
+    fn openai_model_errors_get_an_actionable_hint() {
+        let v: serde_json::Value = serde_json::from_str(
+            r#"{"error":{"message":"Model does not exist","code":"model_not_found"}}"#,
+        )
+        .unwrap();
+        let e = parse_openai(&v).unwrap_err();
+        assert!(e.contains("接口报错"), "{e}");
+        assert!(e.contains("模型可能已下线"), "模型类错误没给提示：{e}");
+
+        // 鉴权错不该被贴这句（它不含 model）
+        let v2: serde_json::Value =
+            serde_json::from_str(r#"{"error":{"message":"invalid api key"}}"#).unwrap();
+        let e2 = parse_openai(&v2).unwrap_err();
+        assert!(!e2.contains("模型可能已下线"), "把鉴权错说成模型错：{e2}");
+    }
+
     fn parse_youdao_reads_lines_and_error_codes() {
         let okv: Value = serde_json::from_str(
             r#"{"errorCode":"0","Result":{"regions":[

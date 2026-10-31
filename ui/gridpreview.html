@@ -276,6 +276,52 @@
         var h = Math.ceil(r.height) + 24;
         var w = Math.ceil(r.width) + 24;
         post({ __qsGridPreviewHeight: h, __qsGridPreviewWidth: w });
+        /* 尺寸一变，iframe 在舞台里的位置也跟着变（父页面用 margin:auto 居中），
+         * 背景切片要重新对齐，见 syncStageBackdrop。 */
+        syncStageBackdrop();
+    }
+
+    /* ---------------- 舞台背景：把 iframe 的"画布"画成舞台的同一块 ---------------- */
+
+    /** 给 iframe 文档铺上**舞台背景的同一块切片**（v2.11.3）。
+     *
+     *  # 为什么必须这么做
+     *
+     *  预览文档本身是透明的（html/body 都是 transparent），可 Chromium 会给
+     *  **带合成层**的 iframe 铺一层白色画布：`.bar` 上有 `backdrop-filter` +
+     *  `will-change: backdrop-filter`，于是 iframe 变成独立合成层，整块被画成
+     *  白色 —— 用户看到的就是"网格页旁边多出来一个方形白框"，而且磨砂采样到的
+     *  也是这块白，玻璃感全错。
+     *
+     *  # 为什么不是简单填一个纯色
+     *
+     *  舞台背景是「底色 + 两个柔光斑」的渐变色。只填纯色的话，iframe 与舞台之间
+     *  会留下一道可见的接缝（光斑位置对不上）。这里直接把父页面舞台的
+     *  `background-image` 取过来，并按 iframe 在舞台里的**偏移**做负定位、按舞台
+     *  尺寸定背景大小 —— 于是 iframe 里画的正好是舞台背景的同一块，接缝为零。
+     *
+     *  同源（都是 qs.localhost）才能直接读父页面的计算样式；单独打开本页时
+     *  `frameElement` 为空，跳过即可。 */
+    function syncStageBackdrop() {
+        var fe = window.frameElement;
+        var host = fe && fe.parentElement;
+        if (!host) return;
+        var st, fr, pr;
+        try {
+            st = getComputedStyle(host);
+            fr = fe.getBoundingClientRect();
+            pr = host.getBoundingClientRect();
+        } catch (_) {
+            return;   // 跨源 / 已卸载：保持透明，不影响功能
+        }
+        var bs = document.body.style;
+        bs.backgroundColor = st.backgroundColor || 'transparent';
+        bs.backgroundImage = (st.backgroundImage && st.backgroundImage !== 'none')
+            ? st.backgroundImage : 'none';
+        bs.backgroundSize = Math.round(pr.width) + 'px ' + Math.round(pr.height) + 'px';
+        bs.backgroundRepeat = 'no-repeat';
+        bs.backgroundPosition =
+            (-Math.round(fr.left - pr.left)) + 'px ' + (-Math.round(fr.top - pr.top)) + 'px';
     }
 
     /* ---------------- 拖动改尺寸 ---------------- */
@@ -393,6 +439,12 @@
         var d = e.data;
         if (d && d.__qsGridPreview) render(d.payload);
     });
+
+    /* 舞台背景跟着走：窗口缩放 / 主题切换 / 父页面改样式都会动到它。
+     * 只监听 resize 就够（主题切换在父页面会重新 push 一次 payload，render 里
+     * 也会再对齐一次）。 */
+    window.addEventListener('resize', function () { syncStageBackdrop(); });
+    syncStageBackdrop();
 
     // 告诉父页面：我准备好了，把当前配置发过来
     post({ __qsGridPreviewReady: true });
