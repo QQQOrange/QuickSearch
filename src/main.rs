@@ -3805,12 +3805,12 @@ fn __probe_post_copy() -> String {
         let visible = win::wait_until(500, is_bar_shown);
         win::log(&format!("probe-post-copy: 弹条已可见={visible}（gen={gen}）"));
         let fg = win::window_pid(win::foreground_window());
-        post_show_copy_fill(gen, fg);
+        post_show_copy_fill(gen, fg, (0, 0, 0, 0));
     });
     "started".into()
 }
 
-fn post_show_copy_fill(gen: usize, fg_pid: u32) {
+fn post_show_copy_fill(gen: usize, fg_pid: u32, drag: (i32, i32, i32, i32)) {
     /* ⚠ 条件①必须**等横条真的可见**再判，不能直接 `is_bar_shown()`：
      *   `show_bar_at` 只是"发了事件"，`geo.shown` 要等前端量完尺寸回填
      *   （日志里 `after-show: visible=true` 那一行）。直接判会出现
@@ -3847,7 +3847,87 @@ fn post_show_copy_fill(gen: usize, fg_pid: u32) {
             push_late_text(t, true);
             win::log(&format!("post-copy: 补字成功（{n} 字）"));
         }
-        _ => win::log("post-copy: 复制没拿到文字 —— 保持空条"),
+        _ => {
+            /* v2.11.5：复制通道**全废**时改"看屏幕"。
+             *
+             * 微信 4.x（Qt）会直接忽略带 LLKHF_INJECTED 的 Ctrl+C —— 实测选区
+             * 在屏幕上蓝着、剪贴板一个字没变，三条复制通道（合成按键 / WM_COPY /
+             * 按键消息）全部拿不到。用户的口径是"选中文字就必须有横条、有字"，
+             * 所以退到最后一条路：把刚才划过的那块屏幕交给**本地 OCR**（不联网、
+             * 50~150ms），认出来再补进横条。
+             *
+             * 放在"横条已显示之后"做，所以弹条速度一点不受影响。 */
+            win::log("post-copy: 复制没拿到文字 —— 改看屏幕（本地识别补字）");
+            post_ocr_fill(gen, fg_pid, drag);
+        }
+    }
+}
+
+/// 复制通道全废时的兜底：**直接认刚才划过的那块屏幕**（本地 OCR，不联网）。
+///
+/// 只服务"复制不动"的客户端（微信 4.x 这类会忽略合成按键的 Qt 程序），
+/// 所以：
+///   · 只在 `post_copy` 失败**之后**调用，正常软件一次都不会走到；
+///   · 只认拖选的那块矩形，缩放后交给 Windows 本地 OCR，不发网络请求；
+///   · 横条此时已经显示，认出来用 `push_late_text` 补进去，弹条不受影响。
+fn post_ocr_fill(gen: usize, fg_pid: u32, drag: (i32, i32, i32, i32)) {
+    if !is_bar_shown() || GEN.load(Ordering::SeqCst) != gen {
+        return;
+    }
+    /* 用户可能已经点到别处去了 —— 那时认出来的字不是他要的，别硬塞。 */
+    let fg = win::window_pid(win::foreground_window());
+    let me = std::process::id();
+    if fg != 0 && fg != fg_pid && fg != me {
+        let same_app = match (win::process_exe(fg), win::process_exe(fg_pid)) {
+            (Some(a), Some(b)) => a.eq_ignore_ascii_case(&b),
+            _ => false,
+        };
+        if !same_app {
+            win::log("post-ocr: 前台已经换人 —— 不补字");
+            return;
+        }
+    }
+    let (x0, y0, x1, y1) = drag;
+    /* ⚠ 拖选**横着划**时 `y0 == y1`，矩形高度是 0 —— 直接拿去截图只能是空条。
+     *   这里给选区补一圈内边距（上下各 10px、左右各 4px），既保证有高度，
+     *   也能把文字上下沿的半个字高包进来（本地 OCR 对切了边的字很敏感）。 */
+    const PAD_X: i32 = 4;
+    const PAD_Y: i32 = 10;
+    let x = x0.min(x1) - PAD_X;
+    let y = y0.min(y1) - PAD_Y;
+    let w = (x1 - x0).abs() + PAD_X * 2;
+    let h = (y1 - y0).abs() + PAD_Y * 2;
+    if w < 8 || h < 8 || w > 3000 || h > 2000 {
+        win::log(&format!("post-ocr: 选区尺寸 {w}x{h} 不适合识别 —— 跳过"));
+        return;
+    }
+    let Some((cw, ch, pixels)) = win::grab_region(x, y, w, h) else {
+        win::log("post-ocr: 截取选区失败");
+        return;
+    };
+    let Some(img) = image::RgbaImage::from_raw(cw, ch, pixels) else {
+        win::log("post-ocr: 像素数据异常");
+        return;
+    };
+    let mut cur = std::io::Cursor::new(Vec::new());
+    if image::DynamicImage::ImageRgba8(img)
+        .write_to(&mut cur, image::ImageFormat::Png)
+        .is_err()
+    {
+        return;
+    }
+    match run_ocr(&cur.into_inner(), "windows") {
+        Ok((text, _raw, _label)) if !text.trim().is_empty() => {
+            if !is_bar_shown() || GEN.load(Ordering::SeqCst) != gen {
+                win::log("post-ocr: 认出来了但横条已换新 —— 丢弃");
+                return;
+            }
+            let n = text.chars().count();
+            push_late_text(text, true);
+            win::log(&format!("post-ocr: 本地识别补字成功（{n} 字）"));
+        }
+        Ok(_) => win::log("post-ocr: 屏幕上也没认到字"),
+        Err(e) => win::log(&format!("post-ocr: 本地识别失败：{e}")),
     }
 }
 
@@ -4235,7 +4315,7 @@ fn start_capture(target_pid: u32, drag: (i32, i32, i32, i32)) {
              * 也不能占用事件消费线程（否则这期间 Esc / 点击都要迟到）。 */
             if text.trim().is_empty() {
                 let pid = target_pid;
-                std::thread::spawn(move || post_show_copy_fill(gen, pid));
+                std::thread::spawn(move || post_show_copy_fill(gen, pid, drag));
             }
             /* ⚠ `via` 为空串 = 三条通道**全都没拿到文字**（OCR 也失败）——
              * 那也是 OCR 这条路上的失败，同样要复核：用户日志里"选中的是网址，
