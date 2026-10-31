@@ -1563,12 +1563,15 @@ document.addEventListener('keydown', (e) => {
 
 // 前端就绪后主动拉一次，避免错过 Rust 建窗口时发的那几次 push
 async function pull() {
-    const [t, img, note, parts] = await Promise.all([
+    const [t, img, note, parts, plan] = await Promise.all([
         invoke('ocr_take_text').catch(() => ''),
         invoke('ocr_take_image').catch(() => ''),
         invoke('ocr_take_note').catch(() => ''),
         invoke('ocr_take_parts').catch(() => null),
+        // v2.11.2：失败轮次没有任何 push（parts 也是空的），名单只能从这里拿
+        invoke('ocr_plan_now').catch(() => null),
     ]);
+    if (Array.isArray(plan) && plan.length) planReal = plan.slice();
     if (Array.isArray(parts) && parts.length) {
         ocrParts = parts;
         syncPlanFromParts(parts);
@@ -1584,6 +1587,11 @@ async function pull() {
 // 文字与图片一起到（新通道）
 listen('qs://ocr-result', (ev) => {
     const p = (ev && ev.payload) || {};
+    /* v2.11.2：**先认后端给的"本轮计划"**，再用真实 parts 校正。
+     * 计划是"这一轮打算跑哪几家"（绑定了引擎时就只有那一家），parts 只有
+     * 真的出结果的 —— 一家都没成时 parts 为空，界面不能退回配置里的默认引擎，
+     * 否则用户点的"百度云"会显示成本地/默认那家。 */
+    if (Array.isArray(p.plan) && p.plan.length) planReal = p.plan.slice();
     if (Array.isArray(p.parts)) {
         ocrParts = p.parts;
         syncPlanFromParts(p.parts);

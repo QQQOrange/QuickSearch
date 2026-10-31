@@ -9523,6 +9523,37 @@ fn set_ocr_force_engine(engine: Option<String>) {
     }
 }
 
+/// 这一轮是不是用户**明确指定**的那一家（网格里 `@ocr:<id>` 绑定格子）。
+///
+/// 用它区分两种口径：绑定 = 只跑它、跑不了就明说；没绑定 = 走"默认 + 同时识别"
+/// 那套，缺凭据时可以退回本地让功能可用（r76/r77 的老行为）。
+fn ocr_forced_engine() -> Option<String> {
+    OCR_FORCE_ENGINE.lock().ok().and_then(|g| g.clone())
+}
+
+/// 这一轮**计划**要跑哪几家（`ocr_region` / `rescan_ocr` 算出来的名单）。
+///
+/// 结果页拿它决定「参与名单」：`parts` 只包含**真的返回了结果**的引擎，
+/// 一家都没成时是空的 —— 那时若退回按配置猜，界面就会摆出用户根本没选的那一家
+/// （这正是"绑了百度云、界面还是默认那家"的另一条来路）。
+static OCR_ROUND_PLAN: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+fn set_ocr_round_plan(plan: &[String]) {
+    if let Ok(mut g) = OCR_ROUND_PLAN.lock() {
+        *g = plan.to_vec();
+    }
+}
+
+fn ocr_round_plan() -> Vec<String> {
+    OCR_ROUND_PLAN.lock().map(|g| g.clone()).unwrap_or_default()
+}
+
+/// 结果页初始化时拉一次「这一轮计划跑哪几家」（`parts` 为空时尤其重要）。
+#[crate::t::command]
+fn ocr_plan_now() -> Value {
+    json!(ocr_round_plan())
+}
+
 fn set_trans_force_engine(engine: Option<String>) {
     let v = engine
         .map(|e| e.trim().to_string())
@@ -10226,6 +10257,8 @@ fn open_ocr_window(text: String) {
                     "image": img.as_str(),
                     "note": note.clone(),
                     "parts": parts.as_ref(),
+                    // 同 emit_ocr_result：这一轮计划跑哪几家
+                    "plan": ocr_round_plan(),
                 }),
             );
             // 老的纯文字事件留着：老版本页面/第三方调用还可能只听这个
@@ -10249,6 +10282,18 @@ fn open_ocr_window(text: String) {
 ///     自然还是走百度，不需要回来改设置。
 fn ocr_plan_with_local_fallback(cfg: &config::Config) -> (Vec<String>, bool) {
     let run = ocr_engine_plan(cfg);
+    /* ⚠ v2.11.2：**用户点的是哪一家，就跑哪一家 —— 绝不替换**。
+     *
+     * 用户口径（原话）：「一旦选定某一项，后续相关功能必须直接使用该已选定的
+     * 具体项执行，而不是回退到默认值或其他选项」。
+     *
+     * 以前这里会把"缺凭据的绑定引擎"悄悄换成 Windows 本地：结果窗跑的是本地，
+     * 用户绑了百度云却看到本地的界面 —— 表现就是「换成百度之后还是老样子」。
+     * 现在缺凭据由 `ocr_start_flow` 直接说明（并把设置页打开到 OCR 那一栏），
+     * 不再偷偷换人。 */
+    if ocr_forced_engine().is_some() {
+        return (run, false);
+    }
     /* 只要名单里**有一家凭据齐**就照原样跑，一点都不动。
      * ⚠ 这一句就覆盖了"用户已经勾了本地引擎"的情形 —— 本地永远 `creds_ready`，
      *   所以那种配置会在这里直接返回，走不到下面的插入分支（也就不会重复插）。 */
@@ -10316,7 +10361,16 @@ fn ocr_start_flow(force_engine: Option<String>) {
          * ⚠ r77：**只在这一次的名单里补本地，不动用户配置** ——
          *   落盘会把「同时识别」名单里的 windows 悄悄"吃掉"（详见
          *   `ocr_plan_with_local_fallback` 的注释），真机自检抓到过。 */
-        if ocr_engines::find("windows").is_some() && !run.iter().any(|id| id == "windows") {
+        /* ⚠ v2.11.2：**绑定了具体引擎时不许换成别的**。
+         *
+         * 老行为是"这里一家都跑不起来，但有本地 OCR 就先跑本地" —— 对"没做任何
+         * 选择"的默认路径是善意兜底；可用户明明点了「百度云」那颗格子，再被换成
+         * 本地，他看到的就是"还是默认那家"。所以强制引擎走 else 分支：
+         * 说清缺哪家凭据、把设置页开到 OCR 栏，然后退出。 */
+        if ocr_forced_engine().is_none()
+            && ocr_engines::find("windows").is_some()
+            && !run.iter().any(|id| id == "windows")
+        {
             win::log("ocr: 计划里的引擎都缺凭据，但本机有本地 OCR —— 这一轮临时改用它（不改设置）");
         } else {
             let miss = run
@@ -12864,6 +12918,9 @@ fn emit_ocr_result(png: &[u8], text: &str) {
         "image": img,
         "note": note,
         "parts": parts,
+        // v2.11.2：这一轮**计划**跑哪几家。parts 只含真出结果的引擎，
+        // 全失败时为空 —— 界面靠这个字段才不会退回"配置里的默认引擎"。
+        "plan": ocr_round_plan(),
     }));
     let _ = a.emit_to("ocr", "qs://ocr-text", text.to_string());
 }
@@ -12904,7 +12961,13 @@ fn rescan_ocr(engine: Option<String>) -> Result<String, String> {
     let eng = match engine {
         // 认注册表里的任何一家（需求 2 之后有十几家）
         Some(e) if ocr_engines::find(&e).is_some() => e,
-        _ => cfg.ocr_engine.clone(),
+        /* v2.11.2：没显式指定时，优先**这一轮计划里的第一家**。
+         * 绑了 `@ocr:baidu` 的那一轮点「重新识别」，以前会跑配置里的默认引擎 ——
+         * 等于又把用户的选择丢了一次（"我明明选的是百度"）。 */
+        _ => ocr_round_plan()
+            .first()
+            .cloned()
+            .unwrap_or_else(|| cfg.ocr_engine.clone()),
     };
     // 本地识别不需要凭据；在线引擎缺凭据要早一点报错，别让用户空等。
     if !creds_ready(&cfg, &eng) {
@@ -13663,6 +13726,9 @@ fn ocr_region(x: f64, y: f64, w: f64, h: f64, dpr: f64) {
         //   用户没配百度密钥时就会出现「能框选、框完必然失败」的死路。
         //   两边用同一个函数，兜底才真的落在这一轮上。
         let (run, fell_back) = ocr_plan_with_local_fallback(&cfg);
+        /* v2.11.2：把这一轮的**计划**记下来，结果页按它画"参与名单" ——
+         * parts 只有真出结果的引擎，全失败时是空的，不能让界面退回配置默认值。 */
+        set_ocr_round_plan(&run);
         if fell_back {
             win::log("ocr: 这一轮名单里全是缺凭据的引擎，已临时补上本地识别");
         }
@@ -13762,7 +13828,16 @@ fn ocr_region(x: f64, y: f64, w: f64, h: f64, dpr: f64) {
                 }
             });
             if ok == 0 {
-                ocr_tell(format!("识别失败：{}", notes.join("；")), true);
+                /* 一家都没成：把结果窗也打开，让「哪一家、为什么」看得见。
+                 * v2.11.2：绑定了引擎时**必须**这样（否则用户只看得到一条
+                 * 转瞬即逝的提示，正文空空如也）；默认路径仍是提示一条就够。 */
+                let why = notes.join("；");
+                if ocr_forced_engine().is_some() {
+                    set_ocr_note(why);
+                    open_ocr_window(String::new());
+                } else {
+                    ocr_tell(format!("识别失败：{why}"), true);
+                }
             }
             return;
         }
@@ -13795,9 +13870,17 @@ fn ocr_region(x: f64, y: f64, w: f64, h: f64, dpr: f64) {
                 open_ocr_window(text);
             }
             Err(e) => {
-                // 失败时也把结果窗口叫起来：让用户看到框选的图 + 失败原因，
-                // 而不是只有一条转瞬即逝的提示（以前就是这么闷掉用户的）。
-                ocr_tell(format!("识别失败：{e}"), true);
+                /* 失败时也把结果窗口叫起来：让用户看到框选的图 + 失败原因，
+                 * 而不是只有一条转瞬即逝的提示（以前就是这么闷掉用户的）。
+                 * v2.11.2：**绑定了引擎的那一路一定开窗** —— 失败原因必须挂在
+                 * "你选的那一家"上，否则用户只会觉得"点了跟没点一样"。 */
+                let why = format!("{}：{e}", engine_display(&ocr_engine));
+                if ocr_forced_engine().is_some() {
+                    set_ocr_note(why.clone());
+                    open_ocr_window(String::new());
+                } else {
+                    ocr_tell(format!("识别失败：{why}"), true);
+                }
             }
         }
     });
@@ -18974,6 +19057,7 @@ fn main() {
             ocr_take_image,
             ocr_take_note,
             ocr_take_parts,
+            ocr_plan_now,
             close_ocr_window,
             ocr_rerun,
             ocr_rescan,
@@ -19757,6 +19841,41 @@ mod tests {
         let t = "参考 https://example.com/a 和 www.test.org/b ，还有 index.html 不是链接。";
         assert_eq!(engines::extract_links(t).len(), 2);
         assert!(engines::extract_links("这是一句话，没有任何网址。").is_empty());
+    }
+
+    /* ---------------- OCR 绑定引擎（v2.11.2） ---------------- */
+
+    /// 绑定了具体引擎时，**绝不能被"缺凭据"那条兜底换成本地**。
+    ///
+    /// 这条守的是用户报的原话：「我已将本地识别替换为百度云识别，但之前出现的
+    /// 同类问题依然存在」——老逻辑里 `ocr_plan_with_local_fallback` 会把缺凭据的
+    /// 绑定引擎悄悄换成 Windows 本地，于是"点了百度却跑本地"。
+    /// 同一个测试里顺带钉住三点：默认路径的兜底仍保留、计划表能存能取、
+    /// 未绑定时的老行为不回归。
+    #[test]
+    fn bound_ocr_engine_is_never_swapped_for_local() {
+        let mut cfg = Config::default();
+        cfg.ocr_engine = "baidu".to_string();
+        cfg.ocr_multi.clear();
+        cfg.ocr_keys.clear();
+        cfg.ocr_secrets.clear();
+
+        // ① 绑定 baidu（没有凭据）→ 名单必须还是 baidu，且不算"兜底过"
+        *OCR_FORCE_ENGINE.lock().unwrap() = Some("baidu".to_string());
+        let (run, fell_back) = ocr_plan_with_local_fallback(&cfg);
+        assert_eq!(run, vec!["baidu".to_string()], "绑定的引擎被换掉了");
+        assert!(!fell_back, "绑定轮次不该标成「兜底」");
+        *OCR_FORCE_ENGINE.lock().unwrap() = None;
+
+        // ② 没绑定时保留老兜底：缺凭据就补本地，让功能可用
+        let (run2, fell2) = ocr_plan_with_local_fallback(&cfg);
+        assert!(run2.contains(&"windows".to_string()), "默认路径的兜底没了：{run2:?}");
+        assert!(fell2);
+
+        // ③ 计划表能存能取（结果页 `ocr_plan_now` 读的就是它）
+        set_ocr_round_plan(&["tencent".to_string()]);
+        assert_eq!(ocr_round_plan(), vec!["tencent".to_string()]);
+        set_ocr_round_plan(&[]);
     }
 
     /* ---------------- 通知节流（v2.11.0） ---------------- */
