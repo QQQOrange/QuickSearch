@@ -1523,6 +1523,12 @@ pub struct Config {
     /// 键 = `@fav:<id>`（横条目录）/ `_root`（快捷键唤起的收藏夹根视图）。
     #[serde(default)]
     pub fav_panel_sizes: std::collections::BTreeMap<String, Vec<f64>>,
+    /// 网格页「添加到这一格」选板被用户拖出来的长宽（`[宽, 高]`，逻辑 px）。
+    ///
+    /// 空 = 还没拖过，用默认的 560×470。用户原话：「调整之后以后都这样」——
+    /// 所以右下角抓手松手就落库，重启之后还是这个尺寸（不是只管本次运行）。
+    #[serde(default)]
+    pub pick_size: Vec<u32>,
     /// 启动时自动以管理员身份重启自己。
     ///
     /// 默认开：只有管理员进程才把 Ctrl+C 送进同样是管理员的程序（任务管理器、
@@ -2053,6 +2059,7 @@ impl Default for Config {
             grid_seeded: false,
             backup_password: String::new(),
             fav_panel_sizes: std::collections::BTreeMap::new(),
+            pick_size: Vec::new(),
             auto_elevate: true,
             delay_ms: 0,
             bar_idle_sec: default_bar_idle_sec(),

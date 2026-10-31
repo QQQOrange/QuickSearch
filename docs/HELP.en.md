@@ -106,6 +106,9 @@ When you use **the selection bar / the grid page / OCR / translation / image sea
 - Two buttons at the top-right: **✏️ Edit** (every tile gets an **×**; click it to remove that tile,
   click the button again to leave edit mode) and **⚙ Settings** (jump to this settings tab).
 - Clicking an **empty tile** opens the *Add content* panel; pick one and it fills that tile.
+  The panel is grouped three levels deep (**built-in / shortcuts / favourites / models / web / app /
+  hotkey → theme → category**) and has a search box; items already on the grid are ticked and greyed.
+  **Drag its bottom-right corner to resize it — the size is remembered**, including after a restart.
 - The same window is in Settings: **Grid page → Tiles → ＋ Add content** (search box on top,
   grouped into *Extras / Smart Launch / Engines*, with the same icons as everywhere else);
 - Faster still: click **Add to grid / ＋grid** right on an engine row, a Smart Launch row or the

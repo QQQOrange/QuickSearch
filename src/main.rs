@@ -5252,6 +5252,8 @@ fn config_view() -> Value {
         // config::backup_dir_of 会建不出来就退回数据目录（见那里的注释）。
         "backupDir": cfg.backup_dir,
         "favPanelSizes": cfg.fav_panel_sizes,
+        // v2.6.9：网格页「添加到这一格」选板的长宽（[宽, 高]，空 = 用默认 560×470）
+        "pickSize": cfg.pick_size,
         "sepStyle": cfg.sep_style,
         "customEngines": cfg.custom_engines,
         "apps": cfg.apps,
@@ -5877,6 +5879,18 @@ fn apply_one_setting(cfg: &mut config::Config, key: &str, value: Value) -> Resul
             >(value.clone())
             {
                 cfg.fav_panel_sizes = m;
+            }
+        }
+        /* v2.6.9：网格页选板被拖出来的长宽（用户要求"调整之后以后都这样"）。
+         * 收 [宽, 高]；这里再夹一次区间 —— 配置可能来自手改或旧备份，
+         * 给个 0 或 99999 的话下次打开选板就没法用了。 */
+        "pickSize" => {
+            if let Ok(v) = serde_json::from_value::<Vec<u64>>(value.clone()) {
+                let w = v.first().copied().unwrap_or(0).clamp(360, 4000) as u32;
+                let h = v.get(1).copied().unwrap_or(0).clamp(260, 4000) as u32;
+                if w > 0 && h > 0 {
+                    cfg.pick_size = vec![w, h];
+                }
             }
         }
         "autoStart" => {

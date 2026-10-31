@@ -3642,6 +3642,8 @@ async function openGridPicker(index) {
     gridPickAt = typeof index === 'number' ? index : -1;
     gridPickFilter = 'all';
     barEl.classList.add('qs-gpicking');
+    // 每次打开都从配置读一次：别处改了配置 / 首次启动都走同一条路
+    pickSizeFromConf();
     applyPickSize();
     renderGridPicker();
     pushLayout();
@@ -3661,10 +3663,31 @@ async function openGridPicker(index) {
 function applyPickSize() {
     const maxW = Math.round(((window.screen && screen.availWidth) || 1200) * 0.92);
     const maxH = Math.round(((window.screen && screen.availHeight) || 800) * 0.86);
-    const w = Math.max(PICK_MIN_W, Math.min(pickSize.w, maxW));
-    const h = Math.max(PICK_MIN_H, Math.min(pickSize.h, maxH));
+    const w = Math.max(PICK_MIN_W, Math.min(pickSize.w || PICK_W0, maxW));
+    const h = Math.max(PICK_MIN_H, Math.min(pickSize.h || PICK_H0, maxH));
+    // 夹完之后写回 pickSize：落库的就是真正生效的那个值，
+    // 不然拖出屏幕外（被 max 夹住）会存下一个用不了的大数字。
+    pickSize.w = w;
+    pickSize.h = h;
     barEl.style.width = w + 'px';
     barEl.style.height = h + 'px';
+}
+
+/** 从配置里读上次拖出来的选板长宽（v2.6.9：用户要求"调整之后以后都这样"）。
+ *
+ *  配置里是 `pickSize: [宽, 高]`，空 = 没拖过。这里只做"够不够用"的最低校验，
+ *  区间夹紧交给 applyPickSize（它知道当前屏幕多大）。 */
+function pickSizeFromConf() {
+    const v = (window.CONF && Array.isArray(window.CONF.pickSize)) ? window.CONF.pickSize : [];
+    const w = Number(v[0]) || 0;
+    const h = Number(v[1]) || 0;
+    if (w > 0 && h > 0) {
+        pickSize.w = w;
+        pickSize.h = h;
+    } else {
+        pickSize.w = PICK_W0;
+        pickSize.h = PICK_H0;
+    }
 }
 
 /** 右下角抓手拖动改尺寸。用户要求「弹窗长宽支持鼠标拖动自定义调节」。
@@ -3692,6 +3715,9 @@ function startPickResize(e) {
         window.removeEventListener('pointermove', onMove, true);
         window.removeEventListener('pointerup', onUp, true);
         pushLayout();
+        /* 松手就落库：用户要的是"调整之后以后都这样"，所以不能只记在内存里。 */
+        invoke('set_setting', { key: 'pickSize', value: [pickSize.w, pickSize.h] })
+            .catch(() => { /* 存不上也不影响本次使用 */ });
     };
     window.addEventListener('pointermove', onMove, true);
     window.addEventListener('pointerup', onUp, true);
