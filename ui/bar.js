@@ -1415,10 +1415,15 @@ function panelRowCell(row) {
  *    挂的是 data-grp 而不是 data-cat —— 分类锚点那套机器
  *    （paintCatNav / scrollPanelToCat / applyEngineFilter 里的导航收扩）
  *    全都按 data-cat 找按钮，不会误伤这颗。 */
-function appendGroupNav(head, groups) {
+function appendGroupNav(head, groups, ctx) {
     const nav = document.createElement('nav');
     nav.className = 'cat-nav grp-nav';
     nav.setAttribute('aria-label', '引擎大类过滤');
+    /* v2.8.1：`ctx` 让别的界面（网格页的「添加到这一格」）也能用这套导航。
+     * ctx = { state:{group,sub,cat}, rerender() }；不给 ctx 就是面板自己那一套
+     * （状态仍在 panelGroupFilter 里）。两处共用同一份 DOM/CSS，不另做设计。 */
+    const st = (ctx && ctx.state) ? ctx.state : null;
+    const cur = st ? st.group : panelGroupFilter;
     const items = [{ key: null, title: '全部引擎' }].concat(
         groups.map((g) => ({ key: g.key, title: g.title })));
     for (const it of items) {
@@ -1428,9 +1433,16 @@ function appendGroupNav(head, groups) {
         b.textContent = it.title;
         b.dataset.grp = it.key === null ? '' : it.key;
         b.title = it.key === null ? '显示全部引擎' : '只显示' + it.title;
-        if (panelGroupFilter === it.key) b.classList.add('on');
+        if (cur === it.key) b.classList.add('on');
         b.addEventListener('click', () => {
-            if (panelGroupFilter === it.key) return;   // 已经是它了，别白重画
+            if (cur === it.key) return;   // 已经是它了，别白重画
+            if (st) {
+                st.group = it.key;
+                st.sub = null;   // 换了大类，二/三级的选择作废（r53）
+                st.cat = null;
+                ctx.rerender();
+                return;
+            }
             panelGroupFilter = it.key;
             panelSubFilter = null;   // 换了大类，二/三级的选择作废（r53）
             panelCatFilter = null;
@@ -3359,10 +3371,6 @@ let gridPickAt = -1;
 /** 选板的过滤胶囊：all / builtin / go / fav / model / web / app / hotkey */
 let gridPickFilter = 'all';
 
-/** 选板里哪些引擎大类是展开的（`{ web: true }`）。默认全收起：
- *  用户要先看到"有哪些大类"，点开才看子类（和横条「更多引擎」一个节奏）。 */
-let gridPickOpen = {};
-
 /** 选板默认尺寸、下限，以及记忆下来的上次尺寸（拖动右下角改，见 startPickResize）。 */
 const PICK_W0 = 560, PICK_H0 = 470, PICK_MIN_W = 400, PICK_MIN_H = 300;
 let pickSize = { w: PICK_W0, h: PICK_H0 };
@@ -3457,76 +3465,11 @@ function gridPickSections() {
     addModel('翻译模型', GRID_MODELS.trans, '@trans',
         new Set([String((window.CONF && window.CONF.transEngine) || '')]));
 
-    /* ⑤ 引擎：大类 → 主题组 → 分类（和「更多引擎」面板同一套） */
-    let tree = [];
-    try {
-        if (CATALOG && typeof window.qsCatalogGroups === 'function') tree = window.qsCatalogGroups(CATALOG);
-    } catch (_) { tree = []; }
-    const KIND_TITLE = { web: '网页引擎', app: '软件引擎', hotkey: '快捷键引擎' };
-    const KIND_DESC = {
-        web: '浏览器里的搜索引擎与网页直达',
-        app: '本机软件与系统工具：搜索、直达',
-        hotkey: '把组合键发给前台软件',
-    };
-    const seen = new Set();
-    const mkEng = (name) => ({
-        name,
-        label: name,
-        added: inGrid.has(name),
-        eng: true,
-        node: () => {
-            try { return buildIconInner(name).node; } catch (_) { return document.createTextNode('🔎'); }
-        },
-    });
-    for (const g of tree) {
-        const themes = new Map();
-        for (const sub of (g.subs || [])) {
-            const kinds = Array.isArray(sub.kinds) ? sub.kinds : [];
-            for (const cat of (sub.cats || [])) {
-                for (const e of (cat.engines || [])) {
-                    const name = e && e.name;
-                    if (!name || seen.has(name)) continue;
-                    // sub.kinds 空 = 这个分类没标 search/open，两种都算
-                    if (kinds.length && kinds.indexOf(window.qsEngineKind(e)) < 0) continue;
-                    seen.add(name);
-                    const th = (cat.theme && cat.theme.title) ? cat.theme.title : '其他';
-                    const ct = String(cat.title || '未分类');
-                    if (!themes.has(th)) themes.set(th, new Map());
-                    const cats = themes.get(th);
-                    if (!cats.has(ct)) cats.set(ct, []);
-                    cats.get(ct).push(mkEng(name));
-                }
-            }
-        }
-        if (!themes.size) continue;
-        out.push({
-            key: g.key,
-            title: KIND_TITLE[g.key] || g.title || '引擎',
-            desc: KIND_DESC[g.key] || '',
-            themes: Array.from(themes.entries()).map(([title, cats]) => ({
-                title,
-                cats: Array.from(cats.entries()).map(([t, items]) => ({ title: t, items })),
-            })),
-        });
-    }
-
-    /* ⑥ 工具栏里没进任何分类的（用户自定义 + 老数据）：补一个"其他引擎"，
-     *    否则这些引擎在面板里有、在选板里搜不到 —— 用户会以为丢东西了。 */
-    const left = [];
-    try {
-        for (const e of (CATALOG.toolbar || [])) {
-            const name = e && e.name;
-            if (name && !seen.has(name)) { seen.add(name); left.push(mkEng(name)); }
-        }
-    } catch (_) { /* 目录没加载出来就算了 */ }
-    if (left.length) {
-        out.push({
-            key: 'web',
-            title: '其他引擎',
-            desc: '工具栏里但没归类的引擎',
-            themes: [{ title: '未分类', cats: [{ title: '工具栏', items: left }] }],
-        });
-    }
+    /* 引擎（网页 / 软件 / 快捷键）**不在这里拼**（v2.8.1）：
+     * 选板里那两块整块交给 renderPickEngineArea，它直接调「更多引擎」面板的
+     * panelTree / appendGroupNav / appendPickNav / panelRowCell —— 两处同一套
+     * 分类和交互，不各写一份。这里只留"非引擎"的分组，省掉每次渲染白建
+     * 800 多个对象。 */
 
     return out;
 }
@@ -3663,7 +3606,12 @@ function resetGridTransient() {
 async function openGridPicker(index) {
     gridPickAt = typeof index === 'number' ? index : -1;
     gridPickFilter = 'all';
-    gridPickOpen = {};
+    /* ⚠ 必须**原地清字段**，不能整个换对象：pickEngCtx.state 在模块初始化时就
+     * 指向了同一个对象，换掉的话导航读写的是旧对象、渲染读的是新对象 ——
+     * 现象是"点了大类，胶囊高亮变了但列表没跟着筛"（v2.8.1 自测踩到）。 */
+    pickEngState.group = null;
+    pickEngState.sub = null;
+    pickEngState.cat = null;
     barEl.classList.add('qs-gpicking');
     // 每次打开都从配置读一次：别处改了配置 / 首次启动都走同一条路
     pickSizeFromConf();
@@ -3762,9 +3710,9 @@ const PICK_FILTERS = [
     ['go', '智能直达'],
     ['fav', '收藏夹'],
     ['model', '模型'],
-    ['web', '网页引擎'],
-    ['app', '软件引擎'],
-    ['hotkey', '快捷键'],
+    /* v2.8.1：引擎不再在大类上切三颗 ——— 那正是"和「更多引擎」不一致"的来源。
+     * 这里只留一颗「引擎」，进去以后用**面板自己的**大类/中类/小类三行胶囊筛选。 */
+    ['engine', '引擎'],
 ];
 
 /** 画选板。外壳只建一次，之后换搜索词/过滤只重画列表 —— 否则每敲一个字
@@ -3845,6 +3793,7 @@ function renderPickFilters(box, secs) {
     const bar = box.querySelector('.qs-gpick-filters');
     if (!bar) return;
     const has = new Set(secs.map((s) => s.key));
+    if (panelTree().length) has.add('engine');   // 有目录就给「引擎」这颗
     // 过滤项已经不在数据里了（比如刚把最后一颗收藏夹删掉）→ 回落到「全部」
     if (gridPickFilter !== 'all' && !has.has(gridPickFilter)) gridPickFilter = 'all';
     bar.textContent = '';
@@ -3863,21 +3812,13 @@ function renderPickFilters(box, secs) {
     }
 }
 
-/** 分组标题（大类）：标题 + 描述 + 条数。
+/** 分组标题（非引擎的简单分组）：标题 + 描述 + 条数。
  *
- *  `opts.onToggle` 存在时整行变成**可点开的折叠条**（v2.8.0，用户要求
- *  "网页引擎"这类大类和横条「更多引擎」一样：先看到大类，点开才看子类）。 */
-function pickBlockHead(title, desc, n, opts) {
-    const o = opts || {};
-    const h = document.createElement(o.onToggle ? 'button' : 'div');
-    h.className = 'qs-gpick-block' + (o.onToggle ? ' qs-gpick-block-tog' + (o.open ? ' on' : '') : '');
-    if (o.onToggle) h.type = 'button';
-    if (o.onToggle) {
-        const chev = document.createElement('span');
-        chev.className = 'qs-gpick-chev';
-        chev.textContent = o.open ? '▾' : '▸';
-        h.appendChild(chev);
-    }
+ *  引擎那些分组不走这里 —— 它们用「更多引擎」面板的三级胶囊导航
+ *  （见 renderPickEngineArea），这才是用户要的"两处一致"。 */
+function pickBlockHead(title, desc, n) {
+    const h = document.createElement('div');
+    h.className = 'qs-gpick-block';
     const t = document.createElement('span');
     t.className = 'qs-gpick-block-t';
     t.textContent = title;
@@ -3893,9 +3834,6 @@ function pickBlockHead(title, desc, n, opts) {
         d.className = 'qs-gpick-block-d';
         d.textContent = desc;
         h.appendChild(d);
-    }
-    if (o.onToggle) {
-        h.addEventListener('click', () => o.onToggle());
     }
     return h;
 }
@@ -3947,63 +3885,136 @@ function pickChipGrid(items) {
     return g;
 }
 
-/** 选板里的列表主体。返回真正画出来的条数（给标题旁的"N 项"用）。 */
+/** 选板里引擎那一块：**完全复用「更多引擎」面板的分类与导航**（v2.8.1）。
+ *
+ *  用户口径：「请直接复用该页面已有的分类层级和交互逻辑，使网格页的引擎添加界面
+ *  与「更多引擎」页面保持一致，不要单独另做一套设计」。
+ *  所以这里不是"照着做一个像的"，而是直接调面板那几个函数：
+ *    · panelTree()          —— 同一份目录数据（qsCatalogGroups）
+ *    · appendGroupNav()     —— 一级：全部引擎 / 网页 / 软件 / 快捷键
+ *    · appendPickNav()      —— 二级中类 + 三级小类胶囊（同一套 .cat-nav / .cat-chip）
+ *    · panelRowCell()       —— 同一颗引擎格子（图标、名称、搜/开/键 角标全一致）
+ *  唯一不同的只有点击行为：这里是"加进这一格"，面板里是"拿文字去搜"。
+ *
+ *  状态单独一份（pickEngState），不共用面板的 panelGroupFilter —— 两个界面
+ *  同时开着时互不干扰，也不会因为一边切换把另一边重置。 */
+let pickEngState = { group: null, sub: null, cat: null };
+const pickEngCtx = {
+    state: pickEngState,
+    rerender: () => renderGridPicker(),
+};
+
+function renderPickEngineArea(host, kw) {
+    const groups = panelTree();
+    if (!groups.length) return 0;
+
+    const nav = document.createElement('div');
+    nav.className = 'qs-gpick-engnav';
+    appendGroupNav(nav, groups, pickEngCtx);
+    appendPickNav(nav, groups, panelSectionSubs(groups, pickEngState.group), pickEngCtx);
+    host.appendChild(nav);
+
+    const rows = window.qsAllEngineRows(groups).filter((r) => {
+        if (pickEngState.group && r.group !== pickEngState.group) return false;
+        if (pickEngState.sub && r.sub !== pickEngState.sub) return false;
+        if (pickEngState.cat && (r.cat || '未分类') !== pickEngState.cat) return false;
+        if (kw && String(r.name).toLowerCase().indexOf(kw) < 0) return false;
+        return true;
+    });
+    if (!rows.length) {
+        const e = document.createElement('div');
+        e.className = 'qs-gpick-empty';
+        e.textContent = kw ? '没找到匹配的引擎' : '这一类里没有可添加的引擎';
+        host.appendChild(e);
+        return 0;
+    }
+
+    const inGrid = new Set((gridLast && Array.isArray(gridLast.items)) ? gridLast.items : []);
+    const meta = panelSubMeta(groups);
+    const bySub = new Map();
+    for (const r of rows) {
+        if (!bySub.has(r.sub)) bySub.set(r.sub, []);
+        bySub.get(r.sub).push(r);
+    }
+
+    let n = 0;
+    for (const sub of PANEL_SUBS) {
+        const list = bySub.get(sub);
+        if (!list || !list.length) continue;
+        const m = meta[sub] || { gtitle: '', title: sub };
+        const t = document.createElement('div');
+        t.className = 'cat-title';
+        t.dataset.cat = sub;
+        t.textContent = (m.gtitle ? m.gtitle + ' · ' : '') + m.title;
+        host.appendChild(t);
+
+        // 中类下面再按小类分节 —— 和面板 renderFlatBody 的 DOM 形状一模一样
+        const byCat = new Map();
+        for (const r of list) {
+            const k = r.cat || '未分类';
+            if (!byCat.has(k)) byCat.set(k, []);
+            byCat.get(k).push(r);
+        }
+        for (const [cat, rs] of byCat) {
+            const sh = document.createElement('div');
+            sh.className = 'cat-sub';
+            sh.dataset.sub = sub + '::' + cat;
+            sh.textContent = cat;
+            const cnt = document.createElement('span');
+            cnt.className = 'n';
+            cnt.textContent = String(rs.length);
+            sh.appendChild(cnt);
+            host.appendChild(sh);
+
+            const grid = document.createElement('div');
+            grid.className = 'grid';
+            for (const r of rs) {
+                const cell = panelRowCell(r);   // ← 面板那颗格子，原样复用
+                const name = r.isApp ? ((window.QS_APP_PREFIX || '@app:') + r.eng.id) : r.name;
+                const added = inGrid.has(name);
+                if (added) cell.classList.add('qs-added');
+                cell.title = name + (added ? '　（已在网格里）' : '　（点一下加进这一格）');
+                cell.addEventListener('click', (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    if (added) { showBarTip('这一项已经在网格里了'); return; }
+                    gridAddItem(name);
+                });
+                grid.appendChild(cell);
+                n++;
+            }
+            host.appendChild(grid);
+        }
+    }
+    return n;
+}
+
+/** 选板里的列表主体。返回真正画出来的条数（给标题旁的"N 项"用）。
+ *
+ *  结构：非引擎分组（内置功能 / 智能直达 / 收藏夹 / 模型）用胶囊列表；
+ *  引擎那块整块交给 renderPickEngineArea（复用「更多引擎」面板的分类）。 */
 function renderGridPickBody(body, kw, secs) {
     if (!body) return 0;
     body.textContent = '';
     let shown = 0;
-    const hit = (it) => !kw || String(it.label || it.name).toLowerCase().includes(kw);
+    const hit = (it) => !kw || String(it.label || it.name).toLowerCase().indexOf(kw) >= 0;
+    const wantEng = gridPickFilter === 'all' || gridPickFilter === 'engine';
 
     for (const sec of secs) {
         if (gridPickFilter !== 'all' && gridPickFilter !== sec.key) continue;
+        const items = (sec.items || []).filter(hit);
+        if (!items.length) continue;
+        body.appendChild(pickBlockHead(sec.title, sec.desc, items.length));
+        body.appendChild(pickChipGrid(items));
+        shown += items.length;
+    }
 
-        /* —— 简单分组：内置功能 / 智能直达 / 收藏夹 / 各类模型 —— */
-        if (Array.isArray(sec.items)) {
-            const items = sec.items.filter(hit);
-            if (!items.length) continue;
-            body.appendChild(pickBlockHead(sec.title, sec.desc, items.length));
-            body.appendChild(pickChipGrid(items));
-            shown += items.length;
-            continue;
-        }
-
-        /* —— 引擎：大类（可点开）→ 主题组 → 分类 → 条目 ——
-         *
-         * 折叠口径和横条「更多引擎」对齐（用户要求两处交互统一）：
-         * 默认只看到「网页引擎 700 / 软件引擎 60 / 快捷键引擎 20」三行，
-         * 点一行才展开它下面的主题组和分类。搜索时自动展开命中部分，
-         * 否则搜出来却是空的（那才是最难受的）。 */
-        const themes = [];
-        for (const th of (sec.themes || [])) {
-            const cats = [];
-            for (const c of (th.cats || [])) {
-                const items = c.items.filter(hit);
-                if (items.length) cats.push({ title: c.title, items });
-            }
-            if (cats.length) themes.push({ title: th.title, cats });
-        }
-        if (!themes.length) continue;
-        const total = themes.reduce((n, th) => n + th.cats.reduce((m, c) => m + c.items.length, 0), 0);
-        const open = !!kw || !!gridPickOpen[sec.key];
-        body.appendChild(pickBlockHead(sec.title, sec.desc, total, {
-            open,
-            onToggle: () => {
-                gridPickOpen[sec.key] = !gridPickOpen[sec.key];
-                renderGridPicker();
-            },
-        }));
-        if (!open) continue;
-        for (const th of themes) {
-            const el = document.createElement('div');
-            el.className = 'qs-gpick-theme';
-            el.textContent = th.title;
-            body.appendChild(el);
-            for (const c of th.cats) {
-                body.appendChild(pickCatTitle(c.title, c.items.length));
-                body.appendChild(pickChipGrid(c.items));
-            }
-        }
-        shown += total;
+    if (wantEng) {
+        const host = document.createElement('div');
+        host.className = 'qs-gpick-eng';
+        const n = renderPickEngineArea(host, kw);
+        body.appendChild(host);
+        shown += n;
     }
 
     if (!shown) {
@@ -4014,6 +4025,7 @@ function renderGridPickBody(body, kw, secs) {
     }
     return shown;
 }
+
 /** 把 `name` 加到被点的那一格。落库走 `set_grid_items`，和其它改动同一套。 */
 async function gridAddItem(name) {
     if (!name) return;
@@ -5476,71 +5488,55 @@ function panelPickChip(host, key, text, count, tip, on, onPick) {
     return b;
 }
 
-function appendPickNav(head, groups, sections) {
+function appendPickNav(head, groups, sections, ctx) {
+    /* 同 appendGroupNav：`ctx` 存在时是"别处借用这套导航"（网格页选板），
+     * 状态读写都在 ctx.state 上，重画回调也是对方给的。 */
+    const st = (ctx && ctx.state) ? ctx.state : null;
+    const grp = st ? st.group : panelGroupFilter;
+    const sub = st ? st.sub : panelSubFilter;
+    const cat = st ? st.cat : panelCatFilter;
+    const again = () => {
+        if (st) { ctx.rerender(); return; }
+        renderPanel();
+        requestAnimationFrame(() => setTimeout(pushLayout, 0));
+    };
     const rows = window.qsAllEngineRows(groups);
     const meta = panelSubMeta(groups);
     // —— 二级（中类）：选了大类才出现，**平铺一行胶囊** ——
-    /*  用户原话（本次）：「最好中类也作为胶囊式的，点击中类后，才会展开中类
-     *  下面的小类」。原来是 r53 那套「一个胶囊 + 下拉菜单」：中类一个大类底下
-     *  也就两三个（网页族 = 搜索引擎 / 直达网页，软件族 = 软件搜索 / 软件直达），
-     *  全铺开也只有一行，却还要多点一次"展开菜单"；和大类、小类的操作口径也不一致。
-     *  现在三层一个样：都是平铺胶囊，点谁看谁，「全部中类」恢复全量。
-     *  只有**选了中类**，下面那行小类才出现（panelSubFilter 非空才画）。
-     *  ⚠ 一个大类下一个中类都没有时（用户把某族的引擎删光了）整行不画 ——
-     *    只留一颗「全部中类」是没有意义的一行，还白占吸附头的高度。 */
-    if (panelGroupFilter && sections.length) {
+    if (grp && sections.length) {
         const host = document.createElement('nav');
         host.className = 'cat-nav pick-nav';
         host.id = 'panelPick2';
         host.setAttribute('aria-label', '中类');
         let total = 0;
-        for (const r of rows) if (r.group === panelGroupFilter) total++;
+        for (const r of rows) if (r.group === grp) total++;
         panelPickChip(host, null, '全部中类', total,
             '不限定中类（列出这个大类的全部引擎）',
-            panelSubFilter === null,
+            sub === null,
             (k) => {
-                panelSubFilter = k;
-                panelCatFilter = null;
-                renderPanel();
-                requestAnimationFrame(() => setTimeout(pushLayout, 0));
+                if (st) { st.sub = k; st.cat = null; } else { panelSubFilter = k; panelCatFilter = null; }
+                again();
             });
-        for (const s of sections) {
-            /* ⚠ sections 是 [{key,title}] **对象**数组（老锚点导航用 sec.key），
-               不是字符串数组 —— 直接拿它当过滤键会让 r.sub !== panelSubFilter
-               永远成立，正文一节都不剩（探针 ③ 抓到的就是这个）。 */
-            const sk = (s && s.key) ? s.key : s;
+        for (const sx of sections) {
+            const sk = (sx && sx.key) ? sx.key : sx;
             let n = 0;
-            for (const r of rows) if (r.group === panelGroupFilter && r.sub === sk) n++;
+            for (const r of rows) if (r.group === grp && r.sub === sk) n++;
             const m = meta[sk];
             panelPickChip(host, sk, (m && m.title) || sk, n,
                 '只看「' + ((m && m.title) || sk) + '」（' + n + ' 个）',
-                panelSubFilter === sk,
+                sub === sk,
                 (k) => {
-                    panelSubFilter = k;
-                    panelCatFilter = null;
-                    renderPanel();
-                    requestAnimationFrame(() => setTimeout(pushLayout, 0));
+                    if (st) { st.sub = k; st.cat = null; } else { panelSubFilter = k; panelCatFilter = null; }
+                    again();
                 });
         }
         head.appendChild(host);
     }
     // —— 三级（小类）：**全部铺开**成一行胶囊（选了中类才出现） ——
-    /*  用户原话（r73）：「更多引擎面板选择完中类之后，小类最好是每一个就都呈现
-     *  出来，一种胶囊的形式，这样我要哪个我点击就可以了，不用再一个个的找」。
-     *
-     *  原来是 r53 那套「一个胶囊 + 下拉菜单」：网页那一族底下 24 个小类，
-     *  想换一个就得点开菜单、在长列表里找、点完菜单又收起来 —— 换个类目重复一遍。
-     *  现在和大类、中类一样平铺：一颗小类一颗胶囊，点谁就只剩谁；「全部」恢复全量。
-     *
-     *  ⚠ 数量级：一个中类底下最多 24 个小类（网页搜索引擎那一档），全铺开约 3 行。
-     *    所以这一行用紧凑款胶囊（.cat-row：19px 高 / 10.5px 字 / 更紧的间距），
-     *    否则吸附头会把只有 344px 高的正文挤没。
-     *  ⚠ 「全部」那颗只在**没有**选中任何小类时高亮；选中某类时高亮跟着它走。
-     *  ⚠ 只有一个小类时整行不画（没得选，画了反而多占一行）。 */
-    if (panelSubFilter) {
+    if (sub) {
         const seen = new Map();
         for (const r of rows) {
-            if (r.group !== panelGroupFilter || r.sub !== panelSubFilter) continue;
+            if (r.group !== grp || r.sub !== sub) continue;
             const k = r.cat || '未分类';
             seen.set(k, (seen.get(k) || 0) + 1);
         }
@@ -5553,20 +5549,18 @@ function appendPickNav(head, groups, sections) {
             for (const n of seen.values()) total += n;
             panelPickChip(host, null, '全部', total,
                 '不限定小类（列出这个中类下的全部引擎）',
-                panelCatFilter === null,
+                cat === null,
                 (k) => {
-                    panelCatFilter = k;
-                    renderPanel();
-                    requestAnimationFrame(() => setTimeout(pushLayout, 0));
+                    if (st) st.cat = k; else panelCatFilter = k;
+                    again();
                 });
             for (const [k, n] of seen) {
                 panelPickChip(host, k, k, n,
                     '只看「' + k + '」（' + n + ' 个）',
-                    panelCatFilter === k,
+                    cat === k,
                     (k2) => {
-                        panelCatFilter = k2;
-                        renderPanel();
-                        requestAnimationFrame(() => setTimeout(pushLayout, 0));
+                        if (st) st.cat = k2; else panelCatFilter = k2;
+                        again();
                     });
             }
             head.appendChild(host);

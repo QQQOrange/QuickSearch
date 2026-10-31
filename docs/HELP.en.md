@@ -120,12 +120,14 @@ When you use **the selection bar / the grid page / OCR / translation / image sea
 
 - Two buttons at the top-right: **✏️ Edit** (every tile gets an **×**; click it to remove that tile,
   click the button again to leave edit mode) and **⚙ Settings** (jump to this settings tab).
-- In edit mode you can **drag the panel edges to resize**: the right edge, bottom edge and
-  bottom-right corner each have a drag strip (same feel as the ones in the settings preview);
+- In edit mode you can **drag the panel edges to resize**: hovering the panel reveals a drag strip
+  on the right edge, bottom edge and bottom-right corner (same feel as the settings preview);
   the size is saved when you let go.
 - Clicking an **empty tile** opens the *Add content* panel; pick one and it fills that tile.
-  The three engine groups are **collapsed by default** (web / app / hotkey) — click one to expand
-  its themes and categories, the same rhythm as the bar's *More engines*; searching auto-expands.
+  **Engine categories are literally the same as the bar's *More engines*** (same catalog, same
+  three rows of capsule filters): pick a group (all / web / app / hotkey), then a sub-category
+  (search engines / direct pages / app search …), then a category (web / AI tools / knowledge …).
+  Identical interaction, identical engine tiles.
   The panel is grouped three levels deep (**built-in / shortcuts / favourites / models / web / app /
   hotkey → theme → category**) and has a search box; items already on the grid are ticked and greyed.
   **Drag its bottom-right corner to resize it — the size is remembered**, including after a restart.

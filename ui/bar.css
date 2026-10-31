@@ -1730,7 +1730,11 @@ button.fav-grp-head:focus-visible {
 /* 网格模式下，文字横条专属的元素全部收起：
    提示文字、网址按钮、OCR/翻译/识图那几颗、还有输入框。
    （头部与选板是网格自己加的，要放行） */
-.bar.qs-grid > *:not(.engines):not(.qs-ghead):not(.qs-gpick) {
+/* ⚠ v2.8.1：这条规则必须把拖拽抓手放行。
+ * v2.8.0 加了 `.qs-grz-wrap` 却没加到例外里 —— 于是编辑态的拖动带被
+ * `display:none !important` 干掉：DOM 在、querySelector 数得到，
+ * 但用户看都看不见、更点不到（"编辑后无法调整长宽"就是这个）。 */
+.bar.qs-grid > *:not(.engines):not(.qs-ghead):not(.qs-gpick):not(.qs-grz-wrap) {
     display: none !important;
 }
 
@@ -2124,35 +2128,52 @@ button.fav-grp-head:focus-visible {
     padding-right: 4px;
 }
 
-/* 一级：大类标题（网页引擎 / 软件引擎 / 内置功能 …）
+/* ---------------- 选板里的引擎浏览（v2.8.1） ----------------
  *
- * v2.8.0：引擎那几个大类变成**可点开的折叠条**（和横条「更多引擎」一个节奏：
- * 先看到大类，点开才看子类）。折叠条是 <button>，所以要先抹掉按钮自带样式。 */
-.qs-gpick-block-tog {
-    width: 100%;
-    border: none;
+ * 这一块**不再自己设计**：里面的分类导航和大类/中类/小类胶囊全部来自
+ * 「更多引擎」面板（.cat-nav / .cat-nav-item / .cat-chip），引擎格子也是
+ * 面板那颗 .cell。这里只补"嵌在选板里"需要的三点：
+ *   · 导航整块钉在滚动区顶部（否则滚下去就找不到筛选了）；
+ *   · 去掉每行 .cat-nav 自带的 sticky（否则两行会钉在同一条顶边互相盖住，
+ *     面板那边是靠 .panel-sticky 外层解决的，同一个道理）；
+ *   · 已经在网格里的格子压暗一点，一眼看出哪颗加过。
+ * ------------------------------------------------------------------ */
+.qs-gpick-eng {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding-top: 4px;
+}
+
+.qs-gpick-engnav {
+    position: sticky;
+    top: 0;
+    z-index: 3;
+    padding: 4px 0 6px;
+    background: var(--qs-bg-fill, var(--qs-bg));
+    border-bottom: 1px solid var(--qs-sep);
+}
+
+.qs-gpick-engnav .cat-nav {
+    position: static;
+    margin: 0 0 4px;
+    padding: 0;
+    border-bottom: none;
     background: transparent;
-    font: inherit;
-    text-align: left;
-    cursor: pointer;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
 }
 
-.qs-gpick-block-tog:hover .qs-gpick-block-t {
-    color: var(--qs-accent, #2563EB);
+.qs-gpick-engnav .cat-nav:last-child {
+    margin-bottom: 0;
 }
 
-.qs-gpick-block-tog .qs-gpick-chev {
-    flex: none;
-    width: 12px;
-    font-size: 10px;
-    color: var(--qs-fg-dim);
-    opacity: .85;
-    transition: transform .12s ease;
+.qs-gpick-eng .cat-title {
+    margin-top: 8px;
 }
 
-/* 展开态：标题用强调色，一眼看出"这组开着" */
-.qs-gpick-block-tog.on .qs-gpick-block-t {
-    color: var(--qs-accent, #2563EB);
+.qs-gpick-eng .cell.qs-added {
+    opacity: .45;
 }
 
 .qs-gpick-block {
