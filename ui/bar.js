@@ -1147,6 +1147,26 @@ function renderBar(force) {
             engines++;
             continue;
         }
+        /* 文本处理（@txt:<op>）：和 @wrap 同一套地位 —— bar_list 成员、可拖可移出、
+         * 能加进网格页。每一件是**独立的一颗**：`@txt:trim` 和 `@txt:case:upper`
+         * 可以同时待在横条上，各管一件事（用户要求"每个子功能都能单独添加"）。 */
+        if (window.qsTextOpId && window.qsTextOpId(name) !== null) {
+            const opId = window.qsTextOpId(name);
+            const meta = window.qsTextOpMeta(opId) || { label: '文本处理', hint: '' };
+            const b = document.createElement('button');
+            b.className = 'ico engine qs-txt-inbar';
+            b.title = '文本处理 · ' + meta.label + (meta.hint ? '：' + meta.hint : '')
+                + '　（直接改掉选中的那段文字）';
+            b.dataset.engine = name;
+            b.appendChild(window.qsFuncIcon(name));
+            b.addEventListener('click', (e) => {
+                e.stopPropagation();
+                runGridFunc(name);
+            });
+            enginesEl.appendChild(b);
+            engines++;
+            continue;
+        }
         /* 包裹符号（@wrap）：和 @trans 同一套地位 —— bar_list 成员、可拖可移出，
          * 点下去打开包裹菜单。设置 → 附加功能 → 包裹符号 里可以加进横条。 */
         if (name === window.QS_WRAP) {
@@ -3253,6 +3273,9 @@ const GRID_SENTINELS = {
     '@img': { label: '识图' },
     // 包裹符号：点一下直接打开包裹菜单（把剪贴板/当前这段文字套成一对符号）
     '@wrap': { label: '包裹符号' },
+    /* 文本处理：具体是哪一件看名字里的 op（`@txt:trim`），标签走 qsDisplayName，
+     * 这里只作为"基础哨兵"参与分支判断（和 @ocr:<id> 同一套路）。 */
+    '@txt': { label: '文本处理' },
 };
 
 /** 三类「模型」：文字识别 / 识图 / 翻译各自的引擎清单。
@@ -3287,6 +3310,65 @@ async function loadGridModels() {
     }
 }
 
+/** 网格页点完一项后的**统一关闭闸门**（v2.10.0）。
+ *
+ *  用户口径：「点击网格页中的任意一项内容后，需等到该项内容真正完成渲染并
+ *  显示时，网格页必须立即自动关闭…避免过早关闭导致内容未显示或出现闪烁；
+ *  同时处理加载延迟或失败的情况」。
+ *
+ *  做法分三步：
+ *    ① 先把后端的 `dismiss_bar` **挂起**（`bar_hold(true)`）—— 命令里那些
+ *       "先收起横条再拉起浏览器"的老逻辑就收不动了，网格不会提前消失；
+ *    ② 跑真正的动作，等它返回：命令报错 = 没打开成功 → 解除挂起但**保留**
+ *       横条（`keepOpen`），顺手弹一句提示，用户可以换一项再点；
+ *    ③ 成功之后调 `wait_raised`，等"不是横条自己的前台窗口"出现
+ *       （浏览器 / 别的软件 / 我们自己的 OCR、翻译窗口都算），最多 2 秒；
+ *       看到了就立刻解除挂起（后端补一次收起），超时也收 —— 不把横条钉死。
+ *
+ *  ⚠ 这个闸门只给"打开外部内容"的格子用。包裹符号 / 收藏夹的产物**就在横条
+ *    里**（菜单、面板），走闸门会被当成"目标没出现"，反而把内容一起收掉。
+ */
+let gridOpening = false;
+
+async function gridOpenThenClose(run, label) {
+    if (gridOpening) return;            // 连点只认第一下
+    gridOpening = true;
+    let released = false;
+    try {
+        try { await invoke('bar_hold', { hold: true }); } catch (_) { }
+        let err = null;
+        try {
+            await run();
+        } catch (e) {
+            err = e;
+        }
+        if (err) {
+            // 没打开成功：把"待收"撤掉，网格留在原处让用户重试
+            try { await invoke('bar_hold', { hold: false, keepOpen: true }); } catch (_) { }
+            released = true;
+            const why = String((err && err.message) || err || '').slice(0, 60);
+            showBarTip((label ? label + '：' : '') + '没打开成功' + (why ? '（' + why + '）' : ''));
+            return;
+        }
+        let raised = true;
+        try { raised = await invoke('wait_raised', { ms: 2000 }); } catch (_) { raised = true; }
+        if (!raised) win_log('网格：等了 2 秒没看到目标窗口，仍然收起（可能被系统/浏览器抢了前台）');
+        try { await invoke('bar_hold', { hold: false }); } catch (_) { }
+        released = true;
+    } finally {
+        if (!released) {
+            // 兜底：中途抛了异常也要把闸门放开，否则后端会挂 20 秒才自解锁
+            invoke('bar_hold', { hold: false }).catch(() => { });
+        }
+        gridOpening = false;
+    }
+}
+
+/** 前端记一笔日志到后端（`log_msg` 命令）。没有就算了，不阻断流程。 */
+function win_log(msg) {
+    try { invoke('log_msg', { msg: String(msg) }).catch(() => { }); } catch (_) { }
+}
+
 /** 内置功能格子的点击动作。
  *
  *  ⚠ 以前这里是 `document.getElementById(sent.btn).click()` —— 但横条上**根本没有
@@ -3301,20 +3383,42 @@ function runGridFunc(key) {
     const bound = window.qsFuncBound ? window.qsFuncBound(key) : null;
     const base = bound ? ('@' + bound.kind) : key;
     if (base === '@ocr') {
-        invoke('ocr_start', bound ? { engine: bound.id } : {}).catch(() => { });
+        gridOpenThenClose(() => invoke('ocr_start', bound ? { engine: bound.id } : {}), '文字识别');
         return;
     }
     if (base === '@img') {
-        invoke('img_start').catch(() => { });
+        gridOpenThenClose(() => invoke('img_start'), '识图搜索');
         return;
     }
     if (base === '@trans') {
         // 没文字也照发（后端会开一个空翻译窗让用户自己粘贴），与横条一致
-        invoke('trans_start', { text: t || null, engine: bound ? bound.id : null }).catch(() => { });
+        gridOpenThenClose(
+            () => invoke('trans_start', { text: t || null, engine: bound ? bound.id : null }),
+            '翻译');
         return;
     }
     if (base === '@wrap') {
         openWrapMenu();
+        return;
+    }
+    if (base === '@txt') {
+        const opId = window.qsTextOpId ? window.qsTextOpId(key) : null;
+        if (!opId) return;
+        const meta = window.qsTextOpMeta ? window.qsTextOpMeta(opId) : null;
+        const name = (meta && meta.label) || '文本处理';
+        /* 文本处理的结果落在**目标软件原来那段文字上**（后端退格 + 粘贴，
+         * 和包裹符号同一条写回通道），所以不像"打开网页"那样需要等窗口 ——
+         * 写完就收，失败就留在网格里让用户重试。 */
+        invoke('text_op', { op: opId, text: t || null, apply: true })
+            .then(() => {
+                showBarTip(name + ' 已应用');
+                // 前端能调的收起命令是 `hide_bar`（`dismiss_bar` 只在后端内部用）
+                invoke('hide_bar').catch(() => { });
+            })
+            .catch((e) => {
+                const why = String((e && e.message) || e || '').slice(0, 50);
+                showBarTip(name + (!t ? '：先选中一段文字' : '：' + why));
+            });
     }
 }
 
@@ -3409,6 +3513,22 @@ function gridPickSections() {
         });
     }
     if (builtin.length) out.push({ key: 'builtin', title: '内置功能', desc: '软件自带的功能按钮', items: builtin });
+
+    /* ①.5 文本处理（v2.10.0）：每一件单独一条。加进去的就是 `@txt:<op>` 那一格，
+     * 点它会把横条此刻这段文字就地改写（和后端 `text_op` 同一套）。 */
+    const txtItems = (window.QS_TEXT_OPS || []).map((op) => {
+        const sent = (window.QS_TEXT || '@txt') + ':' + op.id;
+        return {
+            name: sent,
+            label: op.label,
+            desc: op.hint || '',
+            added: inGrid.has(sent),
+            node: () => (window.qsFuncIcon ? window.qsFuncIcon(sent) : document.createTextNode('≡')),
+        };
+    });
+    if (txtItems.length) {
+        out.push({ key: 'txt', title: '文本处理', desc: '就地改写选中的文字', items: txtItems });
+    }
 
     /* ② 智能直达（备注优先，和横条/格子上的叫法一致） */
     const goItems = [];
@@ -4165,6 +4285,23 @@ function startGridResize(e, dir) {
     window.addEventListener('pointerup', up, true);
 }
 
+/** 格子图标空了就补一个字母徽标 —— 保证**没有任何一格是空白的**。
+ *
+ *  什么时候会空：智能直达/外部软件/收藏夹的图标函数在"定义已被删掉、
+ *  图标文件丢了"时会返回空节点；普通引擎的 `buildIconInner` 正常情况下
+ *  一定有兜底，但不去赌它。补的徽标和设置页列表用的是同一套写法
+ *  （大字 + `.letter`），看着不突兀。 */
+function ensureGridIcon(host, name) {
+    if (!host) return host;
+    if (host.childNodes.length) return host;
+    const sp = document.createElement('span');
+    sp.className = 'letter';
+    const m = String(name || '').match(/[A-Za-z0-9\u4e00-\u9fa5]/);
+    sp.textContent = (m ? m[0] : '?').toUpperCase();
+    host.appendChild(sp);
+    return host;
+}
+
 function renderGrid(g) {
     gridOn = true;
     // 记住这一次的载荷：往格子里加完内容要按它重画（后端广播只带 config，
@@ -4363,6 +4500,7 @@ function renderGrid(g) {
             inner.className = 'qs-gicon';
             // 图标与横条上那颗**同一套**（翻译就是翻译那张图，OCR 就是 OCR 徽标）
             inner.appendChild(window.qsFuncIcon ? window.qsFuncIcon(name) : document.createTextNode('•'));
+            ensureGridIcon(inner, name);
             cell.appendChild(inner);
             const lb = document.createElement('span');
             lb.className = 'qs-glabel';
@@ -4380,6 +4518,7 @@ function renderGrid(g) {
             /* 收藏夹格子必须走 favIconNode：buildIconInner 只认搜索引擎，
              * 给它 `@fav:xxx` 会生成一个 "F" 字母徽标（用户看到的就是这个乱码感）。 */
             else inner.appendChild(favIconNode(name));
+            ensureGridIcon(inner, name);
             cell.appendChild(inner);
             const lb = document.createElement('span');
             lb.className = 'qs-glabel';
@@ -4394,12 +4533,16 @@ function renderGrid(g) {
             cell.title = lb.textContent;
             cell.addEventListener('click', () => {
                 if (name.startsWith(window.QS_GO_PREFIX)) {
-                    invoke('shortcut_open', { id: name.slice(window.QS_GO_PREFIX.length) })
-                        .catch((e) => showBarTip('打不开：' + String(e || '').slice(0, 60)));
+                    gridOpenThenClose(
+                        () => invoke('shortcut_open', { id: name.slice(window.QS_GO_PREFIX.length) }),
+                        lb.textContent);
                 } else if (name.startsWith(QS_APP_PREFIX)) {
-                    invoke('open_app', { id: name.slice(QS_APP_PREFIX.length), text: currentText || null })
-                        .catch((e) => showBarTip('打不开：' + String(e || '').slice(0, 60)));
+                    gridOpenThenClose(
+                        () => invoke('open_app', { id: name.slice(QS_APP_PREFIX.length), text: currentText || null }),
+                        lb.textContent);
                 } else {
+                    /* 收藏夹：产物是横条里的面板，不是"另一个窗口" —— 不能走闸门，
+                     * 否则等不到前台窗口、还会把面板一起收掉。 */
                     openFavPanel(name);
                 }
             });
@@ -4420,7 +4563,8 @@ function renderGrid(g) {
             const willSearch = gridClickMode === 'auto' && !!currentText;
             cell.title = label + (willSearch ? '　（点一下用这段文字搜索）' : '　（点一下打开首页）');
             cell.dataset.engine = name;
-            cell.addEventListener('click', () => runEngineSearch(name, gridClickMode === 'home' ? null : undefined));
+            cell.addEventListener('click', () => gridOpenThenClose(
+                () => runEngineSearch(name, gridClickMode === 'home' ? null : undefined), label));
         }
         /* 编辑模式：每格右上角挂一个 ×，点它把这格内容移出网格页
          * （只动 grid_list，不删智能直达/引擎本身 —— 移出 ≠ 删除）*/
@@ -4448,12 +4592,15 @@ function renderGrid(g) {
 }
 
 function runEngineSearch(engine, forceText) {
-    if (!engine) return;
+    if (!engine) return Promise.resolve();
     const kw = inputQ.value.trim();
     // forceText === null → 明确要求"不带文字"（网格页的"总是打开首页"模式）
     const text = forceText === null ? '' : (kw || currentText || '');
-    invoke('open_search', { engine, text: text ? text : null }).catch(() => {});
     inputQ.value = '';
+    /* 返回 Promise：网格页的关闭闸门要靠它判断"到底打开成功没有"
+     * （失败就保留网格、提示一句，而不是照样收掉）。面板里那条路不需要，
+     * 自己 catch 掉即可。 */
+    return invoke('open_search', { engine, text: text ? text : null });
 }
 
 /** 回车时用的默认引擎：上次用过的那个，没记录就横条上第一个。 */
@@ -4473,7 +4620,7 @@ function activatePanelCell(cell) {
             .catch(() => {});
         return;
     }
-    runEngineSearch(cell.dataset.engine);
+    runEngineSearch(cell.dataset.engine).catch(() => { });
 }
 
 panelBody.addEventListener('click', (e) => {

@@ -148,6 +148,12 @@ function barItemIcon(name, size) {
     if (name === QS_TRANS) {
         return window.qsTransIconNode();
     }
+    /* 包裹符号 / 文本处理（@txt:<op>）：走 shared.js 那套内置图标。
+     * 不接这一支的话会掉到 `iconNode()` 的字母徽标分支 ——
+     * `@txt:trim` 会显示成一个 "T"，`@wrap` 显示成 "W"（用户看着像乱码）。 */
+    if (name === QS_WRAP || (window.qsTextOpId && window.qsTextOpId(name) !== null)) {
+        if (window.qsFuncIcon) return window.qsFuncIcon(name);
+    }
     return iconNode(name, size);
 }
 
@@ -291,7 +297,11 @@ function bindTabs() {
 
 /** 顶栏分组：一个 tab 对应多个 pane（组内导航）。 */
 const TAB_GROUPS = {
-    extras: { nav: 'extras', subs: ['ai', 'go', 'matte', 'ocr', 'trans', 'imgsearch', 'fav', 'wrap'], def: 'ai' },
+    extras: {
+        nav: 'extras',
+        subs: ['ai', 'go', 'matte', 'ocr', 'trans', 'imgsearch', 'fav', 'wrap', 'txt'],
+        def: 'ai',
+    },
     data: { nav: 'datanav', subs: ['data', 'backup'], def: 'data' },
     about: { nav: 'aboutnav', subs: ['about', 'help'], def: 'about' },
 };
@@ -299,8 +309,15 @@ const SUB_TO_GROUP = {};
 for (const g of Object.keys(TAB_GROUPS)) {
     for (const sub of TAB_GROUPS[g].subs) SUB_TO_GROUP[sub] = g;
 }
-/** 每组记住上次看的是哪一项（切出去再切回来不跳回第一项）。 */
+/** 每组记住上次看的是哪一项（切出去再切回来不跳回第一项）。
+ *
+ *  v2.10.0：**附加功能不再记忆**（用户口径：「每次进入时都回到默认页面，
+ *  不再保留上次的浏览位置」）—— 之前停在「AI 工具」，去别的分页转一圈回来
+ *  还是 AI 工具，用户觉得像"卡住了"。数据 / 关于 两栏仍是老行为（它们只有
+ *  两三页、且常是"回来看一眼"的场景，记住位置反而方便）。 */
 const lastSub = {};
+/** 这些分组**不记忆**子页，每次进入都回到 `TAB_GROUPS[tab].def`。 */
+const NO_SUB_MEMORY = new Set(['extras']);
 
 /** 显示某一页。`tab` 是顶栏按钮的 data-tab，`sub` 只在分组页里有意义。
  *  返回**实际显示的那个 pane 名**（分组页返回子页名）。 */
@@ -309,7 +326,8 @@ function showPane(tab, sub) {
     let cur = null;
     const visible = new Set();
     if (g) {
-        cur = (sub && g.subs.includes(sub)) ? sub : (lastSub[tab] || g.def);
+        const remembered = NO_SUB_MEMORY.has(tab) ? '' : lastSub[tab];
+        cur = (sub && g.subs.includes(sub)) ? sub : (remembered || g.def);
         lastSub[tab] = cur;
         visible.add(g.nav);
         visible.add(cur);
@@ -343,6 +361,8 @@ function afterShow(pane) {
     if (pane === 'go') renderGoList();
     // 包裹符号页：把 12 组符号画出来（同时也是"它能加到哪里"的说明）
     if (pane === 'wrap') renderWrapPane();
+    // 文本处理页：按注册表画出功能清单（每行两颗"放到哪里"按钮）
+    if (pane === 'txt') renderTextOpsPane();
     // 网格页：把当前配置推给预览
     if (pane === 'grid') {
         renderGridPages();
@@ -527,11 +547,20 @@ function renderBarList() {
 
         const nm = document.createElement('span');
         nm.className = 'nm';
+        /* 功能哨兵（`@wrap` / `@txt:trim` / `@ocr:<id>` …）必须翻成中文再显示 ——
+         * 直接把内部写法 `@txt:trim` 摆在这一列里，用户根本看不出这是"去空格"。 */
+        const pretty = (typeof name === 'string' && (name === QS_WRAP
+            || name === QS_OCR || name === QS_IMG || name === QS_TRANS
+            || name.startsWith(window.QS_OCR + ':') || name.startsWith(window.QS_TRANS + ':')
+            || name.startsWith(window.QS_IMG + ':')
+            || (window.qsTextOpId && window.qsTextOpId(name) !== null)))
+            ? (window.qsDisplayName ? window.qsDisplayName(name) : name)
+            : name;
         nm.textContent = isSep ? '分隔线'
             : (isOcr ? '识别图片文字'
                 : (isImg ? '识图搜索'
                     : (isTrans ? '翻译'
-                        : (isFav ? favGroup.name : (isApp ? app.name : name)))));
+                        : (isFav ? favGroup.name : (isApp ? app.name : pretty)))));
         if (isFav) {
             const em = document.createElement('em');
             em.textContent = '收藏夹目录 · 拖它可以改位置';
@@ -4518,6 +4547,41 @@ async function gridSaveItemStyle(map) {
     }
 }
 
+/** 一格在设置列表里该显示哪张图标 —— 和网格页上那颗**尽量同一张**。
+ *
+ *  顺序：内置功能（@ocr / @trans / @img / @wrap / @txt…）→ 智能直达 →
+ *  外部软件 → 收藏夹目录 → 普通引擎（iconNode：自定义图 → icons 目录默认图
+ *  → 引擎内置图 → 字母徽标）。
+ *
+ *  为什么最后一定要落到 `iconNode()`：它是**唯一保证有东西**的分支 ——
+ *  上面几种哨兵的实现在"定义已被删掉 / 文件丢了"时会返回空节点，
+ *  那样列表里就会留下一个空白的 24px 方块（用户说的"空白格"）。 */
+function gridItemIcon(name) {
+    const base = window.qsFuncBase ? window.qsFuncBase(name) : name;
+    const isFunc = (window.QS_FUNC_BASES || ['@ocr', '@trans', '@img', '@wrap', '@txt']).indexOf(base) >= 0;
+    try {
+        if (isFunc && window.qsFuncIcon) return window.qsFuncIcon(base);
+        if (typeof name === 'string') {
+            if (name.startsWith(window.QS_GO_PREFIX || '@go:') && window.qsGoIconNode) {
+                return nonEmpty(window.qsGoIconNode(name), name);
+            }
+            if (name.startsWith(window.QS_APP_PREFIX || '@app:') && window.qsAppIconNode) {
+                return nonEmpty(window.qsAppIconNode(name), name);
+            }
+            if (name.startsWith(window.QS_FAV_PREFIX || '@fav:') && window.qsFavIconNode) {
+                return nonEmpty(window.qsFavIconNode(name), name);
+            }
+        }
+    } catch (_) { /* 落到下面的兜底 */ }
+    return iconNode(name, 24);
+
+    /** 哨兵图标偶尔是空壳（定义被删 / 图标文件丢了），空就退回字母徽标。 */
+    function nonEmpty(node, nm) {
+        if (node && (node.childNodes.length || node.tagName === 'IMG')) return node;
+        return iconNode(nm, 24);
+    }
+}
+
 /** 画格子内容列表（可拖动排序）。 */
 /** 功能格子（`@ocr` 这类）的一句话说明。
  *  也用来回答"wrap 到底是干什么的" —— 用户明确要求给正式、易懂的名称。 */
@@ -4566,11 +4630,20 @@ function renderGridItems() {
         row.draggable = true;
         row.dataset.idx = String(i);
 
-        // 拖动把手：整行都能拖，但给个明显的把手更好按
-        const hd = document.createElement('span');
-        hd.className = 'ic';
-        hd.textContent = '⋮⋮';
-        row.appendChild(hd);
+        /* v2.10.0：**每行都摆图标**（原来这个 24px 的 `.ic` 槽位里只有一把
+         * "⋮⋮" 把手，整列看着像空的）。现在跟「横条上的引擎」那页同一套版式：
+         * 先把 `⋮⋮` 放进单独的 `.grip`，图标另占 `.ic` —— 把手还在，图标也有了。
+         * 图标取不到时 `iconNode()` 会给字母徽标兜底，所以不会出现空白格。 */
+        const grip = document.createElement('span');
+        grip.className = 'grip';
+        grip.textContent = '⋮⋮';
+        grip.title = '按住拖动换顺序';
+        row.appendChild(grip);
+
+        const ic = document.createElement('span');
+        ic.className = 'ic';
+        ic.appendChild(gridItemIcon(name));
+        row.appendChild(ic);
 
         const nm = document.createElement('span');
         nm.className = 'nm';
@@ -11974,6 +12047,19 @@ function pickGroups() {
     }));
     out.push({ title: '附加功能', items: builtin });
 
+    /* 文本处理（v2.10.0）：每一件单独一条，加进网格就是**这一件**，
+     * 和横条上那颗 `@txt:<op>` 是同一个名字、同一套后端。 */
+    const txtItems = (window.QS_TEXT_OPS || []).map((op) => {
+        const sent = (window.QS_TEXT || '@txt') + ':' + op.id;
+        return {
+            name: sent,
+            label: op.label,
+            desc: op.hint || '',
+            node: () => (window.qsFuncIcon ? window.qsFuncIcon(sent) : document.createTextNode('≡')),
+        };
+    });
+    if (txtItems.length) out.push({ title: '文本处理', items: txtItems });
+
     const go = ((CONF && CONF.shortcuts) || []).filter((x) => x && x.id).map((x) => {
         const sent = (window.QS_GO_PREFIX || '@go:') + x.id;
         return {
@@ -12185,6 +12271,69 @@ async function renderWrapPane() {
         box.appendChild(row);
     }
     syncWrapButtons();
+}
+
+/** 「文本处理」页：一张功能清单，每行两颗按钮（加到横条 / 加到网格页）。
+ *
+ *  和包裹符号那页同一个套路：状态从 `barHas` / `gridHasAny` 现读，按钮文案
+ *  自己就说明了"加没加"，不再额外写一行提示（用户之前明确要求别写）。
+ *  清单本身来自 `window.QS_TEXT_OPS`（shared.js），和后端 `text_op` 认的 op
+ *  一一对应 —— 加新功能只改那张表。 */
+function renderTextOpsPane() {
+    const box = $('textOpsList');
+    if (!box || !window.QS_TEXT_OPS) return;
+    box.textContent = '';
+    for (const op of window.QS_TEXT_OPS) {
+        const sent = (window.QS_TEXT || '@txt') + ':' + op.id;
+        const row = document.createElement('div');
+        row.className = 'item';
+
+        const ic = document.createElement('span');
+        ic.className = 'ic';
+        ic.appendChild(window.qsFuncIcon ? window.qsFuncIcon(sent) : document.createTextNode('≡'));
+        row.appendChild(ic);
+
+        const nm = document.createElement('span');
+        nm.className = 'nm';
+        nm.textContent = op.label;
+        const sm = document.createElement('small');
+        sm.className = 'curl';
+        sm.textContent = op.hint || '';
+        nm.appendChild(sm);
+        row.appendChild(nm);
+
+        const ops = document.createElement('span');
+        ops.className = 'ops';
+        const mkBtn = (text, on, title, fn) => {
+            const b = document.createElement('button');
+            b.className = 'mini' + (on ? ' on' : '');
+            b.textContent = on ? (text + '（已加）') : text;
+            b.title = title;
+            b.addEventListener('click', fn);
+            ops.appendChild(b);
+            return b;
+        };
+        const onBar = barHas(sent);
+        const onGrid = gridHasAny(sent);
+        mkBtn(onBar ? '横条' : '加到横条', onBar,
+            onBar ? '已经在横条上了（点一下移除）' : '把这一件放进横条',
+            () => { toggleAddTo('bar', sent); setTimeout(() => {
+                const b = ops.firstChild;
+                const on = barHas(sent);
+                b.textContent = on ? '横条（已加）' : '加到横条';
+                b.classList.toggle('on', on);
+            }, 260); });
+        mkBtn(onGrid ? '网格页' : '加到网格页', onGrid,
+            onGrid ? '已经在网格页里了（点一下移除）' : '把这一件放进网格页',
+            () => { toggleAddTo('grid', sent); setTimeout(() => {
+                const b = ops.lastChild;
+                const on = gridHasAny(sent);
+                b.textContent = on ? '网格页（已加）' : '加到网格页';
+                b.classList.toggle('on', on);
+            }, 260); });
+        row.appendChild(ops);
+        box.appendChild(row);
+    }
 }
 
 function syncWrapButtons() {

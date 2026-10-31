@@ -116,6 +116,20 @@ pub const BAR_TRANS: &str = "@trans";
 /// 和 `@ocr` / `@trans` 同一套待遇。
 pub const BAR_WRAP: &str = "@wrap";
 
+/// 文本处理的前缀：具体功能写在冒号后面（`@txt:trim` / `@txt:case:upper`…）。
+///
+/// 为什么不做成 `@txt` 一颗 + 设置里再选是哪一件：用户明确要求
+/// 「每个文本处理子功能都必须能够单独添加到网格页或横条中」——
+/// 名字里带 op 才能让「去空格」和「转大写」**同时**待在横条上，各管一件事。
+pub const BAR_TEXT: &str = "@txt";
+
+/// 是不是「文本处理」哨兵（`@txt:<op>`）。
+pub fn is_text_sentinel(n: &str) -> bool {
+    n.strip_prefix(BAR_TEXT)
+        .map(|rest| rest.starts_with(':') && rest.len() > 1)
+        .unwrap_or(false)
+}
+
 /// 用户自己加的搜索引擎。
 ///
 /// 只存「名字 + URL 模板 + 分类」几样东西。图标故意不放进这个结构 ——
@@ -471,6 +485,7 @@ pub fn prune_undefined_bar_engines(cfg: &mut Config) -> usize {
          *   `@img`     识图搜索按钮
          *   `@trans`   翻译按钮
          *   `@wrap`    包裹符号按钮
+         *   `@txt:<op>` 文本处理（去空格 / 换行 / 标点 / 大小写…）
          *   `@app:<id>`  外部软件
          *   `@fav:<id>`  收藏夹
          *   `@go:<id>`   智能直达
@@ -605,6 +620,7 @@ fn is_bar_sentinel(n: &str) -> bool {
         || n == BAR_IMG
         || n == BAR_TRANS
         || n == BAR_WRAP
+        || is_text_sentinel(n)
         || is_app_sentinel(n)
         || is_fav_sentinel(n)
         || is_go_sentinel(n)

@@ -1,8 +1,8 @@
 1 ICON "icons/icon.ico"
 
 1 VERSIONINFO
-FILEVERSION 2,9,2,0
-PRODUCTVERSION 2,9,2,0
+FILEVERSION 2,10,0,0
+PRODUCTVERSION 2,10,0,0
 FILEOS 0x40004
 FILETYPE 0x1
 BEGIN
@@ -12,8 +12,8 @@ BEGIN
     BEGIN
       VALUE "FileDescription", "Quick Search"
       VALUE "ProductName", "Quick Search"
-      VALUE "FileVersion", "2.9.2"
-      VALUE "ProductVersion", "2.9.2"
+      VALUE "FileVersion", "2.10.0"
+      VALUE "ProductVersion", "2.10.0"
       VALUE "OriginalFilename", "QuickSearch.exe"
       VALUE "LegalCopyright", ""
     END

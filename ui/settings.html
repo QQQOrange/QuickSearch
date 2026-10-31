@@ -77,8 +77,9 @@
         <!-- 右下角"正在使用什么功能"的提示（v2.6.7 起；v2.6.8 改成应用内置提示） -->
         <div class="row">
             <div class="rt"><b>右下角提示当前功能</b>
-                <small>用划词横条 / 网格页 / 文字识别 / 翻译 / 识图时，在屏幕右下角弹一条应用内置的小提示，
-                    写明「正在使用：功能 · 软件」；同一软件里的同一功能 10 秒内只提示一次</small>
+                <small>只在<b>真正用了一项功能</b>时弹（文字识别 / 翻译 / 识图 / 文本处理），
+                    写明「已使用：功能 · 软件」。<b>弹横条、开网格页不再提示</b>；
+                    同一功能 60 秒内只提示一次，不同功能各算各的</small>
             </div>
             <label class="sw"><input type="checkbox" id="s-notifyFeature"><i></i></label>
         </div>
@@ -784,6 +785,7 @@
                 <button type="button" class="chip" data-sub="imgsearch">🖼 识图搜索</button>
                 <button type="button" class="chip" data-sub="fav">⭐ 收藏夹</button>
                 <button type="button" class="chip" data-sub="wrap">🧷 包裹符号</button>
+                <button type="button" class="chip" data-sub="txt">✂️ 文本处理</button>
             </div>
         </section>
     </div>
@@ -1232,6 +1234,26 @@
             </div>
         </div>
         <div class="list" id="wrapPairsList"></div>
+    </section>
+    </div>
+
+    <!-- ==================== 文本处理（v2.10.0）====================
+         用户要求：「在附加功能中新增文本处理功能…至少包括：智能换行、智能去空格、
+         智能规范标点（全部转为全角或全部转为半角）、英文大小写转换…每个文本处理
+         子功能都必须能够单独添加到网格页或横条中。而在 OCR 页面也能够直接调用」。
+         所以这里是一张**功能清单**，每一行两颗按钮：加到横条 / 加到网格页。
+         每一件在横条与网格里都是**独立的一格**（`@txt:<op>`），互不覆盖。 -->
+    <div class="pane" data-pane="txt" hidden>
+    <section class="card">
+        <h2>文本处理 <small>对选中的文字就地改写，每一件都能单独放到横条或网格页</small></h2>
+        <div class="hint">
+            在任意软件里选中一段文字 → 点横条（或网格页）上对应的那颗按钮 →
+            文字当场被改写（走的是和「包裹符号」同一条回写通道：先复制结果，
+            再回填到原处）。<br>
+            每一件都是<b>独立的一格</b>：想让「去空格」和「转大写」并排待在横条上，
+            两个都加即可。<b>OCR 结果框</b>下方也有同一个菜单，识别完可以直接整理。
+        </div>
+        <div class="list" id="textOpsList"></div>
     </section>
     </div>
 

@@ -168,6 +168,14 @@ window.qsDisplayName = function (name) {
     if (!raw) return '';
     // ⓪ 模型绑定格子（@ocr:<id> / @trans:<id>）：功能名 + 具体模型
     const bound = window.qsFuncBound ? window.qsFuncBound(raw) : null;
+    if (bound && bound.kind === 'txt') {
+        /* 文本处理：**只显示那一件的名字**（用户口径：「文本处理这四个字就可以
+         * 隐去，只显示智能去空格就可以了」）。格子本来就小，"文本处理 · 智能去空格"
+         * 一挤就变成省略号，反而看不出是哪一件；分组信息由图标（同一张"纸"）
+         * 和它在横条/网格里的位置表达。 */
+        const meta = window.qsTextOpMeta(bound.id);
+        return meta ? meta.label : ('文本处理 · ' + bound.id);
+    }
     if (bound) {
         const baseLabel = window.qsDisplayName('@' + bound.kind);
         const model = window.qsModelName(bound.kind, bound.id);
@@ -203,6 +211,7 @@ window.qsDisplayName = function (name) {
          * 它在网格里是一颗**功能格子**：点开一组符号（“” 《》 【】 等），
          * 把选中的文字套上 / 拆掉 / 换一对，和横条上那颗 [ ] 是同一件事。 */
         wrap: '包裹符号',
+        txt: '文本处理',
         '|': '分隔线',
     };
     if (Object.prototype.hasOwnProperty.call(FIXED, key)) return FIXED[key];
@@ -231,7 +240,85 @@ window.qsGoBySentinel = function (name) {
 /** 包裹符号在横条/网格里的哨兵名。 */
 window.QS_WRAP = '@wrap';
 
-/** 内置功能的**统一图标节点**（OCR / 翻译 / 识图 / 包裹）。
+/* ---------------- 文本处理（v2.10.0） ---------------- */
+
+/** 文本处理的哨兵前缀：`@txt:<op>`（op 见 [window.QS_TEXT_OPS]）。
+ *
+ *  和 `@go:<id>` / `@ocr:<id>` 同一套路：**具体功能写在名字里**，所以同一个
+ *  「文本处理」可以在横条/网格里放好几颗、各管一件事，互不覆盖。
+ *  后端的 `text_op` 命令就是按冒号后面这段分发。
+ *
+ *  ⚠ 顺序即选板 / 设置页的展示顺序，按"常用的排前面"：先去空格和换行（这两件
+ *    在 PDF、公众号里几乎必做），再标点，最后大小写。 */
+window.QS_TEXT = '@txt';
+window.QS_TEXT_OPS = [
+    {
+        id: 'trim', label: '智能去空格', short: '去空格', glyph: '␣',
+        hint: '折叠多余空格，去掉中文之间、行首行尾的空白（换行保留）',
+    },
+    {
+        id: 'nl', label: '智能换行', short: '合并换行', glyph: '¶',
+        hint: '把排版断开的行接回一段；句末标点、列表、编号、表格的换行不动',
+    },
+    {
+        id: 'punct:full', label: '标点转全角', short: '全角标点', glyph: '，',
+        hint: ', ; : ! ? ( ) 等收成中文全角标点（不动小数点、网址）',
+    },
+    {
+        id: 'punct:half', label: '标点转半角', short: '半角标点', glyph: ',',
+        hint: '，；：！？（） 等收成英文半角标点',
+    },
+    {
+        id: 'case:lower', label: '英文转小写', short: '转小写', glyph: 'a',
+        hint: '整段英文转成小写（中文与符号不动）',
+    },
+    {
+        id: 'case:upper', label: '英文转大写', short: '转大写', glyph: 'A',
+        hint: '整段英文转成大写',
+    },
+    {
+        id: 'case:title', label: '首字母大写（每词）', short: '首字母', glyph: 'Ab',
+        hint: '每个单词的首字母大写，其余保持原样',
+    },
+    {
+        id: 'case:sentence', label: '句首字母大写', short: '句首', glyph: 'A.',
+        hint: '每句话的第一个字母大写（按 . ! ? 和换行断句）',
+    },
+];
+
+/** `@txt:trim` → `'trim'`；不是文本处理就返回 null。 */
+window.qsTextOpId = function (name) {
+    if (typeof name !== 'string') return null;
+    if (!name.startsWith(window.QS_TEXT + ':')) return null;
+    return name.slice(window.QS_TEXT.length + 1);
+};
+
+/** op id → 那条元信息（找不到返回 null）。 */
+window.qsTextOpMeta = function (id) {
+    return window.QS_TEXT_OPS.find((o) => o.id === id) || null;
+};
+
+/** 横条/网格/设置三处共用的图标：一张带横线的纸，中间写着这个 op 的记号。 */
+window.qsTextIconNode = function (opId) {
+    const meta = window.qsTextOpMeta(opId);
+    const glyph = (meta && meta.glyph) || '≡';
+    const sp = document.createElement('span');
+    sp.style.cssText = 'display:block;width:100%;height:100%;position:relative';
+    sp.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"'
+        + ' stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"'
+        + ' style="display:block;width:100%;height:100%;opacity:.85">'
+        + '<path d="M5.5 3.5h9l4 4v13h-13z" fill="none"/>'
+        + '<path d="M8.5 12h7M8.5 15.5h7M8.5 8.5h3"/></svg>'
+        + '<span style="position:absolute;right:-1px;bottom:-1px;font-size:7.5px;'
+        + 'line-height:1;font-weight:700;color:currentColor;background:var(--qs-bg,#fff);'
+        + 'border-radius:2px;padding:0 1px"></span>';
+    // 右下角那个小记号单独写（上面用 innerHTML 拼字符串，文本要转义）
+    const tag = sp.lastChild;
+    tag.textContent = glyph;
+    return sp;
+};
+
+/** 内置功能的**统一图标节点**（OCR / 翻译 / 识图 / 包裹 / 文本处理）。
  *
  *  为什么要有它：网格页的格子里以前是 emoji（🔤🌐🖼），而横条上是各功能自己的
  *  图标（OCR 徽标、翻译那张图、识图那颗 SVG）—— 同一个功能两处长得不一样，
@@ -249,7 +336,7 @@ window.QS_WRAP = '@wrap';
  * 三处（横条 / 网格预览 / 设置列表）都要能认这种名字，所以解析放在 shared.js。 */
 window.qsFuncBound = function (name) {
     if (typeof name !== 'string') return null;
-    const m = /^@(ocr|img|trans):(.+)$/.exec(name.trim());
+    const m = /^@(ocr|img|trans|txt):(.+)$/.exec(name.trim());
     return m ? { kind: m[1], id: m[2] } : null;
 };
 
@@ -272,6 +359,7 @@ window.qsFuncBase = function (name) {
 
 window.qsFuncIcon = function (name) {
     // 绑定格子（@ocr:<id> 等）用基础哨兵那张图 —— 图标表达"功能"，模型由文字说明
+    const rawName = name;
     name = window.qsFuncBase ? window.qsFuncBase(name) : name;
     const conf = window.CONF || {};
     const custom = conf.overrideIcons ? conf.overrideIcons[name] : null;
@@ -299,6 +387,11 @@ window.qsFuncIcon = function (name) {
         sp.style.setProperty('--lt-color', '#B45309');
         sp.style.fontSize = '8px';
         return sp;
+    }
+    if (name === window.QS_TEXT) {
+        /* 文本处理：所有 op 共用一张"带横线的纸"，具体是哪一件看格子标签。
+         * 传空 opId → 不带右下角记号（选板里"文本处理"那一整组用的就是它）。 */
+        return window.qsTextIconNode(window.qsTextOpId(rawName) || '');
     }
     if (name === window.QS_WRAP) {
         /* ⚠ 尺寸必须写在**内联样式**里，不能指望各页面的 CSS：

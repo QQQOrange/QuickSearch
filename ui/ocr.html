@@ -579,6 +579,11 @@ textarea.ghost { color: var(--fg-dim); }
     <button class="btn" id="btnGarbage" title="去掉识别噪声：乱码占位符、控制字符、零宽字符、私用区字符。正常标点、emoji、生僻字不动">去乱码</button>
     <button class="btn" id="btnWidth" title="全角字母数字与标点收成半角（Ａ→A、１２３→123、（→(、，→,）；中文标点。、《》保持原样">全角→半角</button>
     <button class="btn" id="btnUnwrap" title="把因为排版被断开的行接回一段（PDF、窄栏复制最常见）；句末标点结尾、列表、编号、表格的换行不动">合并换行</button>
+    <!-- v2.10.0：文本处理。和横条 / 网格页那几颗 `@txt:<op>` 走同一个后端命令
+         （`text_op`），只是这里不写回别的软件、直接改这个文本框。
+         划了一段就只处理那一段，没划就整段。 -->
+    <select class="btn" id="txtOpSel" title="对识别结果做文本处理（先划一段就只处理那一段）"></select>
+    <button class="btn" id="btnTxtOp" title="把上面选中的那一件作用到识别结果上">文本处理</button>
     <button class="btn" id="btnRerun" title="用同一张图重新识别一次">重新识别</button>
     <button class="btn" id="btnClose">关闭</button>
 </div>
@@ -920,6 +925,53 @@ function cleanToast(mode, st) {
             return (st && st[mode] ? '已开启' : '已关闭') + '「' + name + '」';
         }
     }
+}
+
+/* ---------------- 文本处理（v2.10.0） ---------------- */
+
+/** 下拉里那几件从 shared.js 的注册表来（和横条/网格/设置同源，不各写一份）。 */
+(function fillTextOps() {
+    const sel = $('txtOpSel');
+    if (!sel) return;
+    for (const op of (window.QS_TEXT_OPS || [])) {
+        const o = document.createElement('option');
+        o.value = op.id;
+        o.textContent = op.label;
+        o.title = op.hint || '';
+        sel.appendChild(o);
+    }
+})();
+
+/** 把选中的那一件作用到结果框：划了选段就只改选段，没划就整段。
+ *
+ *  为什么交给后端做而不是在这里写 JS 正则：横条/网格上的同一批功能走的是
+ *  Rust 的 `text_op`，两边各写一份迟早会出现"同一个按钮在两处结果不一样"。
+ *  这里传 `apply: false` —— 只取回结果，不往别的软件里写。 */
+if ($('btnTxtOp')) {
+    $('btnTxtOp').addEventListener('click', async () => {
+        const ta = curTa();
+        const sel = $('txtOpSel');
+        const op = sel ? sel.value : '';
+        if (!op) return;
+        const a = ta.selectionStart, b = ta.selectionEnd;
+        const hasSel = typeof a === 'number' && b > a;
+        const src = hasSel ? ta.value.slice(a, b) : ta.value;
+        if (!src.trim()) { toast('识别结果是空的'); return; }
+        try {
+            const r = await invoke('text_op', { op, text: src, apply: false });
+            const out = (r && r.text) || '';
+            if (hasSel) {
+                // 保留选区：用户往往要接着再叠一个处理
+                ta.setRangeText(out, a, b, 'select');
+            } else {
+                ta.value = out;
+            }
+            ta.focus();
+            toast((r && r.label ? r.label : '文本处理') + '：已应用');
+        } catch (e) {
+            toast('处理失败：' + String((e && e.message) || e || '').slice(0, 60));
+        }
+    });
 }
 
 $('btnSmartSpace').addEventListener('click', (e) => recleanWith('smart', e.currentTarget));

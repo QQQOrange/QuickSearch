@@ -778,6 +778,30 @@ pub fn caret_pos() -> Option<POINT> {
     caret_box().map(|(l, _, _, b)| POINT { x: l, y: b })
 }
 
+/// 等一个「不是 `exclude` 这颗」的前台窗口出现（最多 `ms` 毫秒）。
+///
+/// 用途：网格页点完一项之后要**等目标真的显示出来再收起**（用户口径：
+/// 「需等到该项内容真正完成渲染并显示时…网格页必须立即自动关闭」，
+/// 不能内容还没出现就把网格收掉、留一片桌面在闪）。
+///
+/// 判断口径刻意做得粗略：**不比对进程**。目标可能是浏览器、别的软件，
+/// 也可能是我们自己的 OCR / 翻译 / 识图窗口 —— 只要前台不再是这颗横条，
+/// 就说明确实有东西浮到前面来了。返回 false = 等到超时都没看见。
+pub fn wait_foreign_foreground(exclude: HWND, ms: u64) -> bool {
+    let start = std::time::Instant::now();
+    let limit = std::time::Duration::from_millis(ms.max(50));
+    loop {
+        let fg = unsafe { GetForegroundWindow() };
+        if !fg.0.is_null() && fg != exclude && unsafe { IsWindowVisible(fg).as_bool() } {
+            return true;
+        }
+        if start.elapsed() >= limit {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(40));
+    }
+}
+
 /// 取打字光标所占的矩形（屏幕物理像素）：(left, top, right, bottom)。
 ///
 /// 和 `caret_pos` 的区别在于它把**上下两条边**都给了出来 —— 横条要判断

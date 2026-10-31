@@ -509,7 +509,48 @@ fn is_bar_shown() -> bool {
     st().geo.lock().map(|g| g.shown).unwrap_or(false)
 }
 
+/// 网格页点完一项后用来**推迟收起**的闸门（v2.10.0）。
+///
+/// 语义：`Some(deadline)` = 现在不许收，等到 deadline 为止（兜底自解锁，
+/// 万一前端没发 release 也不会把横条永久卡在屏幕上）。
+static DISMISS_HOLD: std::sync::Mutex<Option<std::time::Instant>> =
+    std::sync::Mutex::new(None);
+/// 挂起期间有人要求收条 —— 解除挂起时补收一次。
+static DISMISS_PENDING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// 收起横条。所有调用点都用这一个；网格页的"等目标显示出来再收"靠
+/// [DISMISS_HOLD] 在这里拦截，不必改每一处命令。
 fn dismiss_bar() {
+    if dismiss_held() {
+        // 有人要收，但现在不许：记一笔，等 bar_hold(false) 时补上。
+        DISMISS_PENDING.store(true, Ordering::SeqCst);
+        win::log("dismiss_bar: 挂起中（网格页还在等目标窗口显示）");
+        return;
+    }
+    dismiss_bar_now();
+}
+
+/// 当前是否处于"挂起收起"状态（过期自动失效，见 [DISMISS_HOLD]）。
+fn dismiss_held() -> bool {
+    let mut g = match DISMISS_HOLD.lock() {
+        Ok(g) => g,
+        Err(pe) => pe.into_inner(),
+    };
+    match *g {
+        Some(dl) => {
+            if std::time::Instant::now() >= dl {
+                *g = None;      // 过期：自动解锁，绝不把横条永久钉在屏幕上
+                false
+            } else {
+                true
+            }
+        }
+        None => false,
+    }
+}
+
+fn dismiss_bar_now() {
     /* 先记一笔"用户收过一次"（见 DISMISS_EPOCH 的注释）—— 必须放在下面那些
      * 提前 return 之前：横条还在读词、压根没显示时用户点了别处，这条也算数。 */
     DISMISS_EPOCH.fetch_add(1, Ordering::SeqCst);
@@ -573,6 +614,54 @@ fn dismiss_bar() {
         win::set_foreground(HWND(restore as *mut c_void));
     }
     let _ = app().emit_to("bar", "qs://hidden", ());
+}
+
+/// 挂起 / 解除"收起横条"（v2.10.0，网格页专用）。
+///
+/// 前端在点击网格项**之前** hold(true)，等目标真的显示出来（或明确失败）
+/// 之后再 hold(false) —— 这样 [dismiss_bar] 期间的调用会被拦下来记成
+/// pending，解除时补收一次，实现"内容就绪才关"。
+///
+/// · `keep_open = true`：**取消**这次待收（打开失败时用，网格页留在屏幕上
+///   让用户重试 / 换一项），把 pending 标记清掉。
+/// · 内部挂起上限 20 秒：前端崩了、命令没回来也不会让横条永远收不掉。
+#[crate::t::command]
+fn bar_hold(hold: bool, keep_open: Option<bool>) {
+    if hold {
+        DISMISS_PENDING.store(false, Ordering::SeqCst);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        if let Ok(mut g) = DISMISS_HOLD.lock() {
+            *g = Some(deadline);
+        }
+        win::log("bar_hold: 挂起收起（等目标窗口显示）");
+        return;
+    }
+    if let Ok(mut g) = DISMISS_HOLD.lock() {
+        *g = None;
+    }
+    if keep_open.unwrap_or(false) {
+        let had = DISMISS_PENDING.swap(false, Ordering::SeqCst);
+        win::log(&format!("bar_hold: 解除挂起，保留横条（取消待收={had}）"));
+        return;
+    }
+    let pending = DISMISS_PENDING.swap(false, Ordering::SeqCst);
+    win::log(&format!("bar_hold: 解除挂起，补收 pending={pending}"));
+    // 无论有没有 pending 都收一次：前端就是"内容出来了，可以关了"才调这里。
+    dismiss_bar_now();
+}
+
+/// 等一个不是横条自己的前台窗口出现（最多 `ms` 毫秒）—— 网格页用它判断
+/// 「点开的东西到底显示出来了没有」。返回 false 表示等超时了。
+#[crate::t::command]
+fn wait_raised(ms: Option<u32>) -> bool {
+    let h = bar_hwnd();
+    let got = win::wait_foreign_foreground(h, ms.unwrap_or(1500) as u64);
+    win::log(&format!(
+        "wait_raised: {}（{}ms 上限）",
+        if got { "目标已到前台" } else { "等超时" },
+        ms.unwrap_or(1500)
+    ));
+    got
 }
 
 /// 横条该落选中文字的哪一侧。返回 `(胶囊左上角 y, 方向名)`。
@@ -2060,7 +2149,7 @@ fn ctrl_copy_bar(got: Got) -> CopyBar {
 /// 就打开该引擎首页。
 fn show_grid(text: String) {
     GRID_PENDING.store(true, Ordering::SeqCst);
-    notify_feature("网格页");
+
     win::log(&format!(
         "grid: 唤起网格页（文字 {} 字）",
         text.chars().count()
@@ -2261,6 +2350,212 @@ fn wrap_text(
     Ok(json!({
         "text": out,
         "action": action,
+        "copied": copied,
+        "applied": applied,
+        "note": note,
+    }))
+}
+
+/* ---------------- 文本处理（@txt:<op>，v2.10.0） ---------------- */
+
+/// 中日韩文字：用来判断"两个汉字之间的空格该不该删"。
+fn is_cjk(c: char) -> bool {
+    matches!(c as u32,
+        0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF | 0x3040..=0x30FF
+        | 0xAC00..=0xD7AF | 0x3000..=0x303F | 0xFF00..=0xFFEF)
+}
+
+/// 中文标点（去空格时，它两侧的空格也要清掉）。
+fn is_cjk_punct(c: char) -> bool {
+    matches!(c, '，' | '。' | '、' | '；' | '：' | '？' | '！' | '“' | '”' | '‘' | '’'
+        | '（' | '）' | '《' | '》' | '【' | '】' | '…' | '—' | '·')
+}
+
+/// 智能去空格：折叠连续空格、去掉行首行尾空白、去掉**汉字/中文标点之间**的空格；
+/// 英文单词之间、单词与中文之间的那个空格**保留**（删了英文就粘成一坨了）。
+fn text_op_trim(src: &str) -> String {
+    let mut out = String::with_capacity(src.len());
+    for (li, line) in src.lines().enumerate() {
+        if li > 0 {
+            out.push('\n');
+        }
+        let chars: Vec<char> = line.trim().chars().collect();
+        let mut prev_kept: Option<char> = None;
+        for (i, &c) in chars.iter().enumerate() {
+            if c == ' ' || c == '\t' || c == '\u{3000}' {
+                let next = chars.get(i + 1).copied();
+                let left_cjk = prev_kept.map(|p| is_cjk(p) || is_cjk_punct(p)).unwrap_or(false);
+                let right_cjk = next.map(|n| is_cjk(n) || is_cjk_punct(n)).unwrap_or(false);
+                // 汉字之间 / 汉字与中文标点之间 / 行尾 → 直接吃掉
+                if next.is_none() || (left_cjk && right_cjk) {
+                    continue;
+                }
+                if prev_kept == Some(' ') {
+                    continue; // 连续空格折叠成一个
+                }
+                out.push(' ');
+                prev_kept = Some(' ');
+                continue;
+            }
+            out.push(c);
+            prev_kept = Some(c);
+        }
+    }
+    // 三个以上的连续换行压成两个（保留"空一行 = 分段"的语义）
+    let mut res = String::with_capacity(out.len());
+    let mut nl_run = 0usize;
+    for c in out.chars() {
+        if c == '\n' {
+            nl_run += 1;
+            if nl_run <= 2 {
+                res.push(c);
+            }
+        } else {
+            nl_run = 0;
+            res.push(c);
+        }
+    }
+    res
+}
+
+/// 标点全角 / 半角互转。
+///
+/// 只动**成对的中英标点**，刻意不碰：
+///   · `.` —— 全角化成 `。` 会把 3.14、www.a.com 一起毁掉；
+///   · `。` 半角化只在**后面不是数字**时才换成 `.`（同样的理由）。
+fn text_op_punct(src: &str, to_full: bool) -> String {
+    const PAIRS: &[(char, char)] = &[
+        (',', '，'), (';', '；'), (':', '：'), ('!', '！'), ('?', '？'),
+        ('(', '（'), (')', '）'), ('[', '【'), (']', '】'),
+        ('"', '“'), ('\'', '’'),
+    ];
+    let chars: Vec<char> = src.chars().collect();
+    let mut out = String::with_capacity(src.len());
+    for (i, &c) in chars.iter().enumerate() {
+        let rep = if to_full {
+            PAIRS.iter().find(|(h, _)| *h == c).map(|(_, f)| *f)
+        } else {
+            let direct = PAIRS.iter().find(|(_, f)| *f == c).map(|(h, _)| *h);
+            direct
+        };
+        if let Some(r) = rep {
+            out.push(r);
+            continue;
+        }
+        // 句号：半角化时后面跟着数字就保持全角（"第 3。5 节"这种极少，但 3.14 很常见）
+        if !to_full && c == '。' {
+            let next_digit = chars.get(i + 1).map(|n| n.is_ascii_digit()).unwrap_or(false);
+            out.push(if next_digit { '。' } else { '.' });
+            continue;
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// 每个单词的首字母大写（英文单词；中文/数字原样）。
+fn text_op_title(src: &str) -> String {
+    let mut out = String::with_capacity(src.len());
+    let mut at_start = true;
+    for c in src.chars() {
+        if c.is_alphabetic() {
+            if at_start {
+                out.extend(c.to_uppercase());
+                at_start = false;
+            } else {
+                out.push(c);
+            }
+        } else {
+            at_start = !c.is_alphanumeric();
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// 句首字母大写：按 `. ! ?`（含中文全角）和换行断句，每句第一个字母大写。
+fn text_op_sentence(src: &str) -> String {
+    let mut out = String::with_capacity(src.len());
+    let mut start = true;
+    for c in src.chars() {
+        if start && c.is_alphabetic() {
+            out.extend(c.to_uppercase());
+            start = false;
+            continue;
+        }
+        out.push(c);
+        if matches!(c, '.' | '!' | '?' | '。' | '！' | '？' | '\n') {
+            start = true;
+        } else if !c.is_whitespace() && c.is_alphanumeric() {
+            start = false;
+        }
+    }
+    out
+}
+
+/// 执行一条文本处理。返回 (结果, 中文动作名)。
+fn apply_text_op(op: &str, src: &str) -> Result<(String, &'static str), String> {
+    let (out, name) = match op {
+        "trim" => (text_op_trim(src), "智能去空格"),
+        "nl" => (unwrap_lines(src), "智能换行"),
+        "punct:full" => (text_op_punct(src, true), "标点转全角"),
+        "punct:half" => (text_op_punct(src, false), "标点转半角"),
+        "case:lower" => (src.to_lowercase(), "英文转小写"),
+        "case:upper" => (src.to_uppercase(), "英文转大写"),
+        "case:title" => (text_op_title(src), "首字母大写"),
+        "case:sentence" => (text_op_sentence(src), "句首大写"),
+        other => return Err(format!("不认识的文本处理：{other}")),
+    };
+    Ok((out, name))
+}
+
+/// 文本处理：`@txt:<op>` 格子点下去 / OCR 页那颗「文本处理」按钮都走这里。
+///
+/// · `text` 为空 → 用后端记着的选区文字（横条那条路）；
+/// · `apply` 为真 → 顺手把结果写回目标软件（复用包裹符号那套"退格 + 粘贴"，
+///   带串行锁和 30 秒 TTL，见 `wrap_paste_into_target`）；
+/// · `apply` 为假 → 只把结果回给调用方（OCR 页就地替换文本框用）。
+#[crate::t::command]
+fn text_op(
+    op: String,
+    text: Option<String>,
+    apply: Option<bool>,
+    fresh: Option<bool>,
+) -> Result<Value, String> {
+    let src = match text.filter(|t| !t.trim().is_empty()) {
+        Some(t) => t,
+        None => st().sel.lock().map(|s| s.clone()).unwrap_or_default(),
+    };
+    if src.trim().is_empty() {
+        return Err("没有可处理的文字".to_string());
+    }
+    let (out, name) = apply_text_op(&op, &src)?;
+    /* 真正改写了文字 → 提示一次"用了什么功能"（和 OCR / 翻译同一口径：
+     * 只在 apply 为真时算"用过"，OCR 页那种只取结果的不播报）。 */
+    if apply.unwrap_or(false) {
+        notify_feature(name);
+    }
+    let copied = clip::set_text(&out);
+    let mut applied = false;
+    let mut note = String::new();
+    if apply.unwrap_or(false) {
+        match wrap_paste_into_target(&out, &src, fresh.unwrap_or(true)) {
+            Ok(()) => applied = true,
+            Err(e) => {
+                note = e;
+                win::log(&format!("text_op({op}): 未回写 —— {note}"));
+            }
+        }
+    }
+    win::log(&format!(
+        "text_op({op}) {name}: {} 字 → {} 字（复制={copied} 回写={applied}）",
+        src.chars().count(),
+        out.chars().count()
+    ));
+    Ok(json!({
+        "text": out,
+        "op": op,
+        "label": name,
         "copied": copied,
         "applied": applied,
         "note": note,
@@ -2965,13 +3260,19 @@ fn last_use_app() -> String {
 
 /// 在**屏幕右下角**提示"当前正在使用什么功能"。
 ///
-/// ## 触发时机
-/// 只在**功能真的启动**时弹：划词横条弹出、网格页弹出、开始文字识别、开始翻译、
-/// 开始识图搜索。被"已暂停 / 黑名单 / 功能已关闭"拦掉的不弹（那是没生效，弹了反而误导）。
+/// ## 触发时机（v2.10.0 收紧）
+/// 只在**用户真的用了一项功能**时弹：开始文字识别、开始翻译、开始识图搜索、
+/// 应用文本处理。被"已暂停 / 黑名单 / 功能已关闭"拦掉的不弹（那是没生效，
+/// 弹了反而误导）。
+///
+/// ⚠ **划词横条弹出、网格页弹出不再提示**（v2.10.0）。用户原话：
+/// 「不要再针对每个应用中出现划词弹出横条的情况各发一次通知」——
+/// 这两个动作只是"唤出面板"，换个应用就弹一次，实际变成了"我在哪儿打字"的
+/// 播报，非常吵。真正有信息量的是"用了哪项功能"。
 ///
 /// ## 展示内容
-/// 标题固定 `Quick Search`，正文 = `正在使用：<功能名> · <软件名>`；
-/// 拿不到软件名就只写功能名。
+/// 标题固定 `Quick Search`，正文 = `已使用：<功能名>`（拿得到当前软件时
+/// 追加 ` · <软件名>`）。
 ///
 /// ## 展示方式（v2.6.8 改）
 /// 不再用托盘的系统气泡（`Shell_NotifyIconW` 的 `NIF_INFO`）：那是系统通知，
@@ -2979,10 +3280,11 @@ fn last_use_app() -> String {
 /// **应用自己画的右下角小窗**（见 `toast.rs` / `ui/toast.html`），
 /// 显示秒数由 设置 → 通用 的「显示时长」决定（`notify_seconds`）。
 ///
-/// ## 频率
-/// 同一**软件**里的同一**功能** 10 秒内只提示一次（`NOTIFY_LAST`）：
-/// 划词横条会因鼠标移动被反复唤起，不节流会连着弹一串。换了功能或换了软件
-/// 立刻提示 —— 那才是"我现在的操作真的换了个东西"。
+/// ## 频率（v2.10.0）
+/// 同一**功能** 60 秒内只提示一次（`NOTIFY_LAST`），**不再按软件分桶** ——
+/// 以前是"同一软件里的同一功能 10 秒一次"，于是在两个编辑器之间来回切着用 OCR，
+/// 每切一次就弹一次。现在不同功能各算各的：OCR 一次、翻译一次，互不影响；
+/// 同一个功能连着用，一分钟内只有第一条会提示。
 fn notify_feature(feature: &str) {
     if !cfg_with(|c| c.notify_feature) {
         return;
@@ -2997,16 +3299,17 @@ fn notify_feature(feature: &str) {
             Err(pe) => pe.into_inner(),
         };
         if let Some(at) = g.2 {
-            if g.0 == feature && g.1 == app && now.duration_since(at) < Duration::from_secs(10) {
+            // 只比功能名，不再比软件名：换应用不该触发新一轮播报
+            if g.0 == feature && now.duration_since(at) < Duration::from_secs(60) {
                 return;
             }
         }
         *g = (feature.to_string(), app.clone(), Some(now));
     }
     let text = if app.is_empty() {
-        format!("正在使用：{feature}")
+        format!("已使用：{feature}")
     } else {
-        format!("正在使用：{feature} · {app}")
+        format!("已使用：{feature} · {app}")
     };
     win::log(&format!("notify: {text}（{secs}s）"));
     if let Some(a) = APP.get() {
@@ -4297,7 +4600,7 @@ fn show_bar_at(
     /* 右下角提示"正在使用：划词搜索 · 记事本"。
      * 网格页那一路已经在 `show_grid` 里报过"网格页"，这里跳过，避免一次操作两条通知。 */
     if !is_grid_show {
-        notify_feature("划词搜索");
+
     }
     win::log(&format!(
         "show_bar: 前置合计 {}ms → 已发事件，等前端量尺寸",
@@ -14848,6 +15151,7 @@ fn toggle_bar_engine_impl(cfg: &mut Config, engine: &str, on: bool) {
         && engine != config::BAR_IMG
         && engine != config::BAR_TRANS
         && engine != config::BAR_WRAP
+        && !config::is_text_sentinel(engine)
         && !config::is_fav_sentinel(engine)
         && !config::is_app_sentinel(engine)
     {
@@ -18558,6 +18862,9 @@ fn main() {
             copy_text,
             toggle_bar_engine,
             move_bar_item,
+            bar_hold,
+            text_op,
+            wait_raised,
             add_separator,
             remove_separator,
             remove_bar_ocr,
