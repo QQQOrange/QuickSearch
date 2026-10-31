@@ -1661,7 +1661,21 @@ fn capture_selection_fast(target_pid: u32, budget_ms: u64) -> Option<String> {
     if target_pid != 0 {
         let fg = win::window_pid(win::foreground_window());
         let me = std::process::id();
-        if fg != target_pid && fg != me {
+        /* v2.11.4：**同一个程序的另一个进程也算"还是它"**。
+         *
+         * 微信 4.x（Qt，多进程）和 Chromium 系都是「主进程 + 一堆渲染/助手进程」：
+         * 鼠标底下的那个窗口属于渲染进程，占着前台的却是主进程 —— pid 天然对不上。
+         * 老判据只认 `fg == target_pid`，于是**每一次**补字都走进
+         * 「前台已经换人」直接放弃，横条永远是空的（用户看到的就是
+         * "在微信里选中文字不弹条"，虽然条其实弹了、只是没字）。
+         *
+         * 换成按**可执行文件**比对：同一个 exe = 同一个软件，把选区复制回来
+         * 正是用户刚才那一下的意图；跨软件仍然照旧拦住。 */
+        let same_app = match (win::process_exe(fg), win::process_exe(target_pid)) {
+            (Some(a), Some(b)) => a.eq_ignore_ascii_case(&b),
+            _ => false,
+        };
+        if fg != target_pid && fg != me && !same_app {
             win::log(&format!(
                 "capture(exact): 前台已经换人（pid {fg}，目标 {target_pid}）—— 不发 Ctrl+C，放弃这次复核"
             ));
@@ -3810,7 +3824,20 @@ fn post_show_copy_fill(gen: usize, fg_pid: u32) {
         return;
     }
     win::log("post-copy: 条件①弹条已出现 + 条件②未捕获文字 —— 开始复制补字");
-    match capture_selection_fast(fg_pid, 700) {
+    /* v2.11.4：快通道（SendInput）拿不到就退到**完整三级通道**
+     * （合成按键 → WM_COPY → WM_KEYDOWN/KILLFOCUS 那套，见 `capture_selection`）。
+     *
+     * 为什么需要这条：微信 4.x（Qt）会**忽略带 LLKHF_INJECTED 标记的按键**，
+     * 只发 SendInput 的话它一声不响 —— 横条弹出来了，字永远补不上。
+     * 完整通道里那两条窗口消息不依赖按键注入，Qt 的编辑控件照样认。
+     * 代价只落在"快通道失败"这一支，成功路径完全不受影响。 */
+    let got = capture_selection_fast(fg_pid, 700)
+        .filter(|t| !t.trim().is_empty())
+        .or_else(|| {
+            win::log("post-copy: 快通道没拿到 —— 退到完整复制通道（合成键 / WM_COPY / WM_KEYDOWN）");
+            capture_selection(fg_pid).filter(|t| !t.trim().is_empty())
+        });
+    match got {
         Some(t) if !t.trim().is_empty() => {
             if !is_bar_shown() || GEN.load(Ordering::SeqCst) != gen {
                 win::log("post-copy: 复制成功但横条已换新 —— 丢弃这次结果");
@@ -5412,7 +5439,14 @@ fn spawn_detector() {
                             let loose = hc && !ha && !hs && !hw && hvk == VK_C.0 as u32
                                 && vk == VK_C.0 as u32
                                 && ctrl_ok;
-                            if (strict || loose) && cfg_with(|c| c.trigger_copy) {
+                            /* ⚠ v2.11.4：**网格快捷键只受 `grid_enable` 管**。
+                             *
+                             * 原来这里还要求「复制取词」开着（`trigger_copy`）——
+                             * 那个开关的本意是"复制时弹文字横条"，和网格页没有关系。
+                             * 用户在微信里为了不被 Ctrl+C 打扰关掉它之后，网格快捷键
+                             * 就一起哑了，而且**一行日志都没有**（条件不成立 = 静默跳过）。
+                             * 现在解耦：关掉复制取词不影响网格页。 */
+                            if strict || loose {
                                 // 网格页总开关：关掉后快捷键不响应（内容和配置都留着）
                                 if !cfg_with(|c| c.grid_enable) {
                                     win::log("grid: 网格页已停用，忽略这次快捷键");
