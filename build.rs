@@ -27,8 +27,65 @@ fn walk(dir: &Path, base: &Path, out: &mut Vec<(String, PathBuf)>) {
     }
 }
 
+/// 这一版**被构建出来**的本地时间，形如 `2026-10-31 21:56:00`。
+///
+/// 为什么要在这里算：「关于」页有一行「版本更新时间」，用户明确要求它显示
+/// **当前这一版发出去的时间**。以前 `config::BUILT_AT` 写的是
+/// `option_env!("QS_BUILD_STAMP")`，但**从来没有人注入过这个变量** ——
+/// 于是那一行永远显示"未知"。
+///
+/// 不用 exe 的 mtime：复制、解压、杀软重写都会把它改掉，显示的就不是发版时间了。
+///
+/// 取本地时间（东八区）：构建脚本里没有时区数据库，直接按 UTC+8 算 ——
+/// 发版机就在东八区，这样得到的正是"发版那一刻"。格式固定、不依赖系统区域设置，
+/// 不会出现 `2026/10/31 下午9:56:00` 这种。
+///
+/// 想手动钉一个时间（比如补一个历史版本）时，构建前设 `QS_BUILD_STAMP` 即可。
+fn build_stamp() -> String {
+    if let Ok(s) = std::env::var("QS_BUILD_STAMP") {
+        let s = s.trim().to_string();
+        if !s.is_empty() {
+            return s;
+        }
+    }
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    // UTC+8
+    let local = secs as i64 + 8 * 3600;
+    let days = local.div_euclid(86_400);
+    let rem = local.rem_euclid(86_400);
+    let (y, m, d) = civil_from_days(days);
+    format!(
+        "{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02}",
+        rem / 3600,
+        (rem % 3600) / 60,
+        rem % 60
+    )
+}
+
+/// Howard Hinnant 的 civil_from_days：把"1970-01-01 起的天数"换成 (年, 月, 日)。
+/// 不用第三方日期库 —— 构建脚本的依赖越少越好。
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
 fn main() {
     println!("cargo:rerun-if-changed=app.rc");
+    /* 「版本更新时间」：每次构建都算一遍当下时间并注入（见 `build_stamp`）。
+     * `rerun-if-env-changed` 是为了手动指定时（QS_BUILD_STAMP）能立刻生效。 */
+    println!("cargo:rerun-if-env-changed=QS_BUILD_STAMP");
+    println!("cargo:rustc-env=QS_BUILD_STAMP={}", build_stamp());
 
     /* 版本资源**不会**跟着 Cargo.toml 自动走 —— 它是手写在 app.rc 里的。
      * v2.1.0 就踩过：程序里 `config::VERSION` 是 2.1.0，右键属性却还写着 2.0.0，

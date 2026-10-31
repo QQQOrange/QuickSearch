@@ -5,6 +5,37 @@
 
 ---
 
+## v2.11.9 — 2026-10-31
+
+「关于」页的**版本更新时间**补上了 —— 这一行以前永远是"未知"。
+
+### 根因：没人往构建脚本里注入 `QS_BUILD_STAMP`
+
+```rust
+pub const BUILT_AT: &str = match option_env!("QS_BUILD_STAMP") { Some(s) => s, None => "未知" };
+```
+
+`config.rs` 一直在等这个编译期变量，`build.rs` 的注释里也写着"由 build.rs 算出并注入"，
+但**实际那几行代码从来没写过**（`grep cargo:rustc-env build.rs` 是空的）。所以
+`BUILT_AT` 恒为"未知"，关于页那一行也就恒为"未知"。
+
+### 修法
+
+- `build.rs` 每次构建算出**当下本地时间**（东八区，`yyyy-MM-dd HH:mm:ss`，
+  自带 `civil_from_days` 换算，不引第三方日期库）并注入 `QS_BUILD_STAMP`；
+- 发版那一步再用 `QS_BUILD_STAMP="$(date '+%Y-%m-%d %H:%M:%S')"` 显式钉一次，
+  保证显示的就是**发版那一刻**（并靠 `rerun-if-env-changed` 立刻生效）；
+- 不用 exe 的 mtime：复制 / 解压 / 杀软重写都会改它，显示的就不是发版时间了。
+
+### 验证
+
+```
+$ grep -a -o "2026-..-.. ..:..:.." target/release/QuickSearch.exe
+2026-10-31 21:57:54
+```
+
+关于页随之显示：当前版本 `v2.11.9` / 版本更新时间 `2026-10-31 21:57:54`。
+
 ## v2.11.8 — 2026-10-31
 
 **「默认以管理员身份运行」这个开关一直是死的** —— 这才是微信里两个功能都不工作的

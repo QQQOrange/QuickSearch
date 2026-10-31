@@ -3,7 +3,7 @@ members = ["qs-macros"]
 
 [package]
 name = "qs-hw"
-version = "2.11.8"
+version = "2.11.9"
 edition = "2021"
 description = "Quick Search 原生宿主（wry + tao 取代 Tauri 运行时）"
 
