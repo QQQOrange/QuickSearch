@@ -166,6 +166,13 @@ window.qsDisplayName = function (name) {
     if (typeof name !== 'string') return String(name == null ? '' : name);
     const raw = name.trim();
     if (!raw) return '';
+    // ⓪ 模型绑定格子（@ocr:<id> / @trans:<id>）：功能名 + 具体模型
+    const bound = window.qsFuncBound ? window.qsFuncBound(raw) : null;
+    if (bound) {
+        const baseLabel = window.qsDisplayName('@' + bound.kind);
+        const model = window.qsModelName(bound.kind, bound.id);
+        return baseLabel ? (baseLabel + ' · ' + model) : model;
+    }
     // ① 带 id 的哨兵：去查真实名字
     try {
         if (raw.startsWith(window.QS_APP_PREFIX)) {
@@ -233,7 +240,39 @@ window.QS_WRAP = '@wrap';
  *  卡片里没有对应节点时（比如设置页没加载 bar），退回一个简洁的内联 SVG，
  *  绝不返回 null —— 少一张图比留个空洞好。
  */
+/* 模型绑定格子（v2.8.0）：`@ocr:<id>` / `@img:<id>` / `@trans:<id>`。
+ *
+ * 为什么需要它：网格里原来只有"文字识别"这一颗通用格子，用哪家模型由
+ * 设置里的全局选择决定。用户要的是"这一格就用百度 OCR"——所以格子名带上
+ * 具体模型 id，执行时把 id 传给后端，不再回退到全局默认。
+ *
+ * 三处（横条 / 网格预览 / 设置列表）都要能认这种名字，所以解析放在 shared.js。 */
+window.qsFuncBound = function (name) {
+    if (typeof name !== 'string') return null;
+    const m = /^@(ocr|img|trans):(.+)$/.exec(name.trim());
+    return m ? { kind: m[1], id: m[2] } : null;
+};
+
+/** 模型 id → 显示名。由 bar.js / settings.js 拿到后端注册表后调用登记，
+ *  这样 `qsDisplayName('@ocr:baidu')` 才说得出"百度 OCR"而不是干巴巴的 id。 */
+window.QS_MODEL_NAMES = window.QS_MODEL_NAMES || {};
+window.qsRegModelName = function (kind, id, name) {
+    if (!kind || id == null) return;
+    window.QS_MODEL_NAMES[String(kind) + ':' + String(id)] = name || String(id);
+};
+window.qsModelName = function (kind, id) {
+    return window.QS_MODEL_NAMES[String(kind) + ':' + String(id)] || String(id);
+};
+
+/** 把 `@ocr:<id>` 归一成基础哨兵 `@ocr`（图标、功能分发都用它）。 */
+window.qsFuncBase = function (name) {
+    const b = window.qsFuncBound(name);
+    return b ? '@' + b.kind : name;
+};
+
 window.qsFuncIcon = function (name) {
+    // 绑定格子（@ocr:<id> 等）用基础哨兵那张图 —— 图标表达"功能"，模型由文字说明
+    name = window.qsFuncBase ? window.qsFuncBase(name) : name;
     const conf = window.CONF || {};
     const custom = conf.overrideIcons ? conf.overrideIcons[name] : null;
     if (custom) {

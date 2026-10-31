@@ -4269,15 +4269,17 @@ function gridItemMode(name) {
 function gridPreviewItems() {
     return gridItemsNow().map((name) => {
         const label = window.qsDisplayName ? window.qsDisplayName(name) : String(name);
+        // 绑定模型的格子（@ocr:<id>）先归一成基础哨兵，图标/分支判断都用它
+        const base = window.qsFuncBase ? window.qsFuncBase(name) : name;
         let node = null;
         try {
-            if (PREVIEW_FUNC_SENTINELS.indexOf(name) >= 0 && typeof window.qsFuncIcon === 'function') {
+            if (PREVIEW_FUNC_SENTINELS.indexOf(base) >= 0 && typeof window.qsFuncIcon === 'function') {
                 /* ⚠ v2.7.0：这里原来对 @ocr/@trans/@img 用的是 emoji（🔤🌐🖼），
                  * 而真网格用的是 `qsFuncIcon()` 的 SVG —— 两处画出来不是一个东西。
                  * @wrap 连 emoji 都没有，直接落到设置页的字母徽标分支，于是预览里
                  * 是一个"W"、真网格里是那颗 [ ] 线框图标（用户报的不一致）。
                  * 现在四个内置功能一律走 qsFuncIcon（shared.js，横条也用它）。 */
-                node = window.qsFuncIcon(name);
+                node = window.qsFuncIcon(base);
             } else if (typeof name === 'string' && name.startsWith(window.QS_GO_PREFIX || '@go:')) {
                 node = window.qsGoIconNode(name);
             } else if (typeof name === 'string' && name.startsWith(window.QS_APP_PREFIX || '@app:')) {
@@ -11914,7 +11916,12 @@ async function loadPickModels() {
             const r = await invoke(cmd);
             if (Array.isArray(r)) {
                 PICK_MODELS[key] = r;
-                for (const m of r) if (m && m.id) MODEL_NAMES.set(String(m.id), m.name || m.id);
+                for (const m of r) {
+                    if (!m || !m.id) continue;
+                    MODEL_NAMES.set(String(m.id), m.name || m.id);
+                    // 绑定格子（@ocr:<id>）要靠这张表说得出"百度 OCR"
+                    if (window.qsRegModelName) window.qsRegModelName(key, m.id, m.name || m.id);
+                }
             }
         } catch (_) { /* 命令不可用：该分组不出现，不影响其它内容 */ }
     };
@@ -11976,15 +11983,23 @@ function pickGroups() {
 
     /* 三类模型各自成组：搜「百度」能看到 百度 OCR，搜「翻译」能看到各家翻译，
      * 不用先去别的地方找。 */
+    /* v2.8.0：每条模型绑定成独立格子（`@ocr:<id>` / `@trans:<id>`）。
+     *  以前这里一律塞同一个哨兵 `@ocr`，所以"选百度 OCR"和"选别的 OCR"
+     *  加进网格后**是同一颗格子**，用哪家还看全局设置 —— 用户报的
+     *  「选了却不按选的执行」就是这个原因。 */
     const addModelGroup = (title, list, sentinel, activeIds) => {
         if (!list || !list.length) return;
         out.push({
             title,
-            items: list.map((m) => ({
-                name: sentinel,
-                label: (m.name || m.id) + (activeIds.has(String(m.id)) ? '（当前使用）' : ''),
-                node: () => (window.qsFuncIcon ? window.qsFuncIcon(sentinel) : document.createTextNode('•')),
-            })),
+            items: list.map((m) => {
+                const bound = sentinel + ':' + m.id;
+                return {
+                    name: bound,
+                    label: (m.name || m.id) + (activeIds.has(String(m.id)) ? '（当前使用）' : ''),
+                    desc: '这一格固定用 ' + (m.name || m.id),
+                    node: () => (window.qsFuncIcon ? window.qsFuncIcon(sentinel) : document.createTextNode('•')),
+                };
+            }),
         });
     };
     const imgOn = new Set(((CONF && CONF.imgEngines) || []).map(String));

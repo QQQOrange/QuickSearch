@@ -4944,7 +4944,7 @@ fn spawn_detector() {
                         // 顺手判一下比再开一套热键机制省事，也不会和系统抢键位。
                         if vk == VK_O.0 as u32 && ctrl && alt && cfg_with(|c| c.ocr_enable) {
                             win::log("hotkey: Ctrl+Alt+O -> OCR");
-                            std::thread::spawn(ocr_start_flow);
+                            std::thread::spawn(|| ocr_start_flow(None));
                             continue;
                         }
                         // ctrl：钩子在 C 那一刻读到的状态；加上"最近 600ms 见过 Ctrl"
@@ -9063,6 +9063,42 @@ struct TransSession {
 /// 最近一次"要翻译什么"。窗口建好之前就写进来，页面起来第一件事是读它。
 static TRANS_SESSION: std::sync::Mutex<Option<TransSession>> = std::sync::Mutex::new(None);
 
+/// 翻译的"本次会话指定引擎"（v2.8.0）：网格里绑定了具体翻译模型
+/// （`@trans:<id>`）时由 `trans_start(engine)` 写进来，`trans_session` 据此
+/// 只跑这一家。下次普通入口调用会把它覆盖成 None —— 不会一直粘着。
+static TRANS_FORCE_ENGINE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// OCR 侧同理（见 `ocr_engine_plan`）：绑定 `@ocr:<id>` 的格子点下去，
+/// 整轮识别只跑这一家，不掺全局默认、也不掺"同时识别"名单。
+static OCR_FORCE_ENGINE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// 写/清 OCR 的强制引擎。空字符串或未知 id 一律当"没指定"。
+fn set_ocr_force_engine(engine: Option<String>) {
+    let v = engine
+        .map(|e| e.trim().to_string())
+        .filter(|e| !e.is_empty() && ocr_engines::find(e).is_some());
+    win::log(&format!(
+        "ocr: 本轮强制引擎 = {}",
+        v.as_deref().unwrap_or("（未指定，用全局默认）")
+    ));
+    if let Ok(mut g) = OCR_FORCE_ENGINE.lock() {
+        *g = v;
+    }
+}
+
+fn set_trans_force_engine(engine: Option<String>) {
+    let v = engine
+        .map(|e| e.trim().to_string())
+        .filter(|e| !e.is_empty() && trans_engines::find(e).is_some());
+    win::log(&format!(
+        "trans: 本轮强制引擎 = {}",
+        v.as_deref().unwrap_or("（未指定，用全局默认）")
+    ));
+    if let Ok(mut g) = TRANS_FORCE_ENGINE.lock() {
+        *g = v;
+    }
+}
+
 fn clear_trans_session() {
     if let Ok(mut g) = TRANS_SESSION.lock() {
         *g = None;
@@ -9169,7 +9205,7 @@ fn open_trans_window(text: String, target: String) {
 /// 没给文字也**不报错**：窗口照开，原文框是空的、光标已经落进去 ——
 /// 用户可能是想自己粘贴一段。这比弹一句"先选文字"再让他重来更省事。
 #[crate::t::command]
-fn trans_start(text: Option<String>) {
+fn trans_start(text: Option<String>, engine: Option<String>) {
     if app_locked() {
         // 锁屏窗也是 WebView2 窗口，同样不能建在命令的栈里（理由见
         // open_trans_window 那段注释）—— 甩到后台线程去建。
@@ -9182,6 +9218,8 @@ fn trans_start(text: Option<String>) {
         win::log("trans: 功能已关闭，忽略这次触发");
         return;
     }
+    // 绑定模型的格子（`@trans:<id>`）会带上 engine；普通入口传空 = 用全局默认
+    set_trans_force_engine(engine);
     notify_feature("翻译");
     dismiss_bar();
     open_trans_window(text.unwrap_or_default(), cfg.trans_target);
@@ -9200,7 +9238,19 @@ fn trans_session() -> serde_json::Value {
         .and_then(|g| g.clone())
         .unwrap_or_default();
     let cfg = cfg_snapshot();
-    let plan: Vec<Value> = config::trans_plan(&cfg)
+    let plan_ids: Vec<String> = {
+        let forced = TRANS_FORCE_ENGINE
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+            .filter(|id| trans_engines::find(id).is_some());
+        match forced {
+            // 绑定模型的格子：这次只翻这一家
+            Some(id) => vec![id],
+            None => config::trans_plan(&cfg),
+        }
+    };
+    let plan: Vec<Value> = plan_ids
         .iter()
         .map(|id| {
             let name = trans_engines::find(id).map(|e| e.name).unwrap_or(id.as_str());
@@ -9777,7 +9827,10 @@ fn ocr_plan_with_local_fallback(cfg: &config::Config) -> (Vec<String>, bool) {
 }
 
 /// 进入 OCR 流程（横条上的按钮、Ctrl+Alt+O、托盘菜单都走这里）
-fn ocr_start_flow() {
+fn ocr_start_flow(force_engine: Option<String>) {
+    /* 每进一次流程都重设一次（普通入口传 None → 清掉上一次的绑定），
+     * 免得在网格里点过"百度 OCR"之后，横条上的通用 OCR 也一直只用百度。 */
+    set_ocr_force_engine(force_engine);
     if app_locked() {
         focus_lock_window();
         return;
@@ -11277,7 +11330,7 @@ fn path_kind(path: String) -> String {
 }
 
 #[crate::t::command]
-fn ocr_start() {
+fn ocr_start(engine: Option<String>) {
     // ⚠ 必须脱开命令调用栈，理由和 open_app_picker 一模一样：
     //   配置面板/横条点「开始框选识别」时，本次 invoke 还没返回；就地
     //   `run_on_thread` → `build()` 建框选窗口，主线程建 WebView2 时要回头
@@ -11286,7 +11339,8 @@ fn ocr_start() {
     //   它一旦建到一半卡住、或者建出来又关不掉，整个屏幕的鼠标都会被它吃掉，
     //   用户按 Esc 也没用（钩子和页面都可能在等这把锁），只能强杀进程。
     //   所以这里立刻返回，把活交给后台线程；热键那条路本来就在 spawn 里，不受影响。
-    std::thread::spawn(ocr_start_flow);
+    // 网格里绑定模型的格子（`@ocr:<id>`）会带上 engine；普通入口传空 = 用全局默认
+    std::thread::spawn(move || ocr_start_flow(engine));
 }
 
 #[crate::t::command]
@@ -11480,6 +11534,18 @@ fn online_engine(cfg: &config::Config) -> String {
 ///      「就算我打开了，也要我把本地的识别引擎添加在多引擎识别里面，它才可以」。
 ///   现在本地和别家一样，**被勾选才参与**。
 fn ocr_engine_plan(cfg: &config::Config) -> Vec<String> {
+    /* 0️⃣ 格子绑定了具体模型（`@ocr:<id>`，见 `set_ocr_force_engine`）：
+     *    这一轮**只跑它**。用户原话是"一旦选定某一项，后续相关功能必须直接
+     *    使用该已选定的具体项执行，而不是回退到默认值或其他选项"——
+     *    所以这里连"同时识别"名单都不掺，结果窗也只有这一家。
+     *    全局配置不改：下一轮从横条/快捷键进来时 force 已被 `ocr_start` 清空。 */
+    if let Ok(g) = OCR_FORCE_ENGINE.lock() {
+        if let Some(id) = g.as_ref() {
+            if ocr_engines::find(id).is_some() {
+                return vec![id.clone()];
+            }
+        }
+    }
     let mut out: Vec<String> = Vec::new();
     let def = cfg.ocr_engine.clone();
     if ocr_engines::find(&def).is_some() {
@@ -17672,7 +17738,7 @@ fn build_tray(a: &AppHandle) -> crate::t::Result<()> {
             }
             "toggle" => set_paused(a, !is_paused()),
             "ocr" => {
-                let _ = std::thread::spawn(ocr_start_flow);
+                let _ = std::thread::spawn(|| ocr_start_flow(None));
             }
             "sync" => {
                 // v1.5.13：未解锁不许同步（它会读配置、写备份、可能恢复配置）
@@ -19987,6 +20053,31 @@ mod tests {
         // 本地引擎自己也是有效值
         cfg.ocr_engine = "windows".into();
         assert_eq!(ocr_engine_plan(&cfg), vec!["windows"]);
+    }
+
+    /// v2.8.0：格子绑定了具体模型（`@ocr:<id>`）时，这一轮**只跑它** ——
+    /// 不掺全局默认、也不掺「同时识别」名单（用户原话：一旦选定某一项，
+    /// 后续相关功能必须直接使用该已选定的具体项，而不是回退到默认或其他选项）。
+    #[test]
+    fn 强制引擎时只跑那一家() {
+        let mut cfg = empty_cfg();
+        cfg.ocr_engine = "baidu".into();
+        cfg.ocr_multi = vec!["tencent".into()];
+        // 没指定 → 全局默认 + 同时识别名单
+        let normal = ocr_engine_plan(&cfg);
+        assert!(normal.contains(&"baidu".to_string()));
+
+        set_ocr_force_engine(Some("windows".into()));
+        assert_eq!(ocr_engine_plan(&cfg), vec!["windows"], "绑定后只跑指定那一家");
+
+        // 清掉（普通入口传 None）之后回到全局口径
+        set_ocr_force_engine(None);
+        assert_eq!(ocr_engine_plan(&cfg), normal);
+
+        // 未知 id 当没指定，不能把计划弄空（否则点 OCR 直接没反应）
+        set_ocr_force_engine(Some("不存在的引擎".into()));
+        assert_eq!(ocr_engine_plan(&cfg), normal);
+        set_ocr_force_engine(None);
     }
 
     /// OCR 总开关：老配置缺这个字段必须默认开（以前没有 serde(default)，

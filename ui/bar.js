@@ -3266,6 +3266,13 @@ async function loadGridModels() {
         grab('img_engines_list', 'img'),
         grab('trans_engines_list', 'trans'),
     ]);
+    /* 登记 id → 名字（shared.js 的 QS_MODEL_NAMES）：绑定格子要显示
+     * 「文字识别 · 百度 OCR」，不登记的话只能看到一个 id。 */
+    for (const k of ['ocr', 'img', 'trans']) {
+        for (const m of GRID_MODELS[k]) {
+            if (m && m.id) window.qsRegModelName && window.qsRegModelName(k, m.id, m.name || m.id);
+        }
+    }
 }
 
 /** 内置功能格子的点击动作。
@@ -3276,20 +3283,25 @@ async function loadGridModels() {
  *  改成直连后端命令，和横条上那颗按钮走的是同一条路。 */
 function runGridFunc(key) {
     const t = (currentText || '').trim();
-    if (key === '@ocr') {
-        invoke('ocr_start').catch(() => { });
+    /* 绑定模型的格子（`@ocr:<id>` / `@trans:<id>`）：把 id 一起传给后端，
+     * 这一轮就**只跑这一家**，不回退到设置里的全局默认（用户明确要求）。
+     * 普通哨兵（`@ocr`）照旧传空 = 用全局默认。 */
+    const bound = window.qsFuncBound ? window.qsFuncBound(key) : null;
+    const base = bound ? ('@' + bound.kind) : key;
+    if (base === '@ocr') {
+        invoke('ocr_start', bound ? { engine: bound.id } : {}).catch(() => { });
         return;
     }
-    if (key === '@img') {
+    if (base === '@img') {
         invoke('img_start').catch(() => { });
         return;
     }
-    if (key === '@trans') {
+    if (base === '@trans') {
         // 没文字也照发（后端会开一个空翻译窗让用户自己粘贴），与横条一致
-        invoke('trans_start', { text: t || null }).catch(() => { });
+        invoke('trans_start', { text: t || null, engine: bound ? bound.id : null }).catch(() => { });
         return;
     }
-    if (key === '@wrap') {
+    if (base === '@wrap') {
         openWrapMenu();
     }
 }
@@ -3346,6 +3358,10 @@ let gridPickAt = -1;
 
 /** 选板的过滤胶囊：all / builtin / go / fav / model / web / app / hotkey */
 let gridPickFilter = 'all';
+
+/** 选板里哪些引擎大类是展开的（`{ web: true }`）。默认全收起：
+ *  用户要先看到"有哪些大类"，点开才看子类（和横条「更多引擎」一个节奏）。 */
+let gridPickOpen = {};
 
 /** 选板默认尺寸、下限，以及记忆下来的上次尺寸（拖动右下角改，见 startPickResize）。 */
 const PICK_W0 = 560, PICK_H0 = 470, PICK_MIN_W = 400, PICK_MIN_H = 300;
@@ -3418,15 +3434,21 @@ function gridPickSections() {
 
     /* ④ 三类模型：列出来是为了"能被搜到、能看清有哪些"；加进网格的仍然是那颗
      *    功能格子本身（`@ocr` / `@img` / `@trans`），具体用哪家由设置决定。 */
+    /* 每个模型条目现在的名字是 `@ocr:<id>`（绑定格子），点它加进网格的就是
+     * "这一格固定用百度 OCR"，而不是以前那种"再加一颗通用 OCR 格子、
+     * 用哪家由全局设置决定" —— 用户报的"选了却不生效"就是这个原因。 */
     const addModel = (title, list, sentinel, activeIds) => {
         if (!list.length) return;
-        const items = list.map((m) => ({
-            name: sentinel,
-            label: (m.name || m.id) + (activeIds.has(String(m.id)) ? '（当前使用）' : ''),
-            added: inGrid.has(sentinel),
-            node: () => (window.qsFuncIcon ? window.qsFuncIcon(sentinel) : document.createTextNode('•')),
-        }));
-        if (items.length) out.push({ key: 'model', title, desc: '当前可用的模型', items });
+        const items = list.map((m) => {
+            const bound = sentinel + ':' + m.id;
+            return {
+                name: bound,
+                label: (m.name || m.id) + (activeIds.has(String(m.id)) ? '（当前使用）' : ''),
+                added: inGrid.has(bound),
+                node: () => (window.qsFuncIcon ? window.qsFuncIcon(sentinel) : document.createTextNode('•')),
+            };
+        });
+        if (items.length) out.push({ key: 'model', title, desc: '选中哪一项，这一格就固定用哪一家', items });
     };
     const imgOn = new Set(((window.CONF && window.CONF.imgEngines) || []).map(String));
     addModel('文字识别模型', GRID_MODELS.ocr, '@ocr',
@@ -3641,6 +3663,7 @@ function resetGridTransient() {
 async function openGridPicker(index) {
     gridPickAt = typeof index === 'number' ? index : -1;
     gridPickFilter = 'all';
+    gridPickOpen = {};
     barEl.classList.add('qs-gpicking');
     // 每次打开都从配置读一次：别处改了配置 / 首次启动都走同一条路
     pickSizeFromConf();
@@ -3840,10 +3863,21 @@ function renderPickFilters(box, secs) {
     }
 }
 
-/** 分组标题（大类）：标题 + 描述 + 条数 */
-function pickBlockHead(title, desc, n) {
-    const h = document.createElement('div');
-    h.className = 'qs-gpick-block';
+/** 分组标题（大类）：标题 + 描述 + 条数。
+ *
+ *  `opts.onToggle` 存在时整行变成**可点开的折叠条**（v2.8.0，用户要求
+ *  "网页引擎"这类大类和横条「更多引擎」一样：先看到大类，点开才看子类）。 */
+function pickBlockHead(title, desc, n, opts) {
+    const o = opts || {};
+    const h = document.createElement(o.onToggle ? 'button' : 'div');
+    h.className = 'qs-gpick-block' + (o.onToggle ? ' qs-gpick-block-tog' + (o.open ? ' on' : '') : '');
+    if (o.onToggle) h.type = 'button';
+    if (o.onToggle) {
+        const chev = document.createElement('span');
+        chev.className = 'qs-gpick-chev';
+        chev.textContent = o.open ? '▾' : '▸';
+        h.appendChild(chev);
+    }
     const t = document.createElement('span');
     t.className = 'qs-gpick-block-t';
     t.textContent = title;
@@ -3859,6 +3893,9 @@ function pickBlockHead(title, desc, n) {
         d.className = 'qs-gpick-block-d';
         d.textContent = desc;
         h.appendChild(d);
+    }
+    if (o.onToggle) {
+        h.addEventListener('click', () => o.onToggle());
     }
     return h;
 }
@@ -3930,7 +3967,12 @@ function renderGridPickBody(body, kw, secs) {
             continue;
         }
 
-        /* —— 引擎：主题组 → 分类 → 条目 —— */
+        /* —— 引擎：大类（可点开）→ 主题组 → 分类 → 条目 ——
+         *
+         * 折叠口径和横条「更多引擎」对齐（用户要求两处交互统一）：
+         * 默认只看到「网页引擎 700 / 软件引擎 60 / 快捷键引擎 20」三行，
+         * 点一行才展开它下面的主题组和分类。搜索时自动展开命中部分，
+         * 否则搜出来却是空的（那才是最难受的）。 */
         const themes = [];
         for (const th of (sec.themes || [])) {
             const cats = [];
@@ -3942,7 +3984,15 @@ function renderGridPickBody(body, kw, secs) {
         }
         if (!themes.length) continue;
         const total = themes.reduce((n, th) => n + th.cats.reduce((m, c) => m + c.items.length, 0), 0);
-        body.appendChild(pickBlockHead(sec.title, sec.desc, total));
+        const open = !!kw || !!gridPickOpen[sec.key];
+        body.appendChild(pickBlockHead(sec.title, sec.desc, total, {
+            open,
+            onToggle: () => {
+                gridPickOpen[sec.key] = !gridPickOpen[sec.key];
+                renderGridPicker();
+            },
+        }));
+        if (!open) continue;
         for (const th of themes) {
             const el = document.createElement('div');
             el.className = 'qs-gpick-theme';
@@ -4029,6 +4079,78 @@ function gridCellMode(name, g) {
     const ov = map[name];
     if (ov === 'icon' || ov === 'text' || ov === 'both') return ov;
     return (g && g.showLabel === false) ? 'icon' : 'both';
+}
+
+/* ---------------- 编辑模式下拖动调尺寸 ---------------- */
+
+/** 抓手容器只在编辑模式存在；重复调用是幂等的（每帧都会走一次）。 */
+function ensureGridResizeHandles() {
+    let wrap = barEl.querySelector('.qs-grz-wrap');
+    if (!gridEdit) {
+        if (wrap) wrap.remove();
+        return;
+    }
+    if (wrap) return;
+    wrap = document.createElement('div');
+    wrap.className = 'qs-grz-wrap';
+    const mk = (dir, cls, title) => {
+        const h = document.createElement('div');
+        h.className = 'qs-grz ' + cls;
+        h.title = title;
+        h.addEventListener('pointerdown', (e) => startGridResize(e, dir));
+        wrap.appendChild(h);
+    };
+    mk('r', 'qs-grz-r', '拖动调整格子宽度');
+    mk('b', 'qs-grz-b', '拖动调整格子高度');
+    mk('c', 'qs-grz-c', '拖动同时调整宽高');
+    barEl.appendChild(wrap);
+}
+
+/** 拖动改格子宽高并落库（`set_grid_size`，和其它外观参数同一条路）。
+ *
+ *  为什么改的是**格子宽高**而不是面板宽高：网格尺寸 = 列×格子宽 + 间距，
+ *  改格子宽高才是用户心里那个"拉大一点"；直接改面板宽会遇到"多出来的宽度
+ *  分给哪一列"，还会破坏 v2.6.8 刚做好的四边等距留白。
+ *
+ *  拖动过程中只改 CSS 变量 + pushLayout（即时跟手），松手才写配置 ——
+ *  每移动一像素就落一次盘会把配置写爆。 */
+function startGridResize(e, dir) {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const g = gridLast || {};
+    const cols = Math.max(1, Math.min(10, g.cols | 0 || 3));
+    const rows = Math.max(1, Math.min(10, g.rows | 0 || 3));
+    const gap = Math.max(0, Math.min(24, g.gap | 0));
+    const radius = Math.max(0, Math.min(24, g.radius | 0 || (g.radius === 0 ? 0 : 12)));
+    const cw0 = Math.max(40, Math.min(260, g.cellW | 0 || 104));
+    const ch0 = Math.max(40, Math.min(200, g.cellH | 0 || 76));
+    const x0 = e.clientX, y0 = e.clientY;
+    let cw = cw0, ch = ch0, last = 0, moved = false;
+
+    const apply = (ev) => {
+        const dx = ev.clientX - x0, dy = ev.clientY - y0;
+        if (dir === 'r' || dir === 'c') cw = Math.max(40, Math.min(260, Math.round(cw0 + dx / cols)));
+        if (dir === 'b' || dir === 'c') ch = Math.max(40, Math.min(200, Math.round(ch0 + dy / rows)));
+        barEl.style.setProperty('--gcw', cw + 'px');
+        barEl.style.setProperty('--gch', ch + 'px');
+        barEl.classList.toggle('qs-gcompact', ch < 66);
+        moved = true;
+        const now = performance.now();
+        if (now - last > 40) { last = now; pushLayout(); }
+    };
+    const up = () => {
+        window.removeEventListener('pointermove', apply, true);
+        window.removeEventListener('pointerup', up, true);
+        if (!moved) return;
+        pushLayout();
+        if (gridLast) { gridLast.cellW = cw; gridLast.cellH = ch; }
+        invoke('set_grid_size', { rows, cols, cellW: cw, cellH: ch, gap, radius })
+            .catch(() => { });
+        showBarTip('格子 ' + cw + ' × ' + ch);
+    };
+    window.addEventListener('pointermove', apply, true);
+    window.addEventListener('pointerup', up, true);
 }
 
 function renderGrid(g) {
@@ -4217,7 +4339,12 @@ function renderGrid(g) {
             enginesEl.appendChild(cell);
             continue;
         }
-        const sent = GRID_SENTINELS[name];
+        /* 绑定模型的格子（`@ocr:baidu` 之类）也走这一支：图标用**基础哨兵**
+         * 那张（qsFuncIcon 内部会归一），标签用 qsDisplayName —— 它会说成
+         * 「文字识别 · 百度 OCR」，比只有"文字识别"更能看出这一格绑了谁。 */
+        const boundFunc = window.qsFuncBound ? window.qsFuncBound(name) : null;
+        const sent = GRID_SENTINELS[name]
+            || (boundFunc ? GRID_SENTINELS['@' + boundFunc.kind] : null);
         if (sent) {
             cell.dataset.sentinel = name;
             const inner = document.createElement('span');
@@ -4227,9 +4354,10 @@ function renderGrid(g) {
             cell.appendChild(inner);
             const lb = document.createElement('span');
             lb.className = 'qs-glabel';
-            lb.textContent = sent.label;
+            const lbl = window.qsDisplayName ? window.qsDisplayName(name) : sent.label;
+            lb.textContent = lbl;
             cell.appendChild(lb);
-            cell.title = sent.label;
+            cell.title = lbl;
             cell.addEventListener('click', () => runGridFunc(name));
         } else if (typeof name === 'string' && (name.startsWith(window.QS_GO_PREFIX || '@go:') || name.startsWith(QS_APP_PREFIX) || name.startsWith(QS_FAV_PREFIX))) {
             // 哨兵项（直达 / 外部软件 / 收藏夹）：图标与点击都复用横条那套
@@ -4299,6 +4427,10 @@ function renderGrid(g) {
         cell.classList.add('qs-gmode-' + gridCellMode(name, g));
         enginesEl.appendChild(cell);
     }
+    /* 编辑模式下给面板挂三个"拖边调尺寸"抓手（v2.8.0，用户要求"换出的网格页
+     * 里点编辑后能快捷调整长宽"）—— 和设置页预览里那三个是同一套手感。
+     * 退出编辑态就撤掉：只读时不该出现能拖的东西。 */
+    ensureGridResizeHandles();
     // 交给常规的尺寸上报：Rust 会按网格实际大小把窗口撑开
     pushLayout();
 }

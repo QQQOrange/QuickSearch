@@ -92,7 +92,10 @@ There are **two** surfaces, with separate content, styling and settings:
   **follow default / icon+name / icon only / name only**. The default lives in
   *Appearance → Tile text*; this only overrides the one item — e.g. set a shortcut tile to
   *name only* to see just its note (the page title). *Add content* also lists **OCR models / image-search models / translation
-  models** as their own groups (searching "baidu" finds both Baidu search and Baidu OCR), plus
+  models** as their own groups (searching "baidu" finds both Baidu search and Baidu OCR).
+  **Model entries bind that specific provider**: picking "Baidu OCR" puts a tile on the grid that
+  always uses Baidu OCR — it never falls back to the global default, so several providers can
+  coexist as separate tiles. Also
   **function tiles** such as **Wrap symbols**: tap it to open the symbol menu and **wrap, unwrap
   or switch** the selected text (same thing as the `[ ]` button on the bar). Which OCR / image /
   translation provider a function tile uses is the one selected in **Extras** (rows marked
@@ -117,7 +120,12 @@ When you use **the selection bar / the grid page / OCR / translation / image sea
 
 - Two buttons at the top-right: **✏️ Edit** (every tile gets an **×**; click it to remove that tile,
   click the button again to leave edit mode) and **⚙ Settings** (jump to this settings tab).
+- In edit mode you can **drag the panel edges to resize**: the right edge, bottom edge and
+  bottom-right corner each have a drag strip (same feel as the ones in the settings preview);
+  the size is saved when you let go.
 - Clicking an **empty tile** opens the *Add content* panel; pick one and it fills that tile.
+  The three engine groups are **collapsed by default** (web / app / hotkey) — click one to expand
+  its themes and categories, the same rhythm as the bar's *More engines*; searching auto-expands.
   The panel is grouped three levels deep (**built-in / shortcuts / favourites / models / web / app /
   hotkey → theme → category**) and has a search box; items already on the grid are ticked and greyed.
   **Drag its bottom-right corner to resize it — the size is remembered**, including after a restart.

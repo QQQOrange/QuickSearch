@@ -2124,7 +2124,37 @@ button.fav-grp-head:focus-visible {
     padding-right: 4px;
 }
 
-/* 一级：大类标题（网页引擎 / 软件引擎 / 内置功能 …） */
+/* 一级：大类标题（网页引擎 / 软件引擎 / 内置功能 …）
+ *
+ * v2.8.0：引擎那几个大类变成**可点开的折叠条**（和横条「更多引擎」一个节奏：
+ * 先看到大类，点开才看子类）。折叠条是 <button>，所以要先抹掉按钮自带样式。 */
+.qs-gpick-block-tog {
+    width: 100%;
+    border: none;
+    background: transparent;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+
+.qs-gpick-block-tog:hover .qs-gpick-block-t {
+    color: var(--qs-accent, #2563EB);
+}
+
+.qs-gpick-block-tog .qs-gpick-chev {
+    flex: none;
+    width: 12px;
+    font-size: 10px;
+    color: var(--qs-fg-dim);
+    opacity: .85;
+    transition: transform .12s ease;
+}
+
+/* 展开态：标题用强调色，一眼看出"这组开着" */
+.qs-gpick-block-tog.on .qs-gpick-block-t {
+    color: var(--qs-accent, #2563EB);
+}
+
 .qs-gpick-block {
     display: flex;
     align-items: baseline;
@@ -2594,6 +2624,59 @@ button.fav-grp-head:focus-visible {
 }
 
 /* 有 × 的格子必须是定位上下文 —— 见上面 .qs-gedit .qs-gcell 那段 */
+
+/* ---------------- 编辑态：拖边调尺寸的抓手（v2.8.0） ----------------
+ *
+ * 和设置页预览里那三个是同一套手感：右边缘改宽、下边缘改高、右下角一起改。
+ * 抓手铺在 .bar 的**内边距带**里（面板四边 8px），不压格子内容；
+ * 平时透明，鼠标进到面板上才显出来，免得网格页看着多了几条蓝线。 */
+.qs-grz-wrap {
+    position: absolute;
+    inset: 0;
+    z-index: 6;
+    pointer-events: none;
+}
+
+.qs-grz {
+    position: absolute;
+    pointer-events: auto;
+    border-radius: 4px;
+    background: rgba(78, 110, 242, .16);
+    border: 1px solid rgba(78, 110, 242, .45);
+    opacity: 0;
+    transition: opacity .12s ease;
+}
+
+.bar.qs-grid:hover .qs-grz,
+.qs-grz:active {
+    opacity: .95;
+}
+
+.qs-grz-r {
+    right: 1px;
+    top: 34px;
+    bottom: 9px;
+    width: 6px;
+    cursor: ew-resize;
+}
+
+.qs-grz-b {
+    left: 9px;
+    right: 9px;
+    bottom: 1px;
+    height: 6px;
+    cursor: ns-resize;
+}
+
+.qs-grz-c {
+    right: 1px;
+    bottom: 1px;
+    width: 12px;
+    height: 12px;
+    cursor: nwse-resize;
+    background: rgba(78, 110, 242, .5);
+    border-color: rgba(78, 110, 242, .8);
+}
 
 /* 编辑按钮的"已开启"态：和悬停同一套强调色，一眼看出正在编辑 */
 .qs-ghead .qs-gbtn.on {
