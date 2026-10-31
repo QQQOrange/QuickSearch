@@ -4254,22 +4254,41 @@ function gridLookDraft() {
 /** 预览用的格子内容：每个格子的图标**在设置页这边就序列化好**，
  *  再递给 iframe —— 这样预览里那张图和横条上那张是同一张
  *  （img 的 src / 统一图标大小算出的 transform 都原样带过去）。 */
+/** 内置功能哨兵：这四个在真网格里用的是 `qsFuncIcon()` 画的图（和横条同一张）。 */
+const PREVIEW_FUNC_SENTINELS = ['@ocr', '@trans', '@img', window.QS_WRAP || '@wrap'];
+
+/** 一格最终用哪种显示样式 —— 和 bar.js 的 `gridCellMode()` **同一口径**：
+ *  单项覆盖优先，否则跟网格级默认（`gridShowLabel`）走。 */
+function gridItemMode(name) {
+    const map = (CONF && CONF.gridItemStyle) || {};
+    const ov = map[name];
+    if (ov === 'icon' || ov === 'text' || ov === 'both') return ov;
+    return (CONF && CONF.gridShowLabel === false) ? 'icon' : 'both';
+}
+
 function gridPreviewItems() {
-    const glyph = { '@ocr': '🔤', '@trans': '🌐', '@img': '🖼' };
     return gridItemsNow().map((name) => {
         const label = window.qsDisplayName ? window.qsDisplayName(name) : String(name);
-        if (glyph[name]) {
-            return { label, iconHtml: '<span style="font-size:18px;line-height:1">' + glyph[name] + '</span>' };
-        }
         let node = null;
         try {
-            if (typeof name === 'string' && name.startsWith(window.QS_GO_PREFIX || '@go:')) {
+            if (PREVIEW_FUNC_SENTINELS.indexOf(name) >= 0 && typeof window.qsFuncIcon === 'function') {
+                /* ⚠ v2.7.0：这里原来对 @ocr/@trans/@img 用的是 emoji（🔤🌐🖼），
+                 * 而真网格用的是 `qsFuncIcon()` 的 SVG —— 两处画出来不是一个东西。
+                 * @wrap 连 emoji 都没有，直接落到设置页的字母徽标分支，于是预览里
+                 * 是一个"W"、真网格里是那颗 [ ] 线框图标（用户报的不一致）。
+                 * 现在四个内置功能一律走 qsFuncIcon（shared.js，横条也用它）。 */
+                node = window.qsFuncIcon(name);
+            } else if (typeof name === 'string' && name.startsWith(window.QS_GO_PREFIX || '@go:')) {
                 node = window.qsGoIconNode(name);
+            } else if (typeof name === 'string' && name.startsWith(window.QS_APP_PREFIX || '@app:')) {
+                node = window.qsAppIconNode ? window.qsAppIconNode(name) : null;
+            } else if (typeof name === 'string' && name.startsWith(window.QS_FAV_PREFIX || '@fav:')) {
+                node = window.qsFavIconNode ? window.qsFavIconNode(name) : null;
             } else {
                 node = iconNode(name, 18);
             }
         } catch (_) { /* 图标取不到就空着，不影响预览排版 */ }
-        return { label, iconHtml: node ? node.outerHTML : '' };
+        return { label, mode: gridItemMode(name), iconHtml: node ? node.outerHTML : '' };
     });
 }
 
@@ -4286,6 +4305,20 @@ function pushGridPreview() {
      * 「在深色背景上预览」同一个道理），否则深色网格贴在浅色底上看着很割裂。 */
     const wrapEl = $('gridPreviewWrap');
     if (wrapEl) wrapEl.setAttribute('data-dark', dark ? '1' : '0');
+    const pvItems = gridPreviewItems();
+    const pvCols = Math.max(1, Math.min(10, Number(look.cols) || 3));
+    const pvMinRows = Math.max(1, Math.min(10, Number(look.rows) || 3));
+    const pvNeed = Math.min(10, Math.ceil(pvItems.length / pvCols));
+    const pvRows = Math.max(pvMinRows, pvNeed);
+    // 自动长行时在「外观」下面给一句说明，用户才知道行数为什么和填的不一样
+    const rowsHint = $('gridRowsHint');
+    if (rowsHint) {
+        rowsHint.textContent = pvNeed > pvMinRows
+            ? `当前内容 ${pvItems.length} 项、${pvCols} 列 → 实际显示 ${pvRows} 行`
+              + `（上面填的 ${pvMinRows} 是"最少几行"，装不下会自动往下长）`
+            : '';
+        rowsHint.hidden = !(pvNeed > pvMinRows);
+    }
     try {
         fr.contentWindow.postMessage({
             __qsGridPreview: true,
@@ -4301,14 +4334,28 @@ function pushGridPreview() {
                     btn: num(CONF && CONF.iconSize, 30),
                     shadow: !!(CONF && CONF.shadow),
                 },
-                grid: Object.assign({
-                    items: gridPreviewItems(),
+                grid: Object.assign({}, look, {
+                    items: pvItems,
                     // 格子里要不要显示名称（和真网格同一个字段）
                     showLabel: (CONF && CONF.gridShowLabel) !== false,
-                }, look),
+                    /* 行数：设置里填的是**最少几行**，内容多到放不下就自动往下长
+                     * —— 和 bar.js 的 renderGrid 同一口径（max(配置行数,⌈项数/列数⌉)）。
+                     * 所以「3×3 加到第 10 项」在预览里也会立刻多出第四行。 */
+                    rows: pvRows,
+                }),
             },
         }, '*');
     } catch (_) { /* iframe 还没加载完，等它的 ready 消息 */ }
+}
+
+/** 预览拖尺寸时的节流保存：拖一下会连发几十条，攒到停手 350ms 再落库。 */
+let gridLookSaveTimer = 0;
+function scheduleGridLookSave() {
+    if (gridLookSaveTimer) clearTimeout(gridLookSaveTimer);
+    gridLookSaveTimer = setTimeout(() => {
+        gridLookSaveTimer = 0;
+        saveGridLook(true);
+    }, 350);
 }
 
 /** 保存外观（行列 / 格子尺寸 / 间距 / 圆角）。 */
@@ -4355,6 +4402,25 @@ window.addEventListener('message', (e) => {
     const d = e.data || {};
     if (d.__qsGridPreviewReady) {
         pushGridPreview();
+        return;
+    }
+    /* v2.7.0：预览里拖动右/下边缘改格子宽高 —— 同步回数字框并落库（节流 350ms）。
+     * 不直接 set_setting 是因为「保存外观」还要连带刷新列表与提示，走同一条路更一致。 */
+    if (d.__qsGridPreviewResize) {
+        const r = d.__qsGridPreviewResize;
+        if ($('gridCellW') && Number.isFinite(Number(r.cellW))) $('gridCellW').value = Math.round(Number(r.cellW));
+        if ($('gridCellH') && Number.isFinite(Number(r.cellH))) $('gridCellH').value = Math.round(Number(r.cellH));
+        scheduleGridLookSave();
+        return;
+    }
+    /* v2.7.0：预览里拖动格子调整顺序 —— 和「格子内容」列表的拖动排序落同一条路 */
+    if (d.__qsGridPreviewReorder) {
+        const { from, to } = d.__qsGridPreviewReorder;
+        const cur = gridItemsNow().slice();
+        if (from === to || from == null || to == null || !cur[from]) return;
+        const [moved] = cur.splice(from, 1);
+        cur.splice(Math.max(0, Math.min(cur.length, to)), 0, moved);
+        gridSaveItems(cur, '已调整顺序：' + (window.qsDisplayName ? window.qsDisplayName(moved) : moved));
         return;
     }
     if (d.__qsGridPreviewHeight) {
@@ -4408,7 +4474,20 @@ async function gridSaveItems(items, msg) {
         CONF = window.CONF = await invoke('get_config');
         renderGridItems();
         renderGridPages();
+        pushGridPreview();
         if (msg) gridMsg('gridItemsMsg', msg);
+    } catch (e) {
+        gridMsg('gridItemsMsg', String(e || '保存失败'), true);
+    }
+}
+
+/** 保存单项显示样式（整张表写回；选「跟随默认」就是把它从表里删掉）。 */
+async function gridSaveItemStyle(map) {
+    try {
+        await invoke('set_setting', { key: 'gridItemStyle', value: map });
+        CONF = window.CONF = await invoke('get_config');
+        renderGridItems();
+        pushGridPreview();
     } catch (e) {
         gridMsg('gridItemsMsg', String(e || '保存失败'), true);
     }
@@ -4442,7 +4521,13 @@ function renderGridItems() {
     if (!box) return;
     box.textContent = '';
     const items = gridItemsNow();
-    const total = (CONF && CONF.gridRows || 3) * (CONF && CONF.gridCols || 3);
+    /* 容量按"有效行数"算（v2.7.0）：行数会随内容自动增长，所以这里的"超出"标记
+     * 只在真的顶到 10 行上限（100 格）时才会出现 —— 以前按配置行数算，
+     * 内容一多就全都标着"超出格子数（不显示）"，其实网格页早自己长行了。 */
+    const totalCols = Math.max(1, (CONF && CONF.gridCols) || 3);
+    const minRows = Math.max(1, (CONF && CONF.gridRows) || 3);
+    const effRows = Math.max(minRows, Math.min(10, Math.ceil(items.length / totalCols)));
+    const total = effRows * totalCols;
     if (!items.length) {
         const d = document.createElement('div');
         d.className = 'hint';
@@ -4491,6 +4576,26 @@ function renderGridItems() {
 
         const ops = document.createElement('span');
         ops.className = 'ops';
+        /* v2.7.0：单项显示样式 —— 网格级「外观 → 格子文字」是默认值，
+         * 这里只覆盖**这一项**（用户口径：网格级作为默认样式，某一项可单独设）。
+         * 空值 = 跟随默认，所以选「跟随默认」就是把它从表里摘掉。 */
+        const st = document.createElement('select');
+        st.className = 'txt mini-sel';
+        st.title = '这一格显示什么（「跟随默认」= 跟上面「格子文字」走）';
+        for (const [v, t] of [['', '跟随默认'], ['both', '图标+名称'], ['icon', '只图标'], ['text', '只名称']]) {
+            const o = document.createElement('option');
+            o.value = v;
+            o.textContent = t;
+            st.appendChild(o);
+        }
+        const smap = (CONF && CONF.gridItemStyle) || {};
+        st.value = (smap[name] === 'icon' || smap[name] === 'text' || smap[name] === 'both') ? smap[name] : '';
+        st.addEventListener('change', () => {
+            const next = Object.assign({}, (CONF && CONF.gridItemStyle) || {});
+            if (st.value) next[name] = st.value; else delete next[name];
+            gridSaveItemStyle(next);
+        });
+        ops.appendChild(st);
         const del = document.createElement('button');
         del.className = 'mini';
         del.type = 'button';

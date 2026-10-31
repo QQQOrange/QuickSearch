@@ -637,6 +637,19 @@ pub fn pick_grid_page(cfg: &Config, app: &str) -> usize {
     grid_page_index(cfg, &cfg.grid_app_pages[bi].page).unwrap_or(fallback)
 }
 
+/// 单项显示样式的合法值（`icon` 只图标 / `text` 只名称 / `both` 图标+名称）。
+///
+/// 不合法的一律当"没设置"——这类值只可能来自手改配置或旧备份，
+/// 与其猜用户想干什么，不如老老实实回落到网格级默认。
+pub fn grid_item_style_valid(v: &str) -> Option<&'static str> {
+    match v.trim() {
+        "icon" => Some("icon"),
+        "text" => Some("text"),
+        "both" => Some("both"),
+        _ => None,
+    }
+}
+
 /// 网格页归一：老配置补页、修 id/名字、清悬空绑定、同步 `grid_list` 镜像。
 ///
 /// 返回改动条数（只用于日志）。
@@ -723,6 +736,26 @@ pub fn normalize_grid_pages(c: &mut Config) -> usize {
     if c.grid_list != mirror {
         c.grid_list = mirror;
         changed += 1;
+    }
+
+    /* ⑥ 单项显示样式：只留合法值 + 去掉空键。
+     *    键是格子里存的名字，用户把那一项删掉之后这里会留一条"孤儿"，
+     *    但**故意不清** —— 删了再加回来时样式还在，比"又要重设一遍"友好。 */
+    let before_style = c.grid_item_style.len();
+    let valid: std::collections::BTreeMap<String, String> = c
+        .grid_item_style
+        .iter()
+        .filter_map(|(k, v)| {
+            let key = k.trim();
+            if key.is_empty() {
+                return None;
+            }
+            grid_item_style_valid(v).map(|s| (key.to_string(), s.to_string()))
+        })
+        .collect();
+    if valid.len() != before_style {
+        changed += before_style - valid.len();
+        c.grid_item_style = valid;
     }
 
     changed
@@ -1495,6 +1528,15 @@ pub struct Config {
     /// 名称是"这格是干什么的"的主要线索，不能默认藏起来。
     #[serde(default = "default_true")]
     pub grid_show_label: bool,
+    /// **单项显示样式覆盖**（v2.7.0）：键 = 格子里存的名字（引擎名 / `@ocr` / `@go:<id>` …），
+    /// 值 = `icon`（只显示图标）/ `text`（只显示名称）/ `both`（图标 + 名称）。
+    ///
+    /// 没写进这张表的格子都跟着 `grid_show_label` 走 —— 用户口径：
+    /// 「网格级设置作为默认样式，某一项可单独设置」。典型用法：
+    /// 智能直达那一格的备注是一长串网页标题，只显示文字反而更好认。
+    /// 值不合法的一律当"没设置"（见 `grid_item_style_valid`）。
+    #[serde(default)]
+    pub grid_item_style: std::collections::BTreeMap<String, String>,
     /// 是否启用网格页。关掉后快捷键不再唤起它（内容与配置都留着）。
     #[serde(default = "default_true")]
     pub grid_enable: bool,
@@ -2053,6 +2095,7 @@ impl Default for Config {
             grid_gap: default_grid_gap(),
             grid_radius: default_grid_radius(),
             grid_show_label: true,
+            grid_item_style: std::collections::BTreeMap::new(),
             grid_enable: true,
             grid_click: default_grid_click(),
             grid_allow_add: true,

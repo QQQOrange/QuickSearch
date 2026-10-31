@@ -2349,6 +2349,77 @@ button.fav-grp-head:focus-visible {
 }
 
 /* ==================================================================
+ * 每格显示样式（v2.7.0）
+ *
+ * bar.js 的 `gridCellMode()` 给每一格算出最终模式并挂类名：
+ *   .qs-gmode-both  图标 + 名称（默认）
+ *   .qs-gmode-icon  只显示图标
+ *   .qs-gmode-text  只显示名称（居中，最多两行）
+ *
+ * 为什么是"逐格"而不是整条一个开关：用户口径是「网格级设置作为默认样式，
+ * 某一项可以单独设」。所以网格级的 `grid_show_label` 只提供默认值，
+ * 单项覆盖（`grid_item_style`）必须能压过它 —— 整条一个类做不到这件事。
+ * ================================================================== */
+
+/* 格子矮（< 66px）时的**紧凑排版**：横过来，图标在左、名称在右。
+ *
+ * v2.6.x 那时的做法是"高度 < 66px 就直接不显示名称"，用户报的问题正是这个：
+ * 明明设了「图标 + 名称」，格子一调矮就只剩图标。横排之后 40px 高的格子
+ * 也放得下一行字，名称不用再被牺牲。 */
+.bar.qs-grid.qs-gcompact .qs-gcell {
+    flex-direction: row;
+    gap: 5px;
+    padding: 3px 5px;
+}
+
+.bar.qs-grid.qs-gcompact .qs-gicon {
+    width: min(20px, max(12px, calc(var(--gch, 76px) - 22px)));
+    height: min(20px, max(12px, calc(var(--gch, 76px) - 22px)));
+    font-size: 13px;
+}
+
+.bar.qs-grid.qs-gcompact .qs-glabel {
+    flex: 1 1 auto;
+    min-width: 0;
+    font-size: 11.5px;
+    text-align: left;
+}
+
+.bar.qs-grid .qs-gcell.qs-gmode-icon .qs-glabel {
+    display: none;
+}
+
+.bar.qs-grid .qs-gcell.qs-gmode-icon {
+    gap: 0;
+}
+
+/* 图标 + 名称：显式声明一次，免得被旧的 `.qs-gnolabel`（老预览页还在挂）压掉 */
+.bar.qs-grid .qs-gcell.qs-gmode-both .qs-glabel {
+    display: block;
+}
+
+/* 只显示名称：图标整块藏掉，名称居中、最多两行（放不下就省略，不撑破格子） */
+.bar.qs-grid .qs-gcell.qs-gmode-text .qs-gicon {
+    display: none;
+}
+
+.bar.qs-grid .qs-gcell.qs-gmode-text .qs-glabel {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    text-align: center;
+    font-size: 11.5px;
+    line-height: 1.25;
+    color: var(--qs-fg);
+}
+
+.bar.qs-grid.qs-gcompact .qs-gcell.qs-gmode-text .qs-glabel {
+    text-align: center;
+}
+
+/* ==================================================================
  * 包裹符号
  *
  * v2.6.3：横条上那颗"常驻"的包裹按钮已删除 —— 入口统一由 bar_list 里的

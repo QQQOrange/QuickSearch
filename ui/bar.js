@@ -4019,12 +4019,24 @@ function exitGridMode() {
 }
 
 /** 画网格页。`g` = { rows, cols, cellW, cellH, items[] } */
+/** 一格最终用哪种显示样式：单项覆盖优先，否则跟网格级默认走。
+ *
+ *  返回值只有三种：`icon`（只图标）/ `text`（只名称）/ `both`（图标 + 名称）。
+ *  设置页的预览读的是同一张表（`CONF.gridItemStyle`），所以预览和真网格
+ *  不会各算一套 —— 用户报的"预览里是文字、弹出来是图标"就是两边算法分叉导致的。 */
+function gridCellMode(name, g) {
+    const map = (window.CONF && window.CONF.gridItemStyle) || {};
+    const ov = map[name];
+    if (ov === 'icon' || ov === 'text' || ov === 'both') return ov;
+    return (g && g.showLabel === false) ? 'icon' : 'both';
+}
+
 function renderGrid(g) {
     gridOn = true;
     // 记住这一次的载荷：往格子里加完内容要按它重画（后端广播只带 config，
     // 不会重发 grid 载荷），见 gridAddItem。
     gridLast = g;
-    const rows = Math.max(1, Math.min(10, g.rows | 0 || 3));
+    const cfgRows = Math.max(1, Math.min(10, g.rows | 0 || 3));
     const cols = Math.max(1, Math.min(10, g.cols | 0 || 3));
     const cw = Math.max(40, Math.min(260, g.cellW | 0 || 104));
     const ch = Math.max(40, Math.min(200, g.cellH | 0 || 76));
@@ -4038,6 +4050,11 @@ function renderGrid(g) {
     if (g.__fresh !== false) gridPageIdx = wantIdx;
     if (g.app !== undefined) gridApp = String(g.app || '');
     const items = Array.isArray(gridPageNow().items) ? gridPageNow().items : [];
+    /* 容量与溢出（v2.7.0）：设置里的「行」只是**最少几行**。
+     * 3×3 加到第 10 项时自动往下长一行（3 列 → 4 行 12 格），
+     * 删回去之后又自动收回 3 行 —— 行数始终等于 max(配置行数, ⌈项数/列数⌉)。
+     * 上限 10 行（和设置页的数字框一致），再多就按 100 格算。 */
+    const rows = Math.max(cfgRows, Math.min(10, Math.ceil(items.length / cols)));
 
     // 间距与格子圆角：和设置页预览取自同一份配置（gap / radius）
     const gap = Math.max(0, Math.min(24, g.gap | 0 || (g.gap === 0 ? 0 : 8)));
@@ -4049,9 +4066,15 @@ function renderGrid(g) {
     barEl.classList.add('qs-grid');
     /* 「格子文字」：默认显示名称；用户在 设置 → 网格页设置 → 外观 里选"只显示图标"
      * 时整条藏掉名称（格子会显得更清爽，小尺寸格子也不会被文字挤爆）。 */
-    /* 高度小于 66px 时**自动只显图标**：那时图标 + 名称根本放不下，
-     * 强行并排只会把字裁成半截（用户把格子调矮时的观感）。 */
-    barEl.classList.toggle('qs-gnolabel', g.showLabel === false || ch < 66);
+    /* 「格子文字」现在分两层（v2.7.0）：
+     *   ① 网格级默认 = `showLabel`（false → 只显示图标）；
+     *   ② 单项覆盖 = CONF.gridItemStyle[名字]（icon / text / both）。
+     * 最终模式算在**每一格**上（.qs-gmode-*），不再用整条 `.qs-gnolabel` ——
+     * 因为单项覆盖必须能压过网格级默认（用户口径：网格级是默认样式）。
+     * 另外：格子矮于 66px 时**不再悄悄把名称藏掉**（用户报的就是这个），
+     * 改成切紧凑排版 `.qs-gcompact`（图标在左、名称在右），名称照样看得见。 */
+    barEl.classList.remove('qs-gnolabel');
+    barEl.classList.toggle('qs-gcompact', ch < 66);
     barEl.style.setProperty('--gcols', String(cols));
     barEl.style.setProperty('--grows', String(rows));
     barEl.style.setProperty('--gcw', cw + 'px');
@@ -4221,8 +4244,12 @@ function renderGrid(g) {
             const lb = document.createElement('span');
             lb.className = 'qs-glabel';
             const it = window.qsGoBySentinel(name) || qsAppBySentinel(name) || favGroupBySentinel(name);
-            lb.textContent = (it && it.name)
-                || (window.qsDisplayName ? window.qsDisplayName(name) : name);
+            /* 智能直达的名字用 `qsGoLabel`（备注 > 名称 > 目标）—— 和横条、选板、
+             * 设置列表同一口径。v2.7.0 之前这里读的是 `it.name`，于是"只显示文字"
+             * 模式下看到的是当初起的名字，而不是用户想看的网页标题（备注）。 */
+            lb.textContent = (name.startsWith(window.QS_GO_PREFIX) && window.qsGoLabel)
+                ? window.qsGoLabel(it || {})
+                : ((it && it.name) || (window.qsDisplayName ? window.qsDisplayName(name) : name));
             cell.appendChild(lb);
             cell.title = lb.textContent;
             cell.addEventListener('click', () => {
@@ -4269,6 +4296,7 @@ function renderGrid(g) {
             });
             cell.appendChild(del);
         }
+        cell.classList.add('qs-gmode-' + gridCellMode(name, g));
         enginesEl.appendChild(cell);
     }
     // 交给常规的尺寸上报：Rust 会按网格实际大小把窗口撑开

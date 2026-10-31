@@ -13,7 +13,12 @@
       会把整页样式冲掉；用 iframe 天然隔离，又能 100% 复用同一份样式表 ——
       这比"照着横条抄一份预览样式"靠谱得多（抄的那份必然会慢慢跑偏）。
 
-  数据全部由父页面 postMessage 递进来（iframe 里没有 Tauri IPC）。
+  数据全部由父页面 postMessage 递进来（iframe 里没有 Tauri IPC），
+  用户的拖拽操作再 postMessage 回父页面落库（见文件末尾的 post()）。
+
+  v2.7.0 起这里不只是"看"，还是**调节器**：
+    · 拖右边缘 / 下边缘 / 右下角 → 改格子宽高（实时同步到设置页的数字框并落库）；
+    · 拖动格子 → 调整各项顺序（松手同步到「格子内容」列表并落库）。
 -->
 <link rel="stylesheet" href="bar.css">
 <style>
@@ -40,13 +45,18 @@
        就永远贴左边（用户报的"预览没有居中"）。max-content 之后，body 的
        `justify-content: center` 才真的能把它摆到中间。 */
     #stage {
+        position: relative;
         width: max-content;
         height: auto;
+        /* 抓手要伸到面板外面一点，别被裁掉 */
+        padding: 0 8px 8px 0;
     }
 
     #bar {
         /* 预览里不做入场动画：设置页每次改参数都重画，一动画就一直在闪 */
         animation: none !important;
+        /* 拖拽调整尺寸时，宽度/高度跟着走，别被内容撑开 */
+        box-sizing: border-box;
     }
 
     #empty-tip {
@@ -56,6 +66,59 @@
         color: #8A8D95;
         text-align: center;
     }
+
+    /* ---------------- 拖拽调节器 ---------------- */
+
+    .rz {
+        position: absolute;
+        z-index: 5;
+        opacity: 0;
+        transition: opacity .12s ease;
+        background: rgba(78, 110, 242, .18);
+        border: 1px solid rgba(78, 110, 242, .55);
+    }
+
+    #stage:hover .rz, .rz.on {
+        opacity: 1;
+    }
+
+    /* 右边缘：改格子宽 */
+    #rzR { top: 0; right: 0; width: 8px; height: 100%; cursor: ew-resize; border-radius: 4px; }
+
+    /* 下边缘：改格子高 */
+    #rzB { left: 0; bottom: 0; height: 8px; width: 100%; cursor: ns-resize; border-radius: 4px; }
+
+    /* 右下角：宽高一起改 */
+    #rzC {
+        right: 0; bottom: 0; width: 14px; height: 14px;
+        cursor: nwse-resize; border-radius: 5px;
+        background: rgba(78, 110, 242, .55);
+        border: 1px solid rgba(78, 110, 242, .9);
+    }
+
+    /* 拖动中的格子：跟手 + 半透明，一眼看出"正在搬这一格" */
+    .qs-gcell.drag-src { opacity: .45; }
+    .qs-gcell.drop-hint { outline: 2px dashed rgba(78, 110, 242, .9); outline-offset: -2px; }
+
+    /* 拖动排序时不要选中文字 */
+    body.sorting { user-select: none; }
+
+    /* 预览提示条：告诉用户这里能拖 */
+    #hintbar {
+        position: absolute;
+        left: 0;
+        bottom: 0;
+        transform: translateY(100%);
+        padding: 2px 6px;
+        font: 10px/1.5 system-ui, "Microsoft YaHei", sans-serif;
+        color: #8A8D95;
+        white-space: nowrap;
+        opacity: 0;
+        transition: opacity .12s ease;
+        pointer-events: none;
+    }
+
+    #stage:hover #hintbar { opacity: .9; }
 </style>
 </head>
 <body>
@@ -74,6 +137,12 @@
         <div class="engines" id="engines"></div>
     </div>
     <div id="empty-tip">网格页已停用 —— 预览仅供调整外观，快捷键不会唤出它。</div>
+
+    <!-- 三个调节器：右边缘 / 下边缘 / 右下角 -->
+    <div class="rz" id="rzR" title="拖动调整格子宽度"></div>
+    <div class="rz" id="rzB" title="拖动调整格子高度"></div>
+    <div class="rz" id="rzC" title="拖动同时调整宽度和高度"></div>
+    <div id="hintbar">拖动右/下边缘改尺寸 · 拖动格子换位置</div>
 </div>
 
 <script>
@@ -85,7 +154,20 @@
     var engines = document.getElementById('engines');
     var tip = document.getElementById('empty-tip');
 
-    /** 画一帧。`p` 由设置页拼好，字段见 settings.js 的 pushGridPreview()。 */
+    /** 当前这一帧的数据（拖动时要在本地算新的宽高，得知道原来的值） */
+    var cur = { rows: 3, cols: 3, cellW: 104, cellH: 76, gap: 8, radius: 12, showLabel: true, items: [] };
+
+    /** 给父页面发消息（设置页负责落库）。 */
+    function post(msg) {
+        try { parent.postMessage(msg, '*'); } catch (e) { /* 独立打开时没有父页面 */ }
+    }
+
+    /** 画一帧。`p` 由设置页拼好，字段见 settings.js 的 pushGridPreview()。
+     *
+     *  ⚠ 行数（rows）与每格的显示样式（item.mode）**都由父页面算好**：
+     *  真网格那边是 bar.js 的 renderGrid + gridCellMode 算的，预览这边照抄会
+     *  变成两套算法（用户报的"预览和实际不一致"就是这么来的）。
+     *  所以这里只负责"照单渲染"，不自己再判断一次。 */
     function render(p) {
         p = p || {};
         var look = p.look || {};
@@ -100,12 +182,17 @@
         stage.style.setProperty('--qs-btn', ((look.btn != null ? look.btn : 30) + 6) + 'px');
 
         // ---- 网格变量（真网格与这里读的是同一组）
-        var rows = clamp(g.rows, 1, 10, 3);
+        var rows = clamp(g.rows, 1, 12, 3);
         var cols = clamp(g.cols, 1, 10, 3);
         var cw = clamp(g.cellW, 40, 260, 104);
         var ch = clamp(g.cellH, 40, 200, 76);
         var gap = clamp(g.gap, 0, 24, 8);
         var rad = clamp(g.radius, 0, 24, 12);
+
+        cur.rows = rows; cur.cols = cols; cur.cellW = cw; cur.cellH = ch;
+        cur.gap = gap; cur.radius = rad;
+        cur.showLabel = g.showLabel !== false;
+        cur.items = Array.isArray(g.items) ? g.items.slice() : [];
 
         bar.style.setProperty('--gcols', String(cols));
         bar.style.setProperty('--grows', String(rows));
@@ -114,16 +201,17 @@
         bar.style.setProperty('--ggap', gap + 'px');
         bar.style.setProperty('--gr', rad + 'px');
 
-        // 停用状态下把整体压暗，一眼看出"现在按快捷键不会弹"
-        // 「格子文字」：false = 只显示图标（和真网格同一个类名，样式也同一份）
-        // 和真网格同一口径：高度 < 66px 自动只显图标（放不下名称）
-        bar.classList.toggle('qs-gnolabel', g.showLabel === false || ch < 66);
+        /* v2.7.0：格子矮于 66px 不再藏名称，改成紧凑横排（和 bar.js 同一口径）。
+         * `qs-gnolabel` 只在"网格级默认就是只图标"时挂上，单项覆盖靠格子上的
+         * `.qs-gmode-*` 压过它。 */
+        bar.classList.toggle('qs-gnolabel', cur.showLabel === false);
+        bar.classList.toggle('qs-gcompact', ch < 66);
         bar.style.opacity = p.enabled === false ? '0.45' : '';
         tip.style.display = p.enabled === false ? 'block' : 'none';
 
         // ---- 格子
         engines.textContent = '';
-        var items = Array.isArray(g.items) ? g.items : [];
+        var items = cur.items;
         var total = rows * cols;
         for (var i = 0; i < total; i++) {
             var cell = document.createElement('div');
@@ -140,8 +228,9 @@
             }
             var icon = document.createElement('span');
             icon.className = 'qs-gicon';
-            // 图标是**父页面序列化好的 DOM**（img / svg / 字母徽标）：
-            // 这样预览里的图标和真横条上那张是同一张，不是"再找一张相似的"。
+            // 图标是**父页面序列化好的 DOM**（img / svg / 字母徽标），而且用的是
+            // 真网格那套生成函数（qsFuncIcon / qsGoIconNode / iconNode）——
+            // 所以预览里的图标和真横条上那张是同一张，不是"再找一张相似的"。
             if (it.iconHtml) icon.innerHTML = it.iconHtml;
             cell.appendChild(icon);
             var lb = document.createElement('span');
@@ -149,10 +238,20 @@
             lb.textContent = it.label || '';
             cell.appendChild(lb);
             cell.title = it.label || '';
+            // 显示样式：父页面算好的（icon / text / both）
+            cell.classList.add('qs-gmode-' + (it.mode === 'icon' || it.mode === 'text' ? it.mode : 'both'));
+            // 拖动排序
+            cell.draggable = true;
+            cell.dataset.idx = String(i);
+            cell.addEventListener('dragstart', onDragStart);
+            cell.addEventListener('dragend', onDragEnd);
+            cell.addEventListener('dragover', onDragOver);
+            cell.addEventListener('dragleave', onDragLeave);
+            cell.addEventListener('drop', onDrop);
             engines.appendChild(cell);
         }
 
-        reportHeight();
+        reportSize();
     }
 
     function clamp(v, min, max, dflt) {
@@ -161,15 +260,124 @@
         return Math.max(min, Math.min(max, Math.round(n)));
     }
 
-    /** 把内容高度报给父页面，由它设 iframe 高度 —— 这样预览不会被裁掉半行。 */
-    function reportHeight() {
+    /** 把内容尺寸报给父页面，由它设 iframe 高度/宽度 —— 这样预览不会被裁掉半行。 */
+    function reportSize() {
         var h = Math.ceil(document.body.getBoundingClientRect().height);
         // 内容比 iframe 宽时（列数多 / 格子很大），父页面要按内容宽度放大 iframe，
         // 否则右边几列会被裁在 iframe 外面，怎么看都看不到。
         var w = Math.ceil(document.body.scrollWidth);
+        post({ __qsGridPreviewHeight: h, __qsGridPreviewWidth: w });
+    }
+
+    /* ---------------- 拖动改尺寸 ---------------- */
+
+    /** 拖动右/下边缘改格子宽高：本地先改（即时反馈），再节流通知父页面落库。
+     *
+     *  为什么改的是**格子宽高**而不是整个面板宽高：网格页的尺寸就是
+     *  「列 × 格子宽 + 间距」算出来的，改格子宽高才是用户心里那个"拉大一点"；
+     *  直接改面板宽会遇到"多出来的宽度给哪一列"的问题，反而破坏了对称留白
+     *  （v2.6.8 刚把这套算清楚，不能再推翻）。 */
+    function startResize(e, dir) {
+        e.preventDefault();
+        e.stopPropagation();
+        var x0 = e.clientX, y0 = e.clientY;
+        var cw0 = cur.cellW, ch0 = cur.cellH;
+        var box = engines.getBoundingClientRect();
+        var w0 = box.width, h0 = box.height;
+        var last = 0;
+        var dpr = window.devicePixelRatio || 1;
+
+        function apply(ev) {
+            var dx = (ev.clientX - x0) / dpr;
+            var dy = (ev.clientY - y0) / dpr;
+            if (dir === 'r' || dir === 'c') {
+                // 按"每列分到多少"折算回格子宽：拖边框 = 改整行宽度
+                var per = cur.cols > 0 ? dx / cur.cols : dx;
+                cur.cellW = clamp(cw0 + per, 40, 260, cw0);
+                bar.style.setProperty('--gcw', cur.cellW + 'px');
+            }
+            if (dir === 'b' || dir === 'c') {
+                var perH = cur.rows > 0 ? dy / cur.rows : dy;
+                cur.cellH = clamp(ch0 + perH, 40, 200, ch0);
+                bar.style.setProperty('--gch', cur.cellH + 'px');
+                bar.classList.toggle('qs-gcompact', cur.cellH < 66);
+            }
+            var now = performance.now();
+            if (now - last > 60) {
+                last = now;
+                post({ __qsGridPreviewResize: { cellW: cur.cellW, cellH: cur.cellH } });
+            }
+            reportSize();
+        }
+
+        function up() {
+            window.removeEventListener('pointermove', apply, true);
+            window.removeEventListener('pointerup', up, true);
+            document.getElementById('rzR').classList.remove('on');
+            document.getElementById('rzB').classList.remove('on');
+            document.getElementById('rzC').classList.remove('on');
+            // 松手补一次，确保父页面拿到最终值
+            post({ __qsGridPreviewResize: { cellW: cur.cellW, cellH: cur.cellH } });
+            reportSize();
+        }
+
+        document.getElementById('rzR').classList.add('on');
+        document.getElementById('rzB').classList.add('on');
+        document.getElementById('rzC').classList.add('on');
+        window.addEventListener('pointermove', apply, true);
+        window.addEventListener('pointerup', up, true);
+    }
+
+    document.getElementById('rzR').addEventListener('pointerdown', function (e) { startResize(e, 'r'); });
+    document.getElementById('rzB').addEventListener('pointerdown', function (e) { startResize(e, 'b'); });
+    document.getElementById('rzC').addEventListener('pointerdown', function (e) { startResize(e, 'c'); });
+
+    /* ---------------- 拖动排序 ---------------- */
+
+    var dragFrom = -1;
+
+    function onDragStart(e) {
+        dragFrom = Number(this.dataset.idx);
+        this.classList.add('drag-src');
+        document.body.classList.add('sorting');
         try {
-            parent.postMessage({ __qsGridPreviewHeight: h, __qsGridPreviewWidth: w }, '*');
-        } catch (e) { /* 独立打开时没有父页面，忽略 */ }
+            e.dataTransfer.effectAllowed = 'move';
+            e.dataTransfer.setData('text/plain', String(dragFrom));
+        } catch (_) { }
+    }
+
+    function onDragEnd() {
+        dragFrom = -1;
+        document.body.classList.remove('sorting');
+        for (var i = 0; i < engines.children.length; i++) {
+            engines.children[i].classList.remove('drag-src', 'drop-hint');
+        }
+    }
+
+    function onDragOver(e) {
+        if (dragFrom < 0) return;
+        e.preventDefault();
+        for (var i = 0; i < engines.children.length; i++) {
+            engines.children[i].classList.remove('drop-hint');
+        }
+        this.classList.add('drop-hint');
+    }
+
+    function onDragLeave() {
+        this.classList.remove('drop-hint');
+    }
+
+    function onDrop(e) {
+        if (dragFrom < 0) return;
+        e.preventDefault();
+        var to = Number(this.dataset.idx);
+        /* ⚠ 必须先把 from 存下来再调 onDragEnd()：那个函数会把 dragFrom 清成 -1，
+         *   清完再读就永远是 -1（父页面那边看到 from=-1 直接按"无效"返回，
+         *   表现就是"拖完没反应"，踩过一次）。 */
+        var from = dragFrom;
+        onDragEnd();
+        if (!isFinite(to) || to === from) return;
+        post({ __qsGridPreviewReorder: { from: from, to: to } });
     }
 
     window.addEventListener('message', function (e) {
@@ -178,9 +386,7 @@
     });
 
     // 告诉父页面：我准备好了，把当前配置发过来
-    try {
-        parent.postMessage({ __qsGridPreviewReady: true }, '*');
-    } catch (e) { /* 独立打开时忽略 */ }
+    post({ __qsGridPreviewReady: true });
 })();
 </script>
 </body>

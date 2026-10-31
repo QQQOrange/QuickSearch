@@ -5151,6 +5151,8 @@ fn config_view() -> Value {
         "gridGap": cfg.grid_gap.clamp(0, 24),
         "gridRadius": cfg.grid_radius.clamp(0, 24),
         "gridShowLabel": cfg.grid_show_label,
+        // v2.7.0：单项显示样式覆盖（icon / text / both），没写的项跟着上面那个走
+        "gridItemStyle": cfg.grid_item_style,
         "gridEnable": cfg.grid_enable,
         "gridClick": cfg.grid_click,
         "gridAllowAdd": cfg.grid_allow_add,
@@ -5846,6 +5848,26 @@ fn apply_one_setting(cfg: &mut config::Config, key: &str, value: Value) -> Resul
          * 单独一个键（不并进 set_grid_behavior），因为它是"文字要不要显示"，
          * 和"启用 / 点击行为"是两回事，设置页里也是各自即时保存的。 */
         "gridShowLabel" => cfg.grid_show_label = value.as_bool().unwrap_or(true),
+        /* v2.7.0：单项显示样式覆盖（`{ "<格子名>": "icon"|"text"|"both" }`）。
+         * 整张表一次写回 —— 设置页那边是"改一项就重发整张表"，
+         * 比逐项增删少一次"删除时要不要写空值"的判断。
+         * 非法值在这里就丢掉（和 normalize_grid_pages 第 ⑥ 步同一口径）。 */
+        "gridItemStyle" => {
+            if let Ok(m) = serde_json::from_value::<std::collections::BTreeMap<String, String>>(
+                value.clone(),
+            ) {
+                cfg.grid_item_style = m
+                    .into_iter()
+                    .filter_map(|(k, v)| {
+                        let k = k.trim();
+                        if k.is_empty() {
+                            return None;
+                        }
+                        config::grid_item_style_valid(&v).map(|s| (k.to_string(), s.to_string()))
+                    })
+                    .collect();
+            }
+        }
         // 收藏夹整树（设置页本地编辑完一次性写回）
         "favorites" => {
             if let Ok(f) = serde_json::from_value::<Vec<config::FavGroup>>(value.clone()) {

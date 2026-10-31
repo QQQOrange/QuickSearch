@@ -63,10 +63,18 @@ There are **two** surfaces, with separate content, styling and settings:
   same markup, so layout, size, spacing, corner radius, colours and shadow match the pop-up
   **exactly**. Any change below is reflected instantly. The preview frame has a **fixed height**:
   make cells taller and it scrolls inside the frame instead of stretching the whole settings page.
+  - **Drag the right/bottom edge or the bottom-right corner** to resize the cells; the number
+    fields follow and the change is saved as soon as you let go;
+  - **Drag a tile inside the preview** to reorder — the Tiles list stays in sync.
 - **Appearance**: 1–10 rows × 1–10 columns (3×3, 3×4, 4×4…); cell 40–260 px wide, 40–200 px tall;
   gap 0–24 px; cell radius 0–24 px. Colours, shadow and blur are shared with **Bar appearance** —
   the grid has no colour settings of its own. **Tile text**: show *icon + name* or *icon only*
-  (icon-only is tidier and allows shorter cells); applies immediately.
+  (icon-only is tidier and allows shorter cells); applies immediately. This is the **default
+  style**; individual tiles can override it (see Tiles below).
+  - **Rows grow automatically**: the row count you set is a **minimum**. Once 3×3 is full, adding
+    a 10th item adds a fourth row (12 slots); removing items reclaims the extra row again.
+  - **Short cells keep their names**: below 66 px the tile switches to a compact
+    "icon left, name right" layout instead of hiding the name.
 - **Behaviour**:
   - **Enable grid page** — turn it off and the hotkey stops opening it; content and settings stay;
   - **Clicking an empty tile adds content** — turn it off to make empty tiles inert (avoids misclicks);
@@ -78,8 +86,12 @@ There are **two** surfaces, with separate content, styling and settings:
   - **Hotkey self-check** — reports which step blocks you (bad combination / master switch off /
     paused / current app blacklisted).
 - **Tiles**: a list **separate from the bar**. Add items one by one, or *Import from bar*;
-  **drag any row up or down to reorder — released order is saved immediately**. Tiles shown =
-  rows × columns. *Add content* also lists **OCR models / image-search models / translation
+  **drag any row up or down to reorder — released order is saved immediately** (dragging tiles in
+  the preview does the same). Tiles shown = rows × columns, and rows grow with the content.
+  The **dropdown on the right of each row** sets that tile's display style:
+  **follow default / icon+name / icon only / name only**. The default lives in
+  *Appearance → Tile text*; this only overrides the one item — e.g. set a shortcut tile to
+  *name only* to see just its note (the page title). *Add content* also lists **OCR models / image-search models / translation
   models** as their own groups (searching "baidu" finds both Baidu search and Baidu OCR), plus
   **function tiles** such as **Wrap symbols**: tap it to open the symbol menu and **wrap, unwrap
   or switch** the selected text (same thing as the `[ ]` button on the bar). Which OCR / image /
