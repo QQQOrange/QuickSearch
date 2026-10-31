@@ -16,12 +16,25 @@
 | 项 | 状态 |
 |---|---|
 | 本地仓库 | ✅ 分支 `main`，工作区干净 |
-| 远端配置 | ✅ `origin` = `https://github.com/QQQOrange/QuickSearch.git` |
-| GitHub 凭据 | ✅ 凭据管理器里有（`git credential fill` 能拿到，2026-10-25 验证 200） |
-| 网络 | ⚠️ **间歇性**：`github.com:443` 时通时不通；`api.github.com` 一直可用 |
-| 发布 | ✅ 最新 Release **v1.5.15**（2026-10-27），资产 `QuickSearch.exe` 13,657,088 字节，`releases/latest` 已指向 |
-| 代码 | ✅ `main` 已推（2026-10-27），tag `v1.5.15` 指向本次发版提交；v1.5.13 / v1.5.14 / v1.5.15 都是走 Git Data API 推的 |
+| 远端配置 | ✅ `origin` = `git@github.com:QQQOrange/QuickSearch.git`（**SSH**，2026-10-31 切换） |
+| GitHub 凭据 | ✅ 凭据管理器里有（`git credential fill` 能拿到，2026-10-25 验证 200）；SSH 用仓库部署密钥 |
+| 网络 | ⚠️ **间歇性**：`github.com:443` 时通时不通；**`github.com:22`(SSH) 稳定可用**；`api.github.com` 一直可用 |
+| 发布 | ✅ 最新 Release **v2.6.7**（2026-10-31），资产 `QuickSearch.exe` 7,470,592 字节 / md5 `0155c1e3…` |
+| 代码 | ✅ `main` 已推（2026-10-31），tag `v2.6.7`；本次起改用 SSH push，不再需要 Git Data API |
 | 待发布 | 无 |
+
+### ✅ SSH 推送通道（2026-10-31 起默认）
+
+HTTPS 走系统代理，`git fetch` / `git push` 会随机 `CONNECT tunnel failed, response 502`；
+SSH（22 端口）不经过那条代理，实测稳定。本机已配置：
+
+- 私钥 `~/.ssh/id_ed25519`（无口令），公钥以**仓库部署密钥**（`workbuddy-deploy-pc`，
+  读写权限）挂在 GitHub 上 —— 不是账号级 key（经典令牌缺 `admin:public_key`，加账号 key 会 404）。
+- `git remote set-url origin git@github.com:QQQOrange/QuickSearch.git`
+- 验证：`ssh -T git@github.com` → `Hi QQQOrange/QuickSearch! You've successfully authenticated`
+- 推送：`git push origin main && git push origin vX.Y.Z`
+
+> 部署密钥只对**这一个仓库**有效，且不能通过 API 建 Release 以外的账号级操作。
 
 ### ⚠ 两条必须记住的环境事实（2026-10-25 实测）
 
