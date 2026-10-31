@@ -286,9 +286,11 @@ function matteNavIconNode() {
     sp.innerHTML = '<svg viewBox="0 0 24 24" fill="none" '
         + ' stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"'
         + ' style="display:block;width:100%;height:100%">'
-        + '<rect x="3.6" y="4.6" width="16.8" height="14.8" rx="2" stroke="#7C3AED" stroke-dasharray="3 2.4"/>'
-        + '<circle cx="12" cy="10.1" r="2.1" stroke="#F59E0B"/>'
-        + '<path d="M8.4 17.2c.7-2.2 2-3.3 3.6-3.3s2.9 1.1 3.6 3.3" stroke="#F59E0B"/>'
+        /* v2.11.6：选区框从 70%x62% 撑到 ~77%x73% —— 14px 框里原来只有 9.8px，
+         * 和旁边 emoji 图标放在一起显得小一号（用户报的"抠图图标过小"）。 */
+        + '<rect x="2.8" y="3.2" width="18.4" height="17.6" rx="2.2" stroke="#7C3AED" stroke-dasharray="3.2 2.6" stroke-width="1.9"/>'
+        + '<circle cx="12" cy="9.8" r="2.6" stroke="#F59E0B" stroke-width="1.9"/>'
+        + '<path d="M7.2 18.8c.9-3 2.6-4.6 4.8-4.6s3.9 1.6 4.8 4.6" stroke="#F59E0B" stroke-width="1.9"/>'
         + '</svg>';
     return sp;
 }

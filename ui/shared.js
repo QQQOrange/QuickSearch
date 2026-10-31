@@ -370,8 +370,9 @@ window.qsTextIconNode = function (opId) {
     sp.innerHTML = '<svg viewBox="0 0 24 24" fill="none" '
         + ' stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"'
         + ' style="display:block;width:100%;height:100%">'
-        + '<path d="M5.5 3.5h9l4 4v13h-13z" fill="none" stroke="#2563EB"/>'
-        + '<path d="M8.5 12h7M8.5 15.5h7M8.5 8.5h3" stroke="#93C5FD"/>'
+        /* v2.11.6：同上，纸张从 54% 撑到 ~67%/82%（原来 14px 框里只有 7.6px） */
+        + '<path d="M3.4 2.4h10.6l5.4 5.4v14.2H3.4z" fill="none" stroke="#2563EB" stroke-width="1.9"/>'
+        + '<path d="M7.6 12.4h8.8M7.6 16.6h8.8M7.6 8.2h4.6" stroke="#93C5FD" stroke-width="1.7"/>'
         + '</svg>'
         + '<span style="position:absolute;right:-1px;bottom:-1px;font-size:7.5px;'
         + 'line-height:1;font-weight:700;color:#F59E0B;background:var(--qs-bg,#fff);'
@@ -712,8 +713,11 @@ window.qsWrapIconNode = function () {
     sp.innerHTML = '<svg viewBox="0 0 24 24" fill="none" '
         + ' stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"'
         + ' style="display:block;width:100%;height:100%">'
-        + '<path d="M8.2 6.2H5.4v11.6h2.8M15.8 6.2h2.8v11.6h-2.8" stroke="#0E7490"/>'
-        + '<path d="M9.9 12h4.2" stroke="#F59E0B" stroke-width="2"/>'
+        /* v2.11.6：图形铺满 24 网格。原来只占 55%x48%，缩到设置页子导航的
+         * 14px 框里实测只有 7.7px 宽 —— 和旁边的 emoji（约 13px）比明显"缩水"，
+         * 用户报的"包裹符号图标过小"就是这个。 */
+        + '<path d="M7.4 3.4H2.6v17.2h4.8M16.6 3.4h4.8v17.2h-4.8" stroke="#0E7490" stroke-width="1.9"/>'
+        + '<path d="M8.2 12h7.6" stroke="#F59E0B" stroke-width="2.6"/>'
         + '</svg>';
     return sp;
 };

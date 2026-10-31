@@ -1504,8 +1504,29 @@ fn capture_selection(target_pid: u32) -> Option<String> {
             let ok = win::post_copy_to_focus();
             format!("WM_COPY{}", if ok { "" } else { "(投递失败)" })
         } else {
-            let ok = win::post_ctrl_c_to_focus();
-            format!("按键消息{}", if ok { "" } else { "(投递失败)" })
+            /* ⚠ v2.11.6：这条"窗口消息按键"通道**默认关闭**。
+             *
+             * 用户报「输入框里会莫名多出字母 c」，就是它干的：
+             * `post_ctrl_c_to_focus` 往焦点窗口直接 Post 一条
+             * `WM_KEYDOWN(VK_C)`。Ctrl 的按下状态只存在于**线程级**键盘状态里
+             * （还要先 AttachThreadInput 才共享），一旦 attach 失败、或者焦点
+             * 控件属于另一个线程，目标收到就是**一个光秃秃的 c 键**——
+             * 编辑框照单全收，直接打出一个 'c'。
+             *
+             * 而这条通道实测也没换来什么：微信 4.x 收到它照样不复制
+             * （`changed=false`），其它程序有 SendInput / WM_COPY 就够了。
+             * 现在有"复制失败改看屏幕"的本地识别兜底，丢它不影响取词。
+             * 排障时可以用 QS_ALLOW_KEYMSG=1 临时打开。 */
+            let allowed = std::env::var("QS_ALLOW_KEYMSG")
+                .map(|v| v == "1")
+                .unwrap_or(false);
+            if allowed {
+                let ok = win::post_ctrl_c_to_focus();
+                format!("按键消息{}", if ok { "" } else { "(投递失败)" })
+            } else {
+                win::log("capture: 跳过「窗口消息按键」通道（它会往输入框里打 c，默认关闭）");
+                "跳过".to_string()
+            }
         };
         /* 投完复制请求后**轮询读**，而不是"等序号一变就读一次"。
          *

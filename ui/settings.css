@@ -4072,8 +4072,11 @@ main {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 14px;
-    height: 14px;
+    /* v2.11.6：14 → 15px。线稿图标（抠图/包裹/文本处理）天生比 emoji 细，
+     *   同样的框里"看着小"（实测墨量只有 emoji 的一半）。抬高 1px 让线稿
+     *   和 emoji 的视觉重量拉平；chip 高度够，不会把行撑开。 */
+    width: 15px;
+    height: 15px;
     flex: 0 0 auto;
     font-size: 13px;
     line-height: 1;
@@ -4089,6 +4092,20 @@ main {
     display: block;
 }
 .subnav .chip .ci img { object-fit: contain; }
+/* v2.11.6：线稿图标在 15px 里 1.6~1.9 的描边只有 1px 出头，看着发虚。
+ * 统一提到 2.4（只在设置页子导航这一处覆盖，横条/网格保持原样）。 */
+.subnav .chip .ci svg path,
+.subnav .chip .ci svg rect,
+.subnav .chip .ci svg circle { stroke-width: 2.4; }
+/* ⚠ v2.11.6：翻译那张 PNG 自带 33%×42% 的透明留白（实测 200×200 里只有
+ *   133×116 有内容），14px 框里实际只画到 ~9px，和旁边的 emoji、识图图标
+ *   放一起明显小一号 —— 用户报的"翻译图标过小"就是这个。按留白比例放大补偿；
+ *   识图那张是 100% 满幅，不能一起放，所以只针对翻译这一格。 */
+.subnav .chip[data-sub="trans"] .ci img { transform: scale(1.35); }
+/* 包裹符号 / 文字识别是"线稿 + 文字"的形态，同样的框里墨量天然比 emoji 低
+ * （实测 24% vs 44%）。这两格单独再压一档，视觉重量才拉平。 */
+.subnav .chip[data-sub="wrap"] .ci svg path { stroke-width: 3.1; }
+.subnav .chip[data-sub="ocr"] .ci .qs-ocr-tag { font-size: 9.5px; font-weight: 900; letter-spacing: -.3px; }
 /* 徽标类（OCR / 翻译文字标）在 14px 里要缩一档，否则撑破 chip */
 .subnav .chip .ci .qs-ocr-tag,
 .subnav .chip .ci .ocr-tag,
@@ -4099,8 +4116,11 @@ main {
     justify-content: center;
     width: 100%;
     height: 100%;
-    font-size: 7.5px;
-    letter-spacing: 0;
+    /* v2.11.6：7.5px 在 14px 框里几乎糊成一团，抬到 8.5px 并加粗 ——
+     * 和旁边 emoji 图标的"视觉重量"拉齐（用户报的文字识别图标过小）。 */
+    font-size: 9px;
+    font-weight: 800;
+    letter-spacing: -0.2px;
     background: none;
     min-width: 0;
     padding: 0;
