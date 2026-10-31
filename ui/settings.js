@@ -276,35 +276,96 @@ async function openIconEditor(key, engineName, extraSrc) {
 function bindTabs() {
     const tabs = $('tabs');
     for (const b of tabs.querySelectorAll('button')) {
-        b.addEventListener('click', () => {
-            for (const x of tabs.querySelectorAll('button')) x.classList.toggle('on', x === b);
-            for (const p of document.querySelectorAll('.pane')) {
-                p.hidden = p.dataset.pane !== b.dataset.tab;
-            }
-            // r46：切到 OCR 页**不再自动跑检测**（用户原话："我没点击，他就不用
-            // 告诉我说是否已准备就绪"）。已经检测过就沿用缓存结果，没测过就显示
-            // 那个「检测本地 OCR 环境」按钮等他点。
-            if (b.dataset.tab === 'ocr') renderOcrDep();
-            /* v1.2.0：切到「关于」时初始化更新那块（接按钮 + 问一句有没有待装的）。
-             * 放这里而不是 boot 里一次性做完，是因为 `update_pending` 问的是
-             * "**此刻**有没有待装的新版"——启动时那次检查可能还没回来，
-             * 等用户真的打开这一页再问，拿到的才准。幂等，重复切页无副作用。 */
-            if (b.dataset.tab === 'about') updInit();
-            /* r74：首字母索引浮动钮只许在引擎页亮着。切走先收起来（它是
-             * position:fixed，不收就漂在别的页上面）；切回引擎页时如果仍是
-             * 「全部引擎」档，按 DOM 现况恢复 —— 不重画列表（会弹回顶部）。 */
-            idxFabHide();
-            if (b.dataset.tab === 'engines' && allGroupFilter === '*') idxReshow();
-            /* 切回引擎页时作废渲染指纹：指纹相同就意味着"不用重画"，但用户
-             * 可能刚在别处换过图（比如在「横条上的引擎」里换了图标，那里的
-             * 行没走 renderAllList 的指纹），切回来必须看到新图标。 */
-            if (b.dataset.tab === 'engines') invalidateAllList();
-            // 调试构建：换页后让「引擎」页的行控件也上报一次坐标
-            if (document.body.dataset.qsDebug === '1') {
-                invoke('log_msg', { msg: 'TAB ' + b.dataset.tab }).catch(() => { });
-                if (window.__qsReportRects) setTimeout(window.__qsReportRects, 80);
-            }
+        b.addEventListener('click', () => showPane(b.dataset.tab));
+    }
+    /* 组内 chips：附加功能 / 数据 / 关于 这三栏是"一个顶栏按钮 + 一排子项"。
+     * 点 chip 只换子页，顶栏按钮保持高亮 —— 用户不会觉得"跳到别处了"。 */
+    for (const nav of document.querySelectorAll('.subnav')) {
+        nav.addEventListener('click', (e) => {
+            const chip = e.target.closest('.chip');
+            if (!chip) return;
+            showPane(nav.dataset.group, chip.dataset.sub);
         });
+    }
+}
+
+/** 顶栏分组：一个 tab 对应多个 pane（组内导航）。 */
+const TAB_GROUPS = {
+    extras: { nav: 'extras', subs: ['ai', 'go', 'matte', 'ocr', 'trans', 'imgsearch', 'fav', 'wrap'], def: 'ai' },
+    data: { nav: 'datanav', subs: ['data', 'backup'], def: 'data' },
+    about: { nav: 'aboutnav', subs: ['about', 'help'], def: 'about' },
+};
+const SUB_TO_GROUP = {};
+for (const g of Object.keys(TAB_GROUPS)) {
+    for (const sub of TAB_GROUPS[g].subs) SUB_TO_GROUP[sub] = g;
+}
+/** 每组记住上次看的是哪一项（切出去再切回来不跳回第一项）。 */
+const lastSub = {};
+
+/** 显示某一页。`tab` 是顶栏按钮的 data-tab，`sub` 只在分组页里有意义。
+ *  返回**实际显示的那个 pane 名**（分组页返回子页名）。 */
+function showPane(tab, sub) {
+    const g = TAB_GROUPS[tab];
+    let cur = null;
+    const visible = new Set();
+    if (g) {
+        cur = (sub && g.subs.includes(sub)) ? sub : (lastSub[tab] || g.def);
+        lastSub[tab] = cur;
+        visible.add(g.nav);
+        visible.add(cur);
+    } else {
+        visible.add(tab);
+    }
+    for (const p of document.querySelectorAll('.pane')) {
+        p.hidden = !visible.has(p.dataset.pane);
+    }
+    for (const nav of document.querySelectorAll('.subnav')) {
+        for (const chip of nav.querySelectorAll('.chip')) {
+            chip.classList.toggle('on', chip.dataset.sub === cur);
+        }
+    }
+    for (const b of document.querySelectorAll('#tabs button')) {
+        b.classList.toggle('on', b.dataset.tab === tab);
+    }
+    afterShow(cur || tab);
+    return cur || tab;
+}
+
+/** 切页后的"按需初始化"，原来散在 bindTabs 的点击回调里，这里收拢。 */
+function afterShow(pane) {
+    // r46：切到 OCR 页**不再自动跑检测**（用户原话："我没点击，他就不用
+    // 告诉我说是否已准备就绪"）。已测过就沿用缓存，没测过就显示那个按钮等他点。
+    if (pane === 'ocr') renderOcrDep();
+    /* v1.2.0：切到「关于」时初始化更新那块 —— 问的是"**此刻**有没有待装的新版"，
+     * 启动时那次检查可能还没回来，等用户真打开这一页再问，拿到的才准。幂等。 */
+    if (pane === 'about') updInit();
+    // 直达页：切进来就重画一次（设置页刚打开时那次渲染可能早于配置到达）
+    if (pane === 'go') renderGoList();
+    // 包裹符号页：把 12 组符号画出来（同时也是"它能加到哪里"的说明）
+    if (pane === 'wrap') renderWrapPane();
+    // 网格页：把当前配置推给预览
+    if (pane === 'grid') {
+        renderGridPages();
+        renderGridApps();
+        renderGridItems();
+        pushGridPreview();
+        setTimeout(pushGridPreview, 120);
+    }
+    if (pane === 'appbind') {
+        renderAppBindList();
+        if (appBindCur) loadAppBind(appBindCur);
+    }
+    /* r74：首字母索引浮动钮只许在引擎页亮着。切走先收起来（它是 position:fixed，
+     * 不收就漂在别的页上面）；切回引擎页时如果仍是「全部引擎」档，按 DOM 现况
+     * 恢复 —— 不重画列表（会弹回顶部）。 */
+    idxFabHide();
+    if (pane === 'engines' && typeof allGroupFilter !== 'undefined' && allGroupFilter === '*') idxReshow();
+    /* 切回引擎页时作废渲染指纹：用户可能刚在别处换过图标，切回来必须看到新的 */
+    if (pane === 'engines') invalidateAllList();
+    // 调试构建：换页后让「引擎」页的行控件也上报一次坐标
+    if (document.body.dataset.qsDebug === '1') {
+        invoke('log_msg', { msg: 'TAB ' + pane }).catch(() => { });
+        if (window.__qsReportRects) setTimeout(window.__qsReportRects, 80);
     }
 }
 
@@ -951,6 +1012,15 @@ function allRowNode(r) {
     bT.addEventListener('click', () =>
         invoke('toggle_bar_engine', { engine: key, on: !on }));
     ops.appendChild(bT);
+
+    /* 同一个引擎也能直接放进网格页（用户要求：各功能项处直接选"放到哪"）。
+     * 用 mini 按钮保持和"加到横条"一致的观感。 */
+    const bG = document.createElement('button');
+    bG.className = 'mini';
+    bG.textContent = '加到网格页';
+    bG.title = '把这个引擎放进网格页（再点一次移除）';
+    bG.addEventListener('click', () => toggleAddTo('grid', key));
+    ops.appendChild(bG);
 
     row.appendChild(ic);
     row.appendChild(nm);
@@ -2736,6 +2806,8 @@ function renderAiList() {
 const SWITCHES = [
     ['s-triggerSelect', 'triggerSelect'],
     ['s-triggerCopy', 'triggerCopy'],
+    // v2.6.7：右下角"正在使用什么功能"的通知（默认开，见 config.rs default_true）
+    ['s-notifyFeature', 'notifyFeature'],
     // 2026-10-23：划选没取到文字就不弹（误触乱弹的主要来源，默认开）
     // 2026-10-24：只管划选 —— Ctrl+C 一定弹，见 main.rs 的 ctrl_copy_bar
     ['s-barNeedText', 'barNeedText'],
@@ -4128,7 +4200,1129 @@ for (const id of ['w-ceName', 'w-ceUrl', 'w-ceCat']) {
     });
 }
 
+/* ------------------------------------------------------------------ */
+/* 网格页（Ctrl+C）                                                     */
+/* ------------------------------------------------------------------ */
+
+/** 拖动中的那一项的索引（HTML5 拖放没法在 dragover 里拿到源数据）。 */
+let gridDragIdx = -1;
+
+function gridMsg(id, text, bad) {
+    const el = $(id);
+    if (!el) return;
+    el.textContent = text || '';
+    el.style.color = bad ? 'var(--danger, #B0182A)' : '';
+}
+
+/** 把配置里的值灌进表单（配置广播时也会调，保证"改完立刻看到"）。 */
+function gridFill() {
+    const c = CONF || {};
+    if ($('gridHotkey') && document.activeElement !== $('gridHotkey')) {
+        $('gridHotkey').value = c.gridHotkey || 'ctrl+c';
+    }
+    if ($('gridRows')) $('gridRows').value = c.gridRows || 3;
+    if ($('gridCols')) $('gridCols').value = c.gridCols || 3;
+    if ($('gridCellW')) $('gridCellW').value = c.gridCellW || 104;
+    if ($('gridCellH')) $('gridCellH').value = c.gridCellH || 76;
+    // 0 是合法值（间距/圆角都能设 0），所以这里不能用 `||` 兜底
+    if ($('gridGap')) $('gridGap').value = (c.gridGap != null ? c.gridGap : 8);
+    if ($('gridRadius')) $('gridRadius').value = (c.gridRadius != null ? c.gridRadius : 12);
+    if ($('s-gridEnable')) $('s-gridEnable').checked = c.gridEnable !== false;
+    if ($('s-gridAllowAdd')) $('s-gridAllowAdd').checked = c.gridAllowAdd !== false;
+    if ($('gridClick')) $('gridClick').value = c.gridClick === 'home' ? 'home' : 'auto';
+    if ($('gridShowLabel')) $('gridShowLabel').value = c.gridShowLabel === false ? '0' : '1';
+}
+
+/* -------------------- 网格页：实时预览 -------------------- */
+
+/** 表单里的布局值（还没保存也算，预览要跟着输入框走）。 */
+function gridLookDraft() {
+    const n = (id, d) => {
+        const v = parseInt(($(id) && $(id).value) || '', 10);
+        return Number.isFinite(v) ? v : d;
+    };
+    return {
+        rows: n('gridRows', 3), cols: n('gridCols', 3),
+        cellW: n('gridCellW', 104), cellH: n('gridCellH', 76),
+        gap: n('gridGap', 8), radius: n('gridRadius', 12),
+    };
+}
+
+/** 预览用的格子内容：每个格子的图标**在设置页这边就序列化好**，
+ *  再递给 iframe —— 这样预览里那张图和横条上那张是同一张
+ *  （img 的 src / 统一图标大小算出的 transform 都原样带过去）。 */
+function gridPreviewItems() {
+    const glyph = { '@ocr': '🔤', '@trans': '🌐', '@img': '🖼' };
+    return gridItemsNow().map((name) => {
+        const label = window.qsDisplayName ? window.qsDisplayName(name) : String(name);
+        if (glyph[name]) {
+            return { label, iconHtml: '<span style="font-size:18px;line-height:1">' + glyph[name] + '</span>' };
+        }
+        let node = null;
+        try {
+            if (typeof name === 'string' && name.startsWith(window.QS_GO_PREFIX || '@go:')) {
+                node = window.qsGoIconNode(name);
+            } else {
+                node = iconNode(name, 18);
+            }
+        } catch (_) { /* 图标取不到就空着，不影响预览排版 */ }
+        return { label, iconHtml: node ? node.outerHTML : '' };
+    });
+}
+
+/** 把当前（含未保存的）配置推给预览 iframe。 */
+function pushGridPreview() {
+    const fr = $('gridPreview');
+    if (!fr || !fr.contentWindow) return;
+    const look = gridLookDraft();
+    const theme = (CONF && CONF.theme) || 'system';
+    const dark = theme === 'dark'
+        || (theme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+    const num = (v, d) => (v != null && Number.isFinite(Number(v)) ? Number(v) : d);
+    /* 预览"舞台"的底色也跟着横条主题走：主题是深色时舞台变深（和横条预览的
+     * 「在深色背景上预览」同一个道理），否则深色网格贴在浅色底上看着很割裂。 */
+    const wrapEl = $('gridPreviewWrap');
+    if (wrapEl) wrapEl.setAttribute('data-dark', dark ? '1' : '0');
+    try {
+        fr.contentWindow.postMessage({
+            __qsGridPreview: true,
+            payload: {
+                dark,
+                enabled: (CONF && CONF.gridEnable) !== false,
+                look: {
+                    // 这几个跟「横条外观」共用同一份配置：预览必须用同样的值，
+                    // 否则圆角/内边距/不透明度/图标尺寸会和真弹出来的差一档
+                    radius: num(CONF && CONF.itemRadius, 9),
+                    pad: num(CONF && CONF.barPadding, 5),
+                    alpha: num(CONF && CONF.alpha, 100),
+                    btn: num(CONF && CONF.iconSize, 30),
+                    shadow: !!(CONF && CONF.shadow),
+                },
+                grid: Object.assign({
+                    items: gridPreviewItems(),
+                    // 格子里要不要显示名称（和真网格同一个字段）
+                    showLabel: (CONF && CONF.gridShowLabel) !== false,
+                }, look),
+            },
+        }, '*');
+    } catch (_) { /* iframe 还没加载完，等它的 ready 消息 */ }
+}
+
+/** 保存外观（行列 / 格子尺寸 / 间距 / 圆角）。 */
+async function saveGridLook(silent) {
+    const d = gridLookDraft();
+    try {
+        await invoke('set_grid_size', {
+            rows: d.rows, cols: d.cols, cellW: d.cellW, cellH: d.cellH,
+            gap: d.gap, radius: d.radius,
+        });
+        CONF = window.CONF = await invoke('get_config');
+        gridFill();
+        renderGridItems();
+        pushGridPreview();
+        if (!silent) {
+            gridMsg('gridSizeMsg', `已生效：${CONF.gridRows}×${CONF.gridCols}，格子 `
+                + `${CONF.gridCellW}×${CONF.gridCellH}，间距 ${CONF.gridGap}，圆角 ${CONF.gridRadius}`);
+        }
+    } catch (e) {
+        gridMsg('gridSizeMsg', String(e || '保存失败'), true);
+    }
+}
+
+/** 保存功能开关（启用 / 空位可加 / 点格子行为）。 */
+async function saveGridBehavior() {
+    const enable = $('s-gridEnable') ? $('s-gridEnable').checked : true;
+    const allowAdd = $('s-gridAllowAdd') ? $('s-gridAllowAdd').checked : true;
+    const click = ($('gridClick') && $('gridClick').value) || 'auto';
+    try {
+        await invoke('set_grid_behavior', { enable, click, allowAdd });
+        CONF = window.CONF = await invoke('get_config');
+        gridFill();
+        pushGridPreview();
+        gridMsg('gridBehMsg', enable
+            ? '已保存：网格页已启用，按快捷键即可唤出'
+            : '已保存：网格页已停用，快捷键不会再唤出它（配置都保留）');
+    } catch (e) {
+        gridMsg('gridBehMsg', String(e || '保存失败'), true);
+    }
+}
+
+/** 预览 iframe 的回话：就绪 → 推一次；报高度 → 撑开 iframe。 */
+window.addEventListener('message', (e) => {
+    const d = e.data || {};
+    if (d.__qsGridPreviewReady) {
+        pushGridPreview();
+        return;
+    }
+    if (d.__qsGridPreviewHeight) {
+        const fr = $('gridPreview');
+        const wrap = $('gridPreviewWrap');
+        if (!fr) return;
+        /* 高度按内容走（外层舞台是**固定高度 + 内部滚动**，所以 iframe 长高
+         * 不会再把整张设置页顶长 —— 用户报的"改高度整页跟着变"就是这么来的）。 */
+        const h = Math.max(120, Math.min(6000, Number(d.__qsGridPreviewHeight) || 200));
+        fr.style.height = h + 'px';
+        /* 宽度：内容比舞台宽（列多 / 格子大）时把 iframe 撑到内容宽度，由外层横向
+         * 滚动；否则回到 100%。不这么做右边几列会被裁在 iframe 外面。 */
+        const w = Number(d.__qsGridPreviewWidth) || 0;
+        const avail = wrap ? (wrap.clientWidth - 28) : 0;   // 减掉舞台左右 padding
+        fr.style.width = (avail > 0 && w > avail) ? (w + 'px') : '100%';
+    }
+});
+
+/** 当前网格内容（顺序即显示顺序）。 */
+/** 设置页"正在编辑"的页 id。空 = 跟着第一页（默认页）。 */
+let gridEditPageId = '';
+
+/** 全部网格页（`[{id,name,items}]`）。 */
+function gridPagesCfg() {
+    const c = CONF || {};
+    return Array.isArray(c.gridPages) ? c.gridPages : [];
+}
+
+/** 设置页当前正在编辑的那一页（id 找不到就退回第一页）。 */
+function gridEditPage() {
+    const pages = gridPagesCfg();
+    return pages.find((p) => p.id === gridEditPageId) || pages[0] || null;
+}
+
+/** 当前编辑页的内容。
+ *
+ * ⚠ 多页之后**不能再读 `CONF.gridItems`** —— 那只是"默认页"的镜像，
+ *   切到第二页去编辑会把第一页的内容显示出来、保存时还会把第一页覆盖掉。 */
+function gridItemsNow() {
+    const pg = gridEditPage();
+    if (pg && Array.isArray(pg.items)) return pg.items.slice();
+    const c = CONF || {};
+    return Array.isArray(c.gridItems) ? c.gridItems.slice() : [];
+}
+
+/** 保存整份顺序 —— 拖完一次就调，绝不只在"点保存"时落盘（用户要求松手即存）。 */
+async function gridSaveItems(items, msg) {
+    try {
+        const pg = gridEditPage();
+        await invoke('set_grid_items', { items, page: pg ? pg.id : null });
+        CONF = window.CONF = await invoke('get_config');
+        renderGridItems();
+        renderGridPages();
+        if (msg) gridMsg('gridItemsMsg', msg);
+    } catch (e) {
+        gridMsg('gridItemsMsg', String(e || '保存失败'), true);
+    }
+}
+
+/** 画格子内容列表（可拖动排序）。 */
+/** 功能格子（`@ocr` 这类）的一句话说明。
+ *  也用来回答"wrap 到底是干什么的" —— 用户明确要求给正式、易懂的名称。 */
+function gridItemDesc(name) {
+    const nm = (id) => MODEL_NAMES.get(String(id)) || String(id || '未知');
+    switch (name) {
+        case '@ocr':
+            return '框选屏幕 → 识别文字（当前模型：' + nm(CONF && CONF.ocrEngine) + '）';
+        case '@img': {
+            const list = ((CONF && CONF.imgEngines) || []).map(nm);
+            return '框选图片 → 按图搜索（当前模型：' + (list.length ? list.join('、') : '未配置') + '）';
+        }
+        case '@trans':
+            return '翻译当前这段文字（当前模型：' + nm(CONF && CONF.transEngine) + '）';
+        case '@wrap':
+            return '点开一组符号（“” 《》 【】 等），把选中的文字套上 / 拆掉 / 换一对';
+        case '|':
+            return '分隔线（横条上的一条竖线，网格里只是一格占位）';
+        default:
+            return '';
+    }
+}
+
+function renderGridItems() {
+    const box = $('gridItemList');
+    if (!box) return;
+    box.textContent = '';
+    const items = gridItemsNow();
+    const total = (CONF && CONF.gridRows || 3) * (CONF && CONF.gridCols || 3);
+    if (!items.length) {
+        const d = document.createElement('div');
+        d.className = 'hint';
+        d.textContent = '格子还是空的。点「从横条导入」把横条成员抄过来，或在上面输入引擎名添加。';
+        box.appendChild(d);
+        return;
+    }
+    items.forEach((name, i) => {
+        const row = document.createElement('div');
+        row.className = 'item';
+        row.draggable = true;
+        row.dataset.idx = String(i);
+
+        // 拖动把手：整行都能拖，但给个明显的把手更好按
+        const hd = document.createElement('span');
+        hd.className = 'ic';
+        hd.textContent = '⋮⋮';
+        row.appendChild(hd);
+
+        const nm = document.createElement('span');
+        nm.className = 'nm';
+        // 显示给人看的名字；原始名（可能是 @ocr 这类哨兵）放后面小字，
+        // 方便用户对照，但不再是界面上唯一的信息
+        const pretty = (window.qsDisplayName ? window.qsDisplayName(name) : name);
+        nm.textContent = pretty;
+        if (pretty !== name) {
+            const rawTag = document.createElement('em');
+            rawTag.textContent = name;
+            nm.appendChild(rawTag);
+        }
+        /* 功能格子给一句"点了会发生什么" —— 光看「包裹符号」四个字猜不出作用，
+         * 用户在设置里应该能直接读懂。 */
+        const desc = gridItemDesc(name);
+        if (desc) {
+            const sm = document.createElement('small');
+            sm.className = 'curl';
+            sm.textContent = desc;
+            nm.appendChild(sm);
+        }
+        if (i >= total) {
+            const em = document.createElement('em');
+            em.textContent = '超出格子数（不显示）';
+            nm.appendChild(em);
+        }
+        row.appendChild(nm);
+
+        const ops = document.createElement('span');
+        ops.className = 'ops';
+        const del = document.createElement('button');
+        del.className = 'mini';
+        del.type = 'button';
+        del.textContent = '移除';
+        del.addEventListener('click', () => {
+            const next = gridItemsNow();
+            next.splice(i, 1);
+            gridSaveItems(next, '已移除 ' + name);
+        });
+        ops.appendChild(del);
+        row.appendChild(ops);
+
+        /* 拖放排序：dragover 里只做视觉反馈，drop 时才真正落盘。
+         * 用索引而不是元素引用 —— 重排后 DOM 会被重建，引用会失效。 */
+        row.addEventListener('dragstart', (e) => {
+            gridDragIdx = i;
+            row.classList.add('dragging');
+            try { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', name); } catch (_) { }
+        });
+        row.addEventListener('dragend', () => {
+            gridDragIdx = -1;
+            for (const x of box.querySelectorAll('.item')) x.classList.remove('dragging', 'drop-before', 'drop-after');
+        });
+        row.addEventListener('dragover', (e) => {
+            if (gridDragIdx < 0) return;
+            e.preventDefault();
+            const r = row.getBoundingClientRect();
+            const after = (e.clientY - r.top) > r.height / 2;
+            for (const x of box.querySelectorAll('.item')) x.classList.remove('drop-before', 'drop-after');
+            row.classList.add(after ? 'drop-after' : 'drop-before');
+        });
+        row.addEventListener('drop', (e) => {
+            if (gridDragIdx < 0) return;
+            e.preventDefault();
+            const r = row.getBoundingClientRect();
+            const after = (e.clientY - r.top) > r.height / 2;
+            const next = gridItemsNow();
+            const [moved] = next.splice(gridDragIdx, 1);
+            let to = i + (after ? 1 : 0);
+            if (gridDragIdx < to) to -= 1;   // 自己先被抽走，后面的索引要减一
+            to = Math.max(0, Math.min(next.length, to));
+            next.splice(to, 0, moved);
+            gridDragIdx = -1;
+            gridSaveItems(next, '顺序已保存');
+        });
+        box.appendChild(row);
+    });
+}
+
+/** 画「网格页」列表：页名（可直接改）、格数、默认页标记、删除。 */
+function renderGridPages() {
+    const box = $('gridPageList');
+    const pages = gridPagesCfg();
+    const defId = (CONF && CONF.gridDefaultPage) || '';
+    // 当前编辑页若被删了，退回第一页
+    if (!pages.some((p) => p.id === gridEditPageId)) {
+        gridEditPageId = pages[0] ? pages[0].id : '';
+    }
+    if (box) {
+        box.textContent = '';
+        if (!pages.length) {
+            const d = document.createElement('div');
+            d.className = 'hint';
+            d.textContent = '还没有网格页（配置读取后会补一页「默认」）。';
+            box.appendChild(d);
+        }
+        pages.forEach((pg) => {
+            const row = document.createElement('div');
+            row.className = 'item';
+            if (pg.id === defId) row.classList.add('on');
+
+            const nm = document.createElement('input');
+            nm.className = 'txt';
+            nm.type = 'text';
+            nm.value = pg.name || '';
+            nm.maxLength = 24;
+            nm.style.maxWidth = '200px';
+            nm.title = '改完按回车或点旁边空白处生效';
+            const commit = async () => {
+                const v = nm.value.trim();
+                if (!v || v === pg.name) { nm.value = pg.name || ''; return; }
+                try {
+                    await invoke('grid_page_rename', { id: pg.id, name: v });
+                    CONF = window.CONF = await invoke('get_config');
+                    renderGridPages();
+                    pushGridPreview();
+                    gridMsg('gridPageMsg', '已改名');
+                } catch (e) { gridMsg('gridPageMsg', String(e || '改名失败'), true); }
+            };
+            nm.addEventListener('blur', commit);
+            nm.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') { e.preventDefault(); nm.blur(); }
+                if (e.key === 'Escape') { nm.value = pg.name || ''; nm.blur(); }
+            });
+            row.appendChild(nm);
+
+            const cnt = document.createElement('span');
+            cnt.className = 'nm';
+            cnt.style.flex = '0 0 auto';
+            cnt.style.opacity = '.7';
+            cnt.textContent = (Array.isArray(pg.items) ? pg.items.length : 0) + ' 格';
+            row.appendChild(cnt);
+
+            const ops = document.createElement('span');
+            ops.className = 'ops';
+            if (pg.id === defId) {
+                const b = document.createElement('span');
+                b.textContent = '★ 默认页';
+                b.style.cssText = 'font-size:11px;opacity:.75;padding:0 4px';
+                ops.appendChild(b);
+            } else {
+                const b = document.createElement('button');
+                b.className = 'mini';
+                b.type = 'button';
+                b.textContent = '设为默认';
+                b.addEventListener('click', async () => {
+                    try {
+                        await invoke('grid_page_set_default', { id: pg.id });
+                        CONF = window.CONF = await invoke('get_config');
+                        renderGridPages();
+                        gridMsg('gridPageMsg', '默认页已切换');
+                    } catch (e) { gridMsg('gridPageMsg', String(e || '设置失败'), true); }
+                });
+                ops.appendChild(b);
+            }
+            if (pages.length > 1) {
+                const del = document.createElement('button');
+                del.className = 'mini';
+                del.type = 'button';
+                del.textContent = '删除';
+                del.addEventListener('click', async () => {
+                    if (!confirm('删除网格页「' + (pg.name || pg.id) + '」？\n\n这一页的格子内容会一起删掉。')) return;
+                    try {
+                        await invoke('grid_page_delete', { id: pg.id });
+                        CONF = window.CONF = await invoke('get_config');
+                        gridEditPageId = '';
+                        renderGridPages();
+                        renderGridItems();
+                        renderGridApps();
+                        pushGridPreview();
+                        gridMsg('gridPageMsg', '已删除');
+                    } catch (e) { gridMsg('gridPageMsg', String(e || '删除失败'), true); }
+                });
+                ops.appendChild(del);
+            }
+            row.appendChild(ops);
+            box.appendChild(row);
+        });
+    }
+
+    // 「正在编辑的页」下拉
+    const sel = $('gridEditPage');
+    if (sel) {
+        const keep = gridEditPageId;
+        sel.textContent = '';
+        pages.forEach((pg) => {
+            const o = document.createElement('option');
+            o.value = pg.id;
+            o.textContent = (pg.id === defId ? '★ ' : '') + (pg.name || pg.id);
+            sel.appendChild(o);
+        });
+        sel.value = keep || (pages[0] ? pages[0].id : '');
+        sel.disabled = pages.length < 2;
+        sel.title = pages.length < 2 ? '只有一个网格页时不用切' : '换一页来编辑它的内容';
+    }
+
+    // 「按应用切换」里的页下拉
+    const sel2 = $('gridAppPage');
+    if (sel2) {
+        const keep2 = sel2.value;
+        sel2.textContent = '';
+        pages.forEach((pg) => {
+            const o = document.createElement('option');
+            o.value = pg.id;
+            o.textContent = (pg.id === defId ? '★ ' : '') + (pg.name || pg.id);
+            sel2.appendChild(o);
+        });
+        if (pages.some((p) => p.id === keep2)) sel2.value = keep2;
+        else if (pages.length) sel2.value = pages[0].id;
+    }
+}
+
+/** 画「按应用切换」的绑定列表。 */
+function renderGridApps() {
+    const box = $('gridAppList');
+    if (!box) return;
+    box.textContent = '';
+    const binds = ((CONF && CONF.gridAppPages) || []).slice();
+    const pages = gridPagesCfg();
+    const nameOf = (id) => {
+        const p = pages.find((x) => x.id === id);
+        return p ? (p.name || p.id) : '（已删除）';
+    };
+    if (!binds.length) {
+        const d = document.createElement('div');
+        d.className = 'hint';
+        d.textContent = '还没有绑定：所有软件都用默认页。上面填个进程名就能给某个软件指定一页。';
+        box.appendChild(d);
+        return;
+    }
+    binds.forEach((b) => {
+        const row = document.createElement('div');
+        row.className = 'item';
+        const nm = document.createElement('span');
+        nm.className = 'nm';
+        nm.textContent = b.app;
+        const arrow = document.createElement('em');
+        arrow.textContent = ' → ' + nameOf(b.page);
+        nm.appendChild(arrow);
+        row.appendChild(nm);
+
+        const ops = document.createElement('span');
+        ops.className = 'ops';
+        const del = document.createElement('button');
+        del.className = 'mini';
+        del.type = 'button';
+        del.textContent = '移除';
+        del.addEventListener('click', async () => {
+            try {
+                await invoke('grid_app_page_remove', { app: b.app });
+                CONF = window.CONF = await invoke('get_config');
+                renderGridApps();
+                gridMsg('gridAppMsg', '已解除绑定');
+            } catch (e) { gridMsg('gridAppMsg', String(e || '移除失败'), true); }
+        });
+        ops.appendChild(del);
+        row.appendChild(ops);
+        box.appendChild(row);
+    });
+}
+
+/** 多页 / 应用绑定那几个控件的绑定（启动时调一次）。 */
+function bindGridPages() {
+    if ($('btnGridPageAdd')) {
+        $('btnGridPageAdd').addEventListener('click', async () => {
+            const inp = $('gridPageName');
+            const name = (inp && inp.value || '').trim();
+            try {
+                const id = await invoke('grid_page_add', { name });
+                CONF = window.CONF = await invoke('get_config');
+                gridEditPageId = String(id || '');
+                if (inp) inp.value = '';
+                renderGridPages();
+                renderGridItems();
+                renderGridApps();
+                pushGridPreview();
+                gridMsg('gridPageMsg', '已新建「' + (name || '网格页') + '」，可直接在下面加内容');
+            } catch (e) { gridMsg('gridPageMsg', String(e || '新建失败'), true); }
+        });
+        const inp = $('gridPageName');
+        if (inp) inp.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') { e.preventDefault(); $('btnGridPageAdd').click(); }
+        });
+    }
+    if ($('gridEditPage')) {
+        $('gridEditPage').addEventListener('change', () => {
+            gridEditPageId = $('gridEditPage').value || '';
+            renderGridItems();
+            renderGridPages();
+        });
+    }
+    if ($('btnGridAppAdd')) {
+        $('btnGridAppAdd').addEventListener('click', async () => {
+            const app = ($('gridAppName') && $('gridAppName').value || '').trim();
+            const page = $('gridAppPage') ? $('gridAppPage').value : '';
+            if (!app) { gridMsg('gridAppMsg', '先填进程名，如 chrome.exe', true); return; }
+            if (!page) { gridMsg('gridAppMsg', '先选一个网格页', true); return; }
+            try {
+                await invoke('grid_app_page_set', { app, page });
+                CONF = window.CONF = await invoke('get_config');
+                // 多条绑定时，输入框留着方便连着配下一个；单条就清掉
+                if ($('gridAppName')) $('gridAppName').value = '';
+                renderGridApps();
+                gridMsg('gridAppMsg', '已绑定：' + app);
+            } catch (e) { gridMsg('gridAppMsg', String(e || '绑定失败'), true); }
+        });
+        const inp = $('gridAppName');
+        if (inp) inp.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') { e.preventDefault(); $('btnGridAppAdd').click(); }
+        });
+    }
+}
+
+/** 把网格相关的表单一次性接上（启动时调一次）。 */
+function bindGrid() {
+    if ($('btnGridHotkey')) {
+        $('btnGridHotkey').addEventListener('click', async () => {
+            const key = ($('gridHotkey').value || '').trim();
+            try {
+                await invoke('set_grid_hotkey', { hotkey: key });
+                CONF = window.CONF = await invoke('get_config');
+                gridFill();
+                gridMsg('gridHotkeyMsg', '已生效：' + (CONF.gridHotkey || key));
+            } catch (e) {
+                // 冲突/非法组合的话术由后端给（"已经分配给收藏夹了"等）
+                gridMsg('gridHotkeyMsg', String(e || '保存失败'), true);
+            }
+        });
+    }
+    if ($('btnGridSize')) {
+        $('btnGridSize').addEventListener('click', () => saveGridLook(false));
+    }
+    if ($('gridShowLabel')) {
+        $('gridShowLabel').addEventListener('change', async () => {
+            const on = $('gridShowLabel').value !== '0';
+            try {
+                await invoke('set_setting', { key: 'gridShowLabel', value: on });
+                CONF = window.CONF = await invoke('get_config');
+                pushGridPreview();
+                gridMsg('gridSizeMsg', on ? '格子已显示名称' : '格子只显示图标');
+            } catch (e) {
+                gridMsg('gridSizeMsg', String(e || '保存失败'), true);
+            }
+        });
+    }
+    if ($('btnGridReset')) {
+        $('btnGridReset').addEventListener('click', async () => {
+            // 回到出厂值：3×3、104×76、间距 8、圆角 12
+            const dft = { gridRows: 3, gridCols: 3, gridCellW: 104, gridCellH: 76, gridGap: 8, gridRadius: 12 };
+            for (const k of Object.keys(dft)) if ($(k)) $(k).value = dft[k];
+            pushGridPreview();
+            await saveGridLook(true);
+            gridMsg('gridSizeMsg', '已恢复默认外观');
+        });
+    }
+    /* 实时预览 + 自动保存：
+     *   · `input`  → 只更新预览（拖数字时立刻能看到格子变大变小）；
+     *   · `change` → 防抖 350ms 后**自动落库**（用户改完就生效，不用记得点保存）。
+     * 按钮「保存外观」仍在，给"想立刻确认"的人用。 */
+    let lookTimer = 0;
+    for (const id of ['gridRows', 'gridCols', 'gridCellW', 'gridCellH', 'gridGap', 'gridRadius']) {
+        const el = $(id);
+        if (!el) continue;
+        el.addEventListener('input', () => {
+            pushGridPreview();
+            // 格子数变了，内容列表里的"超出格子数"标记也要跟着更新
+            renderGridItems();
+        });
+        el.addEventListener('change', () => {
+            clearTimeout(lookTimer);
+            lookTimer = setTimeout(() => saveGridLook(true), 350);
+        });
+    }
+    // 功能开关：点一下立刻存（不需要"保存"按钮，误触成本也低）
+    if ($('s-gridEnable')) $('s-gridEnable').addEventListener('change', saveGridBehavior);
+    if ($('s-gridAllowAdd')) $('s-gridAllowAdd').addEventListener('change', saveGridBehavior);
+    if ($('gridClick')) $('gridClick').addEventListener('change', saveGridBehavior);
+    if ($('btnGridDiag')) {
+        $('btnGridDiag').addEventListener('click', async () => {
+            try {
+                const d = await invoke('grid_diag');
+                // 把"会不会触发"翻成一句人话，别把 JSON 甩给用户
+                const problems = [];
+                if (!d.ok) problems.push('组合键写法不对（认不出主键）');
+                if (!d.triggerCopy) problems.push('「按快捷键弹出网格页」总开关是关的');
+                if (d.paused) problems.push('程序处于暂停状态');
+                if (!d.foregroundAllowed) problems.push('当前程序在黑名单里');
+                if (problems.length) {
+                    gridMsg('gridSizeMsg', '⚠ ' + problems.join('；'), true);
+                } else {
+                    gridMsg('gridSizeMsg',
+                        '✅ 快捷键 ' + d.hotkey + ' 解析正常（vk=' + (d.parsed ? d.parsed.vkHex : '?') + '），'
+                        + '总开关开着、未暂停、当前程序不在黑名单 —— 按下它应该立刻弹出网格页');
+                }
+            } catch (e) {
+                gridMsg('gridSizeMsg', String(e || '自检失败'), true);
+            }
+        });
+    }
+    if ($('btnGridPreview')) {
+        $('btnGridPreview').addEventListener('click', () => {
+            invoke('grid_preview').catch((e) => gridMsg('gridSizeMsg', String(e), true));
+        });
+    }
+    /* 加内容：不再让用户手打引擎名，直接从「选择窗口」里挑（可搜索、按类别分组、
+     * 图标和设置页其它地方一致）。 */
+    if ($('btnGridPick')) {
+        $('btnGridPick').addEventListener('click', () => openPickModal('grid'));
+    }
+    if ($('btnGridImport')) {
+        $('btnGridImport').addEventListener('click', async () => {
+            try {
+                const _pg = gridEditPage();
+                const n = await invoke('grid_import_bar', { page: _pg ? _pg.id : null });
+                CONF = window.CONF = await invoke('get_config');
+                renderGridItems();
+                gridMsg('gridItemsMsg', `已从横条导入 ${n} 项`);
+            } catch (e) {
+                gridMsg('gridItemsMsg', String(e || '导入失败'), true);
+            }
+        });
+    }
+    if ($('btnGridClear')) {
+        $('btnGridClear').addEventListener('click', () => {
+            if (!confirm('清空格子内容？横条那边不受影响。')) return;
+            gridSaveItems([], '已清空');
+        });
+    }
+    gridFill();
+    renderGridItems();
+}
+
+/* ------------------------------------------------------------------ */
+/* 智能直达（@go:<id>）                                                */
+/* ------------------------------------------------------------------ */
+
+/** 正在编辑的草稿。null = 没在编辑。
+ *  `mode`: 'add' = 新识别出来还没保存；'edit' = 改已存在的某一条。 */
+let goDraft = null;
+
+/** 哨兵前缀。正常走 shared.js 的 window.QS_GO_PREFIX；
+ *  万一脚本顺序有变（或旧缓存）拿到 undefined，退回字面量，
+ *  绝不让整行渲染因为一个 undefined 抛错、把列表留成空白。 */
+function goPrefix() {
+    return window.QS_GO_PREFIX || '@go:';
+}
+
+function goKindText(k) {
+    return k === 'url' ? '网址' : (k === 'app' ? '软件' : '文件');
+}
+
+/** 添加面板下面那行提示。`bad` = 出错（红字）。 */
+function goMsg(text, bad) {
+    const el = $('goMsg');
+    if (!el) return;
+    el.textContent = text || '';
+    el.style.color = bad ? 'var(--danger, #B0182A)' : '';
+}
+
+/** 一个「标签 + 输入框」的行，和设置页别处同一套 class。 */
+function goField(label, id, value, placeholder) {
+    const row = document.createElement('div');
+    row.className = 'row col';
+    const rt = document.createElement('div');
+    rt.className = 'rt';
+    const b = document.createElement('b');
+    b.textContent = label;
+    rt.appendChild(b);
+    row.appendChild(rt);
+    const inp = document.createElement('input');
+    inp.className = 'txt';
+    inp.id = id;
+    inp.spellcheck = false;
+    inp.value = value || '';
+    if (placeholder) inp.placeholder = placeholder;
+    row.appendChild(inp);
+    return row;
+}
+
+function goBtn(text, title, fn, cls) {
+    const b = document.createElement('button');
+    b.className = cls || 'mini';
+    b.type = 'button';
+    b.textContent = text;
+    if (title) b.title = title;
+    b.addEventListener('click', fn);
+    return b;
+}
+
+/** 识别结果 / 编辑表单。新增与编辑共用这一张卡。 */
+function renderGoPreview() {
+    const box = $('goPreview');
+    if (!box) return;
+    if (!goDraft) {
+        box.style.display = 'none';
+        box.textContent = '';
+        return;
+    }
+    box.style.display = '';
+    box.textContent = '';
+
+    const head = document.createElement('div');
+    head.className = 'item editing';
+    const ic = document.createElement('span');
+    ic.className = 'ic';
+    if (goDraft.icon) {
+        const img = document.createElement('img');
+        img.src = goDraft.icon;
+        img.alt = '';
+        img.style.width = '28px';
+        img.style.height = '28px';
+        img.style.objectFit = 'contain';
+        ic.appendChild(img);
+    } else {
+        /* 没自定义图标 → 按**类型**画默认图（网址/文件夹/文档/图片/音视频…）。
+         * 以前这里画的是名字首字，用户看不出"这条会打开什么"；默认图必须
+         * 和横条、网格页上那张一致，所以复用 shared.js 的同一套内置图。 */
+        const kind = goDraft.iconKind || goDraft.kind || 'file';
+        if (typeof qsGoSvgIcon === 'function') {
+            ic.appendChild(qsGoSvgIcon(kind));
+        } else {
+            const sp = document.createElement('span');
+            sp.className = 'letter';
+            sp.textContent = (String(goDraft.name || '直').match(/[A-Za-z0-9\u4e00-\u9fa5]/) || ['直'])[0].toUpperCase();
+            sp.style.setProperty('--lt-color', '#6B7280');
+            ic.appendChild(sp);
+        }
+    }
+    head.appendChild(ic);
+
+    const nm = document.createElement('span');
+    nm.className = 'nm';
+    nm.textContent = goDraft.mode === 'add' ? '识别结果（保存前可改）' : '编辑入口';
+    const kb = document.createElement('i');
+    kb.className = 'kb' + (goDraft.kind === 'url' ? '' : ' open');
+    kb.textContent = goKindText(goDraft.kind);
+    nm.appendChild(kb);
+    head.appendChild(nm);
+    box.appendChild(head);
+
+    box.appendChild(goField('名称', 'goName', goDraft.name, '横条上显示的字'));
+    box.appendChild(goField('备注', 'goNote', goDraft.note, '网址默认抓网页标题；软件取程序名；文件取文件名'));
+    /* 网址：备注默认是**自动抓来的网页标题**。抓不到（页面没写 <title> / 打不开）
+     * 时留空，这里给一颗按钮让用户手动重试（改了目标地址之后也用得上）。 */
+    if (goDraft.kind === 'url') {
+        const r = document.createElement('div');
+        r.className = 'row';
+        const rt = document.createElement('div');
+        rt.className = 'rt';
+        const b = document.createElement('b');
+        b.textContent = '备注会自动抓网页标题';
+        const sm = document.createElement('small');
+        sm.textContent = '抓不到就留空（可手动填）；改了下面的「目标」之后可以再抓一次';
+        rt.appendChild(b);
+        rt.appendChild(sm);
+        r.appendChild(rt);
+        r.appendChild(goBtn('重新抓标题', '按当前「目标」再抓一次网页标题', async () => {
+            const u = (($('goTarget') && $('goTarget').value) || '').trim();
+            if (!u) { goMsg('目标为空', true); return; }
+            goMsg('正在抓标题…');
+            try {
+                const t = await invoke('url_title', { url: u });
+                if ($('goNote')) $('goNote').value = t;
+                if (goDraft) goDraft.note = t;
+                goMsg('已抓到标题：' + t);
+            } catch (e) {
+                goMsg(String(e || '没抓到标题'), true);
+            }
+        }, 'btn ghost'));
+        box.appendChild(r);
+    }
+    box.appendChild(goField('目标', 'goTarget', goDraft.target, '网址 / 程序路径 / 文件路径'));
+
+    // 图标：缩略图 + 选图 + 图片地址 + 清空
+    const irow = document.createElement('div');
+    irow.className = 'row';
+    const irt = document.createElement('div');
+    irt.className = 'rt';
+    const ib = document.createElement('b');
+    ib.textContent = '图标';
+    irt.appendChild(ib);
+    const ism = document.createElement('small');
+    ism.textContent = '留空 = 按类型自动选图：网址 / 文件夹 / 文本 / 图片 / 视频 / 音频 / 软件…（软件还会抠程序图标）';
+    irt.appendChild(ism);
+    irow.appendChild(irt);
+
+    const iops = document.createElement('span');
+    iops.className = 'ops';
+    iops.appendChild(goBtn('选本地图片', '从电脑里挑一张图片当图标', async () => {
+        if (!goDraft || goDraft.mode === 'add') {
+            // 新增时还没落库，先让用户挑文件路径再交给后端下载/转换
+            goMsg('先把这条保存下来，再换图标也行；也可以直接填下面的「图片地址」', true);
+            return;
+        }
+        try {
+            const url = await invoke('shortcut_pick_icon', { id: goDraft.id });
+            goDraft.icon = url;
+            renderGoPreview();
+        } catch (e) {
+            goMsg(String(e || '选图标失败'), true);
+        }
+    }));
+    iops.appendChild(goBtn('图片地址', '填一个 http(s) 图片地址，或本地图片路径', async () => {
+        const spec = ($('goIconSpec') && $('goIconSpec').value || '').trim();
+        if (!spec) { goMsg('先在右边的输入框里填图片地址或路径', true); return; }
+        if (!goDraft || goDraft.mode === 'add') {
+            goDraft.icon = spec;   // 新增时先记着，保存时由后端下载/转换
+            goMsg('已记下，保存时会把图片存进配置');
+            return;
+        }
+        try {
+            const url = await invoke('shortcut_set_icon', { id: goDraft.id, spec });
+            goDraft.icon = url;
+            goMsg('图标已更新');
+            renderGoPreview();
+            CONF = window.CONF = await invoke('get_config');
+            renderGoList();
+        } catch (e) { goMsg(String(e || '设置图标失败'), true); }
+    }));
+    iops.appendChild(goBtn('清空图标', '恢复成按类型的默认图标（网址/文件夹/文档/音视频…）', async () => {
+        goDraft.icon = '';
+        renderGoPreview();
+        if (goDraft.id) {
+            try {
+                await invoke('shortcut_update', { id: goDraft.id, name: null, note: null, icon: '', target: null });
+                CONF = window.CONF = await invoke('get_config');
+                renderGoList();
+            } catch (_) { /* 忽略：下次保存会带上 */ }
+        }
+    }));
+    irow.appendChild(iops);
+    box.appendChild(irow);
+
+    const spec = document.createElement('input');
+    spec.className = 'txt';
+    spec.id = 'goIconSpec';
+    spec.spellcheck = false;
+    spec.placeholder = 'https://…/icon.png 或 D:/Pictures/icon.png';
+    box.appendChild(spec);
+
+    const foot = document.createElement('div');
+    foot.className = 'row';
+    const fops = document.createElement('span');
+    fops.className = 'ops';
+    fops.appendChild(goBtn('保存', '保存这条入口', goSave, 'btn'));
+    fops.appendChild(goBtn('取消', '不保存', () => {
+        goDraft = null;
+        goMsg('');
+        renderGoPreview();
+        renderGoList();
+    }, 'btn ghost'));
+    foot.appendChild(fops);
+    box.appendChild(foot);
+}
+
+/** 列表里的一行。 */
+function goRow(it) {
+    const sentinel = goPrefix() + it.id;
+    const on = ((CONF && CONF.barList) || []).includes(sentinel);
+    const row = document.createElement('div');
+    row.className = 'item';
+
+    const ic = document.createElement('span');
+    ic.className = 'ic';
+    ic.appendChild(window.qsGoIconNode(sentinel));
+
+    const nm = document.createElement('span');
+    nm.className = 'nm';
+    /* 显示名优先级：**备注 > 名称 > 目标**（用户明确要求"设了备注就用备注当名字"）。
+     * 备注一般是"这个网址是干什么的"（自动抓的网页标题），比域名好认。 */
+    nm.textContent = window.qsGoLabel ? window.qsGoLabel(it) : (it.note || it.name || it.target);
+    if (it.note && it.name && it.note.trim() !== it.name.trim()) {
+        // 名称还留着，用小字跟在后面，方便对照（不然用户以为名字被改了）
+        const orig = document.createElement('em');
+        orig.textContent = '名称：' + it.name;
+        nm.appendChild(orig);
+    }
+    const em = document.createElement('em');
+    em.textContent = on ? '已在横条' : '没在横条上';
+    nm.appendChild(em);
+    const kb = document.createElement('i');
+    kb.className = 'kb' + (it.kind === 'url' ? '' : ' open');
+    kb.textContent = goKindText(it.kind);
+    kb.title = it.kind === 'url' ? '网址：点一下用默认浏览器打开'
+        : (it.kind === 'app' ? '软件：点一下启动它' : '文件：点一下用关联程序打开');
+    nm.appendChild(kb);
+    const u = document.createElement('small');
+    u.className = 'curl';
+    u.textContent = it.target;
+    nm.appendChild(u);
+    /* ⚠ 备注已经当标题显示了（见上面的 qsGoLabel），这里**不再重复**一遍
+     * "备注：xxx" —— 同一行里同一句话说两次，用户会以为哪里出了错。 */
+
+    const ops = document.createElement('span');
+    ops.className = 'ops';
+    const idx = ((CONF && CONF.shortcuts) || []).findIndex((x) => x.id === it.id);
+
+    ops.appendChild(goBtn('↑', '上移一位', () => invoke('shortcut_move', { id: it.id, delta: -1 })));
+    ops.appendChild(goBtn('↓', '下移一位', () => invoke('shortcut_move', { id: it.id, delta: 1 })));
+    ops.appendChild(goBtn(on ? '已在横条' : '固定到横条',
+        on ? '从横条上移除' : '固定到横条末尾',
+        () => invoke('shortcut_pin', { id: it.id, on: !on })));
+    ops.appendChild(goBtn('改图标', '挑一张本地图片当图标',
+        () => invoke('shortcut_pick_icon', { id: it.id }).catch((e) => goMsg(String(e), true))));
+    ops.appendChild(goBtn('编辑', '改名称、备注、目标', () => {
+        goDraft = {
+            mode: 'edit', id: it.id, kind: it.kind, target: it.target,
+            name: it.name, note: it.note, icon: it.icon,
+            iconKind: it.iconKind || '',
+        };
+        renderGoPreview();
+        renderGoList();
+        const el = $('goName');
+        if (el) el.focus();
+    }));
+    /* 一键放到横条 / 网格页（用户要求：在每个功能项旁边直接选"加到哪"，
+     * 不用跑到网格页设置里再手打名字）。已在里面时按钮变成移除。 */
+    const sBar = window.QS_GO_PREFIX + it.id;
+    ops.appendChild(goBtn(
+        ((CONF && CONF.barList) || []).includes(sBar) ? '−横条' : '＋横条',
+        '把这条智能直达加到横条（再点一次移除）',
+        () => toggleAddTo('bar', sBar),
+    ));
+    ops.appendChild(goBtn(
+        ((CONF && CONF.gridItems) || []).includes(sBar) ? '−网格' : '＋网格',
+        '把这条智能直达加到网格页（再点一次移除）',
+        () => toggleAddTo('grid', sBar),
+    ));
+    // 「试一下」：立刻打开。路径被移动 / 软件被卸载时这里就能看见原因，
+    // 不用等点了横条那一格才发现点不动。
+    ops.appendChild(goBtn('试一下', '马上打开这个目标', () => {
+        invoke('shortcut_open', { id: it.id })
+            .then(() => goMsg('已打开：' + it.name))
+            .catch((e) => goMsg(String(e || '打不开'), true));
+    }));
+    ops.appendChild(goBtn('删除', '删掉这条入口（横条上那一格也会消失）', () => {
+        if (!confirm('删除「' + it.name + '」？横条上那一格也会一起消失。')) return;
+        invoke('shortcut_delete', { id: it.id })
+            .then(() => { goMsg('已删除 ' + it.name); })
+            .catch((e) => goMsg(String(e || '删除失败'), true));
+    }));
+
+    row.appendChild(ic);
+    row.appendChild(nm);
+    row.appendChild(ops);
+    // 上下移按钮到头就灰掉，避免点了没反应还以为是坏的
+    const btns = ops.querySelectorAll('button');
+    if (idx <= 0 && btns[0]) btns[0].disabled = true;
+    if (idx >= ((CONF && CONF.shortcuts) || []).length - 1 && btns[1]) btns[1].disabled = true;
+    return row;
+}
+
+/** 列表整体重画（空状态 / 有内容两种）。 */
+function renderGoList() {
+    const box = $('goList');
+    if (!box) return;
+    box.textContent = '';
+    const list = (CONF && CONF.shortcuts) || [];
+    if (!list.length) {
+        const d = document.createElement('div');
+        d.className = 'hint';
+        d.textContent = '还没有智能直达入口。在上面粘一个网址、软件路径或文件路径，识别出来点「保存」就行。';
+        box.appendChild(d);
+        return;
+    }
+    for (const it of list) box.appendChild(goRow(it));
+}
+
+/** 「识别并添加」：先识别，再看预览卡确认。 */
+async function goDetect() {
+    const raw = (($('goInput') && $('goInput').value) || '').trim();
+    if (!raw) {
+        goMsg('先粘贴一个链接、软件路径或文件路径', true);
+        goDraft = null;
+        renderGoPreview();
+        return;
+    }
+    goMsg('识别中…');
+    try {
+        const d = await invoke('shortcut_detect', { input: raw });
+        if (d && d.error) {
+            // 无效地址 / 路径不存在：错误原样显示，不进入预览（免得用户以为能存）
+            goMsg(d.error, true);
+            goDraft = null;
+            renderGoPreview();
+            return;
+        }
+        goDraft = {
+            mode: 'add', raw,
+            kind: d.kind, target: d.target,
+            name: d.name, note: d.note, icon: d.icon,
+            // 默认图标类型（后端按目录/扩展名算的），预览卡据此画图
+            iconKind: d.iconKind || '',
+        };
+        /* 网址的备注 = 自动抓的网页标题。抓不到时后端会退回域名，
+         * 这时**别装作抓到了** —— 直说一句，用户才知道可以自己填。 */
+        if (d.kind === 'url' && (!d.note || d.note === d.name)) {
+            goMsg('识别为「网址」，但没抓到网页标题（页面可能没写标题或打不开）—— 备注可手动填');
+        } else {
+            goMsg('识别为「' + goKindText(d.kind) + '」，确认没问题就点保存');
+        }
+        renderGoPreview();
+        const el = $('goName');
+        if (el) el.focus();
+    } catch (e) {
+        goMsg(String(e || '识别失败'), true);
+    }
+}
+
+/** 保存（新增或编辑）。 */
+async function goSave() {
+    if (!goDraft) return;
+    const target = (($('goTarget') && $('goTarget').value) || '').trim();
+    const name = (($('goName') && $('goName').value) || '').trim();
+    const note = (($('goNote') && $('goNote').value) || '').trim();
+    if (!target) { goMsg('目标不能为空', true); return; }
+    try {
+        if (goDraft.mode === 'add') {
+            await invoke('shortcut_add', { input: target, name, note, icon: goDraft.icon || '' });
+            goMsg('已添加');
+            if ($('goInput')) $('goInput').value = '';
+        } else {
+            await invoke('shortcut_update', {
+                id: goDraft.id, name, note, icon: goDraft.icon || '', target,
+            });
+            goMsg('已保存');
+        }
+        goDraft = null;
+        renderGoPreview();
+        CONF = window.CONF = await invoke('get_config');
+        renderGoList();
+    } catch (e) {
+        // 重复添加 / 路径失效 / 超量都会走到这里，错误话术由后端给
+        goMsg(String(e || '保存失败'), true);
+    }
+}
+
 // ---- 外部软件：新建 / 编辑 / 回车提交 ----
+// ---- 智能直达：识别 / 回车识别 ----
+if ($('goDetectBtn')) $('goDetectBtn').addEventListener('click', goDetect);
+if ($('goInput')) {
+    // 回车 = 识别；粘贴后直接敲回车能一路走完
+    $('goInput').addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            goDetect();
+        }
+    });
+    // 拖文件进来：把路径填进输入框（Chromium 给的是 File 对象，没有路径，
+    // 只能提示用户改用复制路径；拖拽仍比手打快一步的是"拖进来再复制路径"）
+    $('goInput').addEventListener('dragover', (e) => e.preventDefault());
+    $('goInput').addEventListener('drop', (e) => {
+        e.preventDefault();
+        const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+        if (!f) return;
+        const p = f.path || '';
+        if (p) {
+            $('goInput').value = p;
+            goDetect();
+        } else {
+            goMsg('浏览器没给出这个文件的路径，请右键复制路径后粘贴', true);
+        }
+    });
+}
+
 $('btnApSave').addEventListener('click', submitAppForm);
 $('btnApCancel').addEventListener('click', () => {
     resetAppForm();
@@ -8596,6 +9790,10 @@ listen('qs://config', (ev) => {
 /** 广播到达后的整段刷新（拆成函数只是为了给调用处套 try/catch）。 */
 function applyConfigBroadcast() {
     qsSetText('ver', 'v' + (CONF.version || '—'));
+    // 智能直达：增删改、排序、钉横条都会广播过来，列表跟着重画
+    try { renderGoList(); } catch (e) { console.error('[qs] 智能直达列表刷新出错', e); }
+    // 网格页同理：尺寸/快捷键/内容一变就同步到表单和列表
+    try { gridFill(); renderGridItems(); pushGridPreview(); } catch (e) { console.error('[qs] 网格刷新出错', e); }
     fillAbout();
     // 自定义引擎可能刚被增删改，先后并一次再渲染
     qsMergeCustomEngines(CATALOG, BY_NAME, CONF);
@@ -8662,7 +9860,12 @@ listen('qs://goto-tab', (ev) => {
     const name = String((ev && ev.payload) || '').trim();
     if (!name) return;
     const b = document.querySelector('#tabs button[data-tab="' + name + '"]');
-    if (b) b.click();
+    if (b) {
+        b.click();
+    } else if (SUB_TO_GROUP[name]) {
+        // 子页（ai / go / ocr / backup / help …）：打开它所属的分组并定位到这一项
+        showPane(SUB_TO_GROUP[name], name);
+    }
 });
 
 listen('qs://focus-engine', (ev) => {
@@ -9216,7 +10419,7 @@ async function qsSelfTest() {
 /* ------------------------------------------------------------------ */
 /* r80：AI 抠图（图标编辑器用）                                          */
 /* ⚠ 这一整块必须在**顶层**，不能写在 boot() 里。                        */
-/*   它原来确实在 boot 函数体内（`(async function boot() {` 一直到文件末尾  */
+/*   它原来确实在 boot 函数体内（从 boot 那一行一直到文件末尾的 `})();`），   */
 /*   才 `})();`），于是 15 个 ai* 函数全成了 boot 的局部函数 ——            */
 /*   `bindSwitches` 里 `typeof aiOnSwitchChanged === 'function'` 永远为假， */
 /*   开关切换后后端的模型 / 运行库状态永不刷新（用户看到"开关点了没反应"）。*/
@@ -9983,6 +11186,54 @@ function bindStartupPassword() {
     }
 }
 
+/* 三类「模型」的清单（文字识别 / 识图 / 翻译）与 id→名称索引。
+ * 声明放在 boot 之前，避免 TDZ：`renderGridItems()` 在 boot 里就会被调一次。 */
+const PICK_MODELS = { ocr: [], img: [], trans: [] };
+const MODEL_NAMES = new Map();
+
+/* ------------------------------------------------------------------ */
+/* 在我们自己的窗口里也能用网格快捷键                                    */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 低级键盘钩子收不到"发往本进程窗口"的按键（实测：设置页里按 Ctrl+C 钩子零事件），
+ * 所以设置页必须自己接住快捷键再转发给后端（`grid_trigger_from_ui`）。
+ *
+ * 规则：
+ *   · 光标停在输入框 / 文本域 / 可编辑区域里时**不拦** —— 那里 Ctrl+C 应该是复制；
+ *   · 命中配置里的 `gridHotkey`（默认 ctrl+c）才触发，并阻止默认行为；
+ *   · 长按重复（e.repeat）忽略，避免连弹。
+ */
+function hotkeyMatches(e, spec) {
+    const parts = String(spec || '').toLowerCase().split('+').map((x) => x.trim()).filter(Boolean);
+    if (!parts.length) return false;
+    const key = parts[parts.length - 1];
+    const wantCtrl = parts.includes('ctrl') || parts.includes('control');
+    const wantAlt = parts.includes('alt');
+    const wantShift = parts.includes('shift');
+    const wantWin = parts.includes('win') || parts.includes('meta');
+    if (!!e.ctrlKey !== wantCtrl) return false;
+    if (!!e.altKey !== wantAlt) return false;
+    if (!!e.shiftKey !== wantShift) return false;
+    if (!!e.metaKey !== wantWin) return false;
+    let k = String(e.key || '').toLowerCase();
+    if (k === ' ') k = 'space';
+    if (k === 'escape') k = 'esc';
+    if (k === 'delete') k = 'del';
+    return k === key;
+}
+
+document.addEventListener('keydown', (e) => {
+    if (e.repeat) return;
+    const t = e.target;
+    const typing = t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
+    if (typing) return;
+    const spec = (CONF && CONF.gridHotkey) || 'ctrl+c';
+    if (!hotkeyMatches(e, spec)) return;
+    e.preventDefault();
+    invoke('grid_trigger_from_ui').catch(() => { });
+});
+
 (async function boot() {
     bindTabs();
 
@@ -9997,6 +11248,16 @@ function bindStartupPassword() {
      * 只有 renderAllList 一条路（见上面 r73 那段）。 */
 
     CONF = window.CONF = await invoke('get_config');
+    // 网格页表单（快捷键 / 行列 / 单元格 / 内容项）在配置到手之后再绑，
+    // 不然 gridFill() 读到的是空配置，输入框会显示默认值而不是用户的值
+    bindGrid();
+    bindGridPages();
+    bindAppBind();
+    // 「添加内容」选板里的三类模型（异步拉，拉到就补画）
+    loadPickModels();
+    // 首屏就把多页列表 / 应用绑定画出来（用户可能一进来就切「网格页设置」）
+    renderGridPages();
+    renderGridApps();
     $('ver').textContent = 'v' + (CONF.version || '—');
     fillAbout();
     // 调试构建才打开自动化辅助（坐标上报等）
@@ -10060,3 +11321,787 @@ function bindStartupPassword() {
     // r80：AI 抠图（开关回填 + 状态查询 + 模型列表）
     aiInit();
 })();
+/* ==================================================================
+ * 添加到横条 / 添加到网格页（全设置页共用）
+ *
+ * 用户要求：把"搜索框 + 添加"这种间接路径去掉，改成在每个功能项旁边
+ * 直接选"加到哪"。所以这套动作被三处复用：智能直达行、引擎行、
+ * 包裹符号页；网格页设置里的「＋ 添加内容」也走同一个选择窗口。
+ * ================================================================== */
+
+async function refreshConf() {
+    CONF = window.CONF = await invoke('get_config');
+}
+function barHas(name) { return ((CONF && CONF.barList) || []).includes(name); }
+/** 当前编辑页里有没有这一项（"添加内容"选择窗口的「已添加」标记用它）。 */
+function gridHas(name) { return gridItemsNow().includes(name); }
+/** 任意一页里有没有这一项（包裹页那个"已在网格页"开关用它）。 */
+function gridHasAny(name) {
+    return gridPagesCfg().some((p) => Array.isArray(p.items) && p.items.includes(name));
+}
+
+async function addToBar(name) {
+    if (barHas(name)) return;
+    await invoke('toggle_bar_engine', { engine: name, on: true });
+    await refreshConf();
+}
+async function removeFromBar(name) {
+    await invoke('toggle_bar_engine', { engine: name, on: false });
+    await refreshConf();
+}
+async function addToGrid(name) {
+    const pg = gridEditPage();
+    const cur = gridItemsNow();
+    if (!cur.includes(name)) cur.push(name);
+    await invoke('set_grid_items', { items: cur, page: pg ? pg.id : null });
+    await refreshConf();
+}
+/** 从**所有页**里移除这一项。
+ *
+ *  这个函数服务的是「加到网格页 / 从网格页移除」那个**开关**（包裹页、引擎行），
+ *  它的语义是"这个功能在网格里到底有没有"，不是"当前这一页有没有" ——
+ *  只删当前页的话，用户会看到开关变成"未添加"，可另一页里还留着它。 */
+async function removeFromGrid(name) {
+    const pages = gridPagesCfg();
+    for (const pg of pages) {
+        if (!Array.isArray(pg.items) || !pg.items.includes(name)) continue;
+        const next = pg.items.filter((n) => n !== name);
+        await invoke('set_grid_items', { items: next, page: pg.id });
+    }
+    await refreshConf();
+}
+
+/** 一键切换：在就移除、不在就加。`target` = 'bar' | 'grid'。 */
+async function toggleAddTo(target, name) {
+    try {
+        if (target === 'bar') {
+            if (barHas(name)) await removeFromBar(name); else await addToBar(name);
+        } else {
+            if (gridHas(name)) await removeFromGrid(name); else await addToGrid(name);
+        }
+        try { renderGridItems(); } catch (_) { }
+        try { renderGoList(); } catch (_) { }
+        try { syncWrapButtons(); } catch (_) { }
+        pushGridPreview();
+    } catch (e) {
+        alert(String(e || '操作失败'));
+    }
+}
+
+/* ---------------- 按应用绑定（横条 + 网格页） ---------------- */
+
+/** 正在配置的那个应用（进程名，用户输入的原样）。空 = 还没选。 */
+let appBindCur = '';
+/** `app_content_resolve` 的结果：该应用**最终**会看到什么、为什么（回退原因）。 */
+let appBindRes = null;
+
+/** 某个应用的横条专项内容（精确同名才算；通配绑定不在这里返回）。 */
+function barAppItemsOf(app) {
+    const list = (CONF && Array.isArray(CONF.barAppItems)) ? CONF.barAppItems : [];
+    const key = String(app || '').toLowerCase();
+    const hit = list.find((b) => b && String(b.app || '').toLowerCase() === key);
+    return hit && Array.isArray(hit.items) ? hit.items.slice() : null;
+}
+
+/** 某个应用绑的网格页 id（精确同名才算）。空 = 没绑。 */
+function gridAppPageOf(app) {
+    const list = (CONF && Array.isArray(CONF.gridAppPages)) ? CONF.gridAppPages : [];
+    const key = String(app || '').toLowerCase();
+    const hit = list.find((b) => b && String(b.app || '').toLowerCase() === key);
+    return hit ? String(hit.page || '') : '';
+}
+
+/** 页 id → 显示名（找不到就说"已删除"，别把 id 原样甩给用户）。 */
+function gridPageNameOf(id) {
+    const p = gridPagesCfg().find((x) => x.id === id);
+    return p ? (p.name || p.id) : '（已删除）';
+}
+
+/** 画「网格页」下拉（把该应用当前绑的页选中）。 */
+function renderAppBindPageSelect() {
+    const sel = $('appGridPage');
+    if (!sel) return;
+    const defId = (CONF && CONF.gridDefaultPage) || '';
+    const keep = sel.value;
+    const bound = appBindCur ? gridAppPageOf(appBindCur) : '';
+    sel.textContent = '';
+    const o0 = document.createElement('option');
+    o0.value = '';
+    o0.textContent = '（跟随默认）';
+    sel.appendChild(o0);
+    for (const pg of gridPagesCfg()) {
+        const o = document.createElement('option');
+        o.value = pg.id;
+        o.textContent = (pg.id === defId ? '★ ' : '') + (pg.name || pg.id);
+        sel.appendChild(o);
+    }
+    const want = bound || keep || '';
+    sel.value = gridPagesCfg().some((p) => p.id === want) ? want : '';
+}
+
+/** 把某个应用"现在会看到什么"渲染出来（横条 + 网格页两段）。 */
+function renderAppBind() {
+    if (!appBindCur || !appBindRes) return;
+    const app = appBindCur;
+
+    /* ── 横条 ──────────────────────────────────────────────── */
+    const b = appBindRes.bar || { items: [], source: 'default', matched: '', note: '' };
+    const barOwn = barAppItemsOf(app);          // 该应用**自己的**专项（null = 没配）
+    const st = $('appBarState');
+    if (st) {
+        if (b.source === 'app') {
+            const viaWild = b.matched && b.matched.toLowerCase() !== app.toLowerCase();
+            st.textContent = '当前生效：专项（' + b.items.length + ' 项）'
+                + (viaWild ? ' · 由通配绑定「' + b.matched + '」提供' : '');
+            st.style.color = '';
+        } else {
+            st.textContent = '当前生效：默认横条（' + b.items.length + ' 项）'
+                + (b.note ? ' · ' + b.note + '，已回退' : (b.matched ? ' · 命中「' + b.matched + '」但它没有可用内容' : ' · 未单独配置'));
+            st.style.color = b.note ? 'var(--danger, #B0182A)' : '';
+        }
+    }
+    const box = $('appBarList');
+    if (box) {
+        box.textContent = '';
+        const items = barOwn || [];
+        if (!items.length) {
+            const d = document.createElement('div');
+            d.className = 'hint';
+            d.textContent = b.source === 'app'
+                ? '这个应用没有自己的专项内容，现在生效的是通配绑定「' + b.matched + '」。点「添加内容」会基于当前这 ' + b.items.length + ' 项建一份只属于它的副本。'
+                : '这个应用没有单独的横条内容 —— 现在用默认横条（' + b.items.length + ' 项）。点「添加内容」会基于默认那份建一份副本，再随便加减。';
+            box.appendChild(d);
+        }
+        for (const name of items) {
+            const row = document.createElement('div');
+            row.className = 'item';
+            const nm = document.createElement('span');
+            nm.className = 'nm';
+            nm.textContent = (window.qsDisplayName ? window.qsDisplayName(name) : name);
+            row.appendChild(nm);
+            const ops = document.createElement('span');
+            ops.className = 'ops';
+            const del = document.createElement('button');
+            del.className = 'mini';
+            del.type = 'button';
+            del.textContent = '移除';
+            del.title = '从「' + app + '」的横条里移出这一项';
+            del.addEventListener('click', async () => {
+                const next = (barAppItemsOf(app) || []).filter((n) => n !== name);
+                try {
+                    await invoke('bar_app_items_set', { app, items: next });
+                    await refreshConf();
+                    await loadAppBind(app);
+                    gridMsg('appBarMsg', '已移除：' + (window.qsDisplayName ? window.qsDisplayName(name) : name));
+                } catch (e) { gridMsg('appBarMsg', String(e || '移除失败'), true); }
+            });
+            ops.appendChild(del);
+            row.appendChild(ops);
+            box.appendChild(row);
+        }
+    }
+    if ($('btnAppBarReset')) {
+        $('btnAppBarReset').disabled = !barOwn;
+        $('btnAppBarReset').title = barOwn ? '删掉这个应用的专项内容，回退默认横条' : '还没有专项内容';
+    }
+
+    /* ── 网格页 ────────────────────────────────────────────── */
+    const g = appBindRes.grid || { pageId: '', pageName: '', items: [], source: 'default', matched: '', note: '' };
+    const gs = $('appGridState');
+    if (gs) {
+        if (g.source === 'app') {
+            const viaWild = g.matched && g.matched.toLowerCase() !== app.toLowerCase();
+            gs.textContent = '当前生效：专项页「' + g.pageName + '」（' + g.items.length + ' 格）'
+                + (viaWild ? ' · 由通配绑定「' + g.matched + '」提供' : '');
+            gs.style.color = '';
+        } else {
+            gs.textContent = '当前生效：默认页「' + (g.pageName || '默认') + '」（' + g.items.length + ' 格）'
+                + (g.note ? ' · ' + g.note + '，已回退' : ' · 未单独配置');
+            gs.style.color = g.note ? 'var(--danger, #B0182A)' : '';
+        }
+    }
+    renderAppBindPageSelect();
+    const gbox = $('appGridList');
+    const boundPid = gridAppPageOf(app);
+    if (gbox) {
+        gbox.textContent = '';
+        if (!g.items.length) {
+            const d = document.createElement('div');
+            d.className = 'hint';
+            d.textContent = '这一页还没有内容。';
+            gbox.appendChild(d);
+        }
+        for (const name of g.items) {
+            const row = document.createElement('div');
+            row.className = 'item';
+            const nm = document.createElement('span');
+            nm.className = 'nm';
+            nm.textContent = (window.qsDisplayName ? window.qsDisplayName(name) : name);
+            row.appendChild(nm);
+            const ops = document.createElement('span');
+            ops.className = 'ops';
+            if (boundPid) {
+                const del = document.createElement('button');
+                del.className = 'mini';
+                del.type = 'button';
+                del.textContent = '移除';
+                del.title = '从「' + (g.pageName || '这一页') + '」里移出这一项';
+                del.addEventListener('click', async () => {
+                    const pg = gridPagesCfg().find((p) => p.id === boundPid);
+                    const next = (pg && Array.isArray(pg.items) ? pg.items : []).filter((n) => n !== name);
+                    try {
+                        await invoke('set_grid_items', { items: next, page: boundPid });
+                        await refreshConf();
+                        await loadAppBind(app);
+                        gridMsg('appGridMsg', '已移除');
+                    } catch (e) { gridMsg('appGridMsg', String(e || '移除失败'), true); }
+                });
+                ops.appendChild(del);
+            }
+            row.appendChild(ops);
+            gbox.appendChild(row);
+        }
+    }
+    if ($('btnAppGridAdd')) {
+        $('btnAppGridAdd').disabled = !boundPid;
+    }
+    if ($('appGridAddHint')) {
+        $('appGridAddHint').textContent = boundPid
+            ? '加到「' + (g.pageName || '这一页') + '」里'
+            : '先绑一页再加内容（不然会改到默认页，影响所有软件）';
+    }
+    if ($('btnAppGridReset')) {
+        $('btnAppGridReset').disabled = !boundPid;
+    }
+}
+
+/** 拉一次解析结果并渲染（`app` 空则用当前的）。 */
+async function loadAppBind(app) {
+    const a = String(app === undefined ? appBindCur : app || '').trim();
+    if (!a) {
+        gridMsg('appBindMsg', '先填一个进程名，例如 chrome.exe', true);
+        return;
+    }
+    appBindCur = a;
+    try {
+        appBindRes = await invoke('app_content_resolve', { app: a });
+        gridMsg('appBindMsg', '');
+    } catch (e) {
+        appBindRes = null;
+        gridMsg('appBindMsg', String(e || '查不到这个应用的配置'), true);
+        return;
+    }
+    if ($('appBarCard')) $('appBarCard').hidden = false;
+    if ($('appGridCard')) $('appGridCard').hidden = false;
+    gridMsg('appBarMsg', '');
+    gridMsg('appGridMsg', '');
+    renderAppBind();
+}
+
+/** 往「该应用的横条专项」里加一项：没建过就先拿当前生效的那份做副本。 */
+async function appBarAddItem(name) {
+    if (!appBindCur || !appBindRes) return;
+    const own = barAppItemsOf(appBindCur);
+    const base = own || (appBindRes.bar && Array.isArray(appBindRes.bar.items) ? appBindRes.bar.items.slice() : []);
+    if (base.includes(name)) {
+        gridMsg('appBarMsg', '这一项已经在里面了');
+        return;
+    }
+    await invoke('bar_app_items_set', { app: appBindCur, items: base.concat([name]) });
+    await refreshConf();
+    await loadAppBind(appBindCur);
+    gridMsg('appBarMsg', '已加入「' + appBindCur + '」的横条');
+}
+
+/** 往「该应用绑定的那页」里加一项。没绑页就不让加（免得改到默认页）。 */
+async function appGridAddItem(name) {
+    if (!appBindCur) return;
+    const pid = gridAppPageOf(appBindCur);
+    if (!pid) {
+        gridMsg('appGridMsg', '还没绑定页：先在左边选一页并「绑定这一页」，再加内容（免得改到默认页影响所有软件）', true);
+        return;
+    }
+    const pg = gridPagesCfg().find((p) => p.id === pid);
+    const items = (pg && Array.isArray(pg.items) ? pg.items : []).slice();
+    if (items.includes(name)) {
+        gridMsg('appGridMsg', '这一项已经在里面了');
+        return;
+    }
+    await invoke('set_grid_items', { items: items.concat([name]), page: pid });
+    await refreshConf();
+    await loadAppBind(appBindCur);
+    gridMsg('appGridMsg', '已加入「' + gridPageNameOf(pid) + '」');
+}
+
+/** 「已配置的应用」总表：把两类绑定按进程名并起来，一条应用一行。 */
+function renderAppBindList() {
+    const box = $('appBindList');
+    if (!box) return;
+    box.textContent = '';
+    const rows = new Map();   // lower(app) -> { app, bar, grid }
+    for (const b of ((CONF && CONF.barAppItems) || [])) {
+        if (!b || !b.app) continue;
+        const k = String(b.app).toLowerCase();
+        if (!rows.has(k)) rows.set(k, { app: b.app, bar: null, grid: null });
+        rows.get(k).bar = b;
+    }
+    for (const b of ((CONF && CONF.gridAppPages) || [])) {
+        if (!b || !b.app) continue;
+        const k = String(b.app).toLowerCase();
+        if (!rows.has(k)) rows.set(k, { app: b.app, bar: null, grid: null });
+        rows.get(k).grid = b;
+    }
+    if (!rows.size) {
+        const d = document.createElement('div');
+        d.className = 'hint';
+        d.textContent = '还没有任何按应用配置 —— 所有软件都用默认横条 + 默认网格页。上面填个进程名就能开始配。';
+        box.appendChild(d);
+        return;
+    }
+    const keys = [...rows.keys()].sort();
+    for (const k of keys) {
+        const r = rows.get(k);
+        const row = document.createElement('div');
+        row.className = 'item';
+        const nm = document.createElement('span');
+        nm.className = 'nm';
+        nm.textContent = r.app;
+        const l1 = document.createElement('small');
+        l1.className = 'curl';
+        l1.textContent = '横条：' + (r.bar ? (r.bar.items.length + ' 项') : '—')
+            + '　网格页：' + (r.grid ? gridPageNameOf(r.grid.page) : '—');
+        nm.appendChild(l1);
+        row.appendChild(nm);
+
+        const ops = document.createElement('span');
+        ops.className = 'ops';
+        const ed = document.createElement('button');
+        ed.className = 'mini';
+        ed.type = 'button';
+        ed.textContent = '配置';
+        ed.addEventListener('click', () => {
+            if ($('appBindName')) $('appBindName').value = r.app;
+            loadAppBind(r.app);
+            const card = $('appBarCard');
+            if (card && card.scrollIntoView) card.scrollIntoView({ block: 'nearest' });
+        });
+        ops.appendChild(ed);
+        const rm = document.createElement('button');
+        rm.className = 'mini';
+        rm.type = 'button';
+        rm.textContent = '清除';
+        rm.title = '删掉这个应用的两类专项（横条 + 网格页），回退默认';
+        rm.addEventListener('click', async () => {
+            if (!confirm('清除「' + r.app + '」的按应用配置？\n\n横条专项和网格页绑定都会删掉，之后它用默认配置。')) return;
+            try {
+                await invoke('bar_app_items_remove', { app: r.app });
+                await invoke('grid_app_page_remove', { app: r.app });
+                await refreshConf();
+                renderAppBindList();
+                if (appBindCur && appBindCur.toLowerCase() === String(r.app).toLowerCase()) {
+                    await loadAppBind(appBindCur);
+                }
+            } catch (e) { gridMsg('appBindMsg', String(e || '清除失败'), true); }
+        });
+        ops.appendChild(rm);
+        row.appendChild(ops);
+        box.appendChild(row);
+    }
+}
+
+/** 「按应用」这一页的控件绑定（启动时调一次）。 */
+function bindAppBind() {
+    const load = () => loadAppBind($('appBindName') ? $('appBindName').value : '');
+    if ($('btnAppBindLoad')) $('btnAppBindLoad').addEventListener('click', load);
+    if ($('appBindName')) {
+        $('appBindName').addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') { e.preventDefault(); load(); }
+        });
+    }
+    if ($('btnAppBindFg')) {
+        $('btnAppBindFg').addEventListener('click', async () => {
+            try {
+                const exe = await invoke('foreground_app');
+                if (!exe) { gridMsg('appBindMsg', '取不到当前前台窗口的进程名（可能在受保护的软件里）', true); return; }
+                if ($('appBindName')) $('appBindName').value = exe;
+                await loadAppBind(exe);
+            } catch (e) { gridMsg('appBindMsg', String(e || '取不到前台应用'), true); }
+        });
+    }
+    if ($('btnAppBarAdd')) {
+        $('btnAppBarAdd').addEventListener('click', () => openPickModal('barapp'));
+    }
+    if ($('btnAppBarReset')) {
+        $('btnAppBarReset').addEventListener('click', async () => {
+            if (!appBindCur) return;
+            try {
+                await invoke('bar_app_items_remove', { app: appBindCur });
+                await refreshConf();
+                await loadAppBind(appBindCur);
+                const res = appBindRes && appBindRes.bar;
+                if (res && res.source === 'app') {
+                    gridMsg('appBarMsg', '已删掉「' + appBindCur + '」的专项；但它仍命中通配绑定「' + res.matched + '」，所以还是专项内容', true);
+                } else {
+                    gridMsg('appBarMsg', '已恢复默认横条');
+                }
+                renderAppBindList();
+            } catch (e) { gridMsg('appBarMsg', String(e || '恢复失败'), true); }
+        });
+    }
+    if ($('btnAppGridBind')) {
+        $('btnAppGridBind').addEventListener('click', async () => {
+            if (!appBindCur) { gridMsg('appGridMsg', '先在上面选一个应用', true); return; }
+            const page = $('appGridPage') ? $('appGridPage').value : '';
+            if (!page) { gridMsg('appGridMsg', '先在左边选一页（「跟随默认」= 解除绑定）', true); return; }
+            try {
+                await invoke('grid_app_page_set', { app: appBindCur, page });
+                await refreshConf();
+                await loadAppBind(appBindCur);
+                renderAppBindList();
+                gridMsg('appGridMsg', '已绑定：' + appBindCur + ' → ' + gridPageNameOf(page));
+            } catch (e) { gridMsg('appGridMsg', String(e || '绑定失败'), true); }
+        });
+    }
+    if ($('btnAppGridReset')) {
+        $('btnAppGridReset').addEventListener('click', async () => {
+            if (!appBindCur) return;
+            try {
+                await invoke('grid_app_page_remove', { app: appBindCur });
+                await refreshConf();
+                await loadAppBind(appBindCur);
+                renderAppBindList();
+                const res = appBindRes && appBindRes.grid;
+                if (res && res.source === 'app') {
+                    gridMsg('appGridMsg', '已解除绑定；但仍命中通配绑定「' + res.matched + '」', true);
+                } else {
+                    gridMsg('appGridMsg', '已改为跟随默认页');
+                }
+            } catch (e) { gridMsg('appGridMsg', String(e || '取消失败'), true); }
+        });
+    }
+    if ($('btnAppGridAdd')) {
+        $('btnAppGridAdd').addEventListener('click', () => openPickModal('gridapp'));
+    }
+}
+
+/* ---------------- 选择窗口（设置页） ---------------- */
+
+/* 'grid' = 默认网格页那一页；'bar' = 默认横条；
+ * 'barapp' = 某个应用的横条专项；'gridapp' = 某个应用绑定的那页。
+ * 后两个共用同一个选择窗口，只是"加到哪儿"不同（见 pickOne）。 */
+let pickTarget = 'grid';
+let pickCache = [];
+
+/** 候选内容：附加功能 / 智能直达 / 引擎。图标全部走设置页已有的那套节点，
+ *  和列表里看到的完全一致（用户要求"功能图标与软件设置保持一致"）。 */
+/* 三类「模型」的清单（文字识别 / 识图 / 翻译）。
+ *
+ * 用户口径：「OCR 模型、图片识别模型、翻译模型等应能被搜索到并分别展示」。
+ * 这些清单在后端注册表里，前端通过命令读，避免两份名字各写一遍。
+ * 加进网格的仍然是**功能格子**（@ocr / @img / @trans），具体用哪一家由
+ * 附加功能里选中的模型决定 —— 列表是为了"找得到、看得见有哪些"。 */
+async function loadPickModels() {
+    const grab = async (cmd, key) => {
+        try {
+            const r = await invoke(cmd);
+            if (Array.isArray(r)) {
+                PICK_MODELS[key] = r;
+                for (const m of r) if (m && m.id) MODEL_NAMES.set(String(m.id), m.name || m.id);
+            }
+        } catch (_) { /* 命令不可用：该分组不出现，不影响其它内容 */ }
+    };
+    await Promise.all([
+        grab('ocr_engines_list', 'ocr'),
+        grab('img_engines_list', 'img'),
+        grab('trans_engines_list', 'trans'),
+    ]);
+    // 选板已经开着就补画一次（模型清单是异步来的，可能比用户点开慢一帧）
+    try {
+        if ($('pickModal') && !$('pickModal').hidden) renderPickBody($('pickSearch').value || '');
+        renderGridItems();
+    } catch (_) { }
+}
+
+function pickGroups() {
+    const out = [];
+    const builtin = [
+        ['@ocr', '文字识别'],
+        ['@trans', '翻译'],
+        ['@img', '识图搜索'],
+        ['@wrap', '包裹符号'],
+    ].map(([n, l]) => ({
+        name: n,
+        label: l,
+        node: () => (window.qsFuncIcon ? window.qsFuncIcon(n) : document.createTextNode('•')),
+    }));
+    out.push({ title: '附加功能', items: builtin });
+
+    const go = ((CONF && CONF.shortcuts) || []).filter((x) => x && x.id).map((x) => {
+        const sent = (window.QS_GO_PREFIX || '@go:') + x.id;
+        return {
+            name: sent,
+            // 备注优先（见 qsGoLabel 的注释）
+            label: (x.note || '').trim() || x.name || x.target,
+            node: () => window.qsGoIconNode(sent),
+        };
+    });
+    if (go.length) out.push({ title: '智能直达', items: go });
+
+    /* 收藏夹（v2.6.2，用户要求"添加弹窗里要能看到收藏夹内容"）。
+     * 一格代表一个**目录**（一级/二级都列，二级用缩进区分），加进去的是
+     * `@fav:<id>` 哨兵 —— 和横条上那颗收藏夹按钮同一种东西：点一下在横条里
+     * 展开这个目录的条目，再点条目就复制/注入。 */
+    const favTree = (CONF && Array.isArray(CONF.favorites)) ? CONF.favorites : [];
+    const favItems = [];
+    const walkFav = (g, lv) => {
+        if (!g || !g.id) return;
+        const sent = (window.QS_FAV_PREFIX || '@fav:') + g.id;
+        favItems.push({
+            name: sent,
+            label: (lv ? '\u3000'.repeat(lv) + '└ ' : '') + (g.name || '收藏夹'),
+            node: () => (window.qsFavIconNode ? window.qsFavIconNode(sent) : document.createTextNode('★')),
+        });
+        for (const sub of (g.children || [])) walkFav(sub, lv + 1);
+    };
+    for (const g of favTree) walkFav(g, 0);
+    if (favItems.length) out.push({ title: '收藏夹', items: favItems });
+
+    /* 三类模型各自成组：搜「百度」能看到 百度 OCR，搜「翻译」能看到各家翻译，
+     * 不用先去别的地方找。 */
+    const addModelGroup = (title, list, sentinel, activeIds) => {
+        if (!list || !list.length) return;
+        out.push({
+            title,
+            items: list.map((m) => ({
+                name: sentinel,
+                label: (m.name || m.id) + (activeIds.has(String(m.id)) ? '（当前使用）' : ''),
+                node: () => (window.qsFuncIcon ? window.qsFuncIcon(sentinel) : document.createTextNode('•')),
+            })),
+        });
+    };
+    const imgOn = new Set(((CONF && CONF.imgEngines) || []).map(String));
+    addModelGroup('文字识别模型', PICK_MODELS.ocr, '@ocr',
+        new Set([String((CONF && CONF.ocrEngine) || '')]));
+    addModelGroup('识图模型', PICK_MODELS.img, '@img', imgOn);
+    addModelGroup('翻译模型', PICK_MODELS.trans, '@trans',
+        new Set([String((CONF && CONF.transEngine) || '')]));
+
+    const seen = new Set();
+    const eng = [];
+    const push = (n) => {
+        if (!n || seen.has(n)) return;
+        seen.add(n);
+        eng.push({ name: n, label: n, node: () => iconNode(n, 18) });
+    };
+    try { for (const c of (CATALOG.categories || [])) for (const e of (c.engines || [])) push(e.name); } catch (_) { }
+    try { for (const e of (CATALOG.toolbar || [])) push(e.name); } catch (_) { }
+    if (eng.length) out.push({ title: '引擎', items: eng });
+    return out;
+}
+
+function openPickModal(target) {
+    const m = $('pickModal');
+    if (!m) return;
+    pickTarget = (target === 'bar' || target === 'barapp' || target === 'gridapp') ? target : 'grid';
+    pickCache = pickGroups();
+    $('pickTitle').textContent = pickTarget === 'bar'
+        ? '添加到横条'
+        : pickTarget === 'barapp'
+            ? '添加到「' + (appBindCur || '该应用') + '」的横条'
+            : pickTarget === 'gridapp'
+                ? '添加到「' + gridPageNameOf(gridAppPageOf(appBindCur)) + '」'
+                : '添加到网格页';
+    const inp = $('pickSearch');
+    if (inp) inp.value = '';
+    m.hidden = false;
+    renderPickBody('');
+    /* 焦点：弹窗刚从 display:none 变成可见时元素还没完成布局，直接 focus()
+     * 在 WebView2 里偶发落空（用户报的「搜索框打不了字」）。这里先等一帧、
+     * 再补一次 80ms 的兜底，两次都只做"聚焦 + 选中已有内容"。 */
+    const focusIn = () => {
+        const el = $('pickSearch');
+        if (!el || m.hidden) return;
+        el.focus();
+        try { el.select(); } catch (_) { }
+    };
+    requestAnimationFrame(() => setTimeout(focusIn, 0));
+    setTimeout(focusIn, 80);
+}
+
+function closePickModal() {
+    const m = $('pickModal');
+    if (!m) return;
+    m.hidden = true;
+    const el = $('pickSearch');
+    if (el && document.activeElement === el) el.blur();
+}
+
+/** 画候选列表。`kw` = 搜索词，**真的过滤**（含引擎名匹配）。 */
+function renderPickBody(kw) {
+    const body = $('pickBody');
+    if (!body) return;
+    body.textContent = '';
+    const q = (kw || '').trim().toLowerCase();
+    let shown = 0;
+    for (const g of pickCache) {
+        const hit = q ? g.items.filter((it) => String(it.label).toLowerCase().includes(q)) : g.items;
+        if (!hit.length) continue;
+        const h = document.createElement('div');
+        h.className = 'pickcat';
+        h.textContent = g.title + '（' + hit.length + '）';
+        body.appendChild(h);
+        for (const it of hit.slice(0, 300)) {
+            const row = document.createElement('button');
+            row.type = 'button';
+            row.className = 'pickrow';
+            const ic = document.createElement('span');
+            ic.className = 'pickic';
+            try { ic.appendChild(it.node()); } catch (_) { ic.textContent = '•'; }
+            row.appendChild(ic);
+            const nm = document.createElement('span');
+            nm.className = 'picknm';
+            nm.textContent = it.label;
+            row.appendChild(nm);
+            const tag = document.createElement('span');
+            tag.className = 'picktag';
+            const on = pickTarget === 'bar'
+                ? barHas(it.name)
+                : pickTarget === 'barapp'
+                    ? !!(barAppItemsOf(appBindCur) || []).includes(it.name)
+                    : pickTarget === 'gridapp'
+                        ? (() => {
+                            const pid = gridAppPageOf(appBindCur);
+                            const pg = gridPagesCfg().find((p) => p.id === pid);
+                            return !!(pg && Array.isArray(pg.items) && pg.items.includes(it.name));
+                        })()
+                        : gridHas(it.name);
+            if (on) tag.classList.add('on');
+            tag.textContent = on ? '已添加' : '添加';
+            row.appendChild(tag);
+            row.addEventListener('click', () => pickOne(it.name, row, tag));
+            body.appendChild(row);
+            shown++;
+        }
+    }
+    if (!shown) {
+        const e = document.createElement('div');
+        e.className = 'pickempty';
+        e.textContent = q ? '没找到匹配的内容' : '没有可添加的内容';
+        body.appendChild(e);
+    }
+}
+
+async function pickOne(name, row, tag) {
+    try {
+        if (pickTarget === 'bar') {
+            if (!barHas(name)) await addToBar(name);
+        } else if (pickTarget === 'barapp') {
+            await appBarAddItem(name);
+        } else if (pickTarget === 'gridapp') {
+            await appGridAddItem(name);
+        } else if (!gridHas(name)) {
+            await addToGrid(name);
+        }
+        if (tag) { tag.textContent = '已添加'; tag.classList.add('on'); }
+        if (row) row.classList.add('on');
+        if (pickTarget === 'grid') {
+            try { renderGridItems(); } catch (_) { }
+            pushGridPreview();
+        }
+    } catch (e) {
+        /* 后端会把"哪几项不认识"整句带回来 —— 直接显示，别吞成一句"添加失败" */
+        alert(String(e || '添加失败'));
+    }
+}
+
+/* ---------------- 包裹符号页 ---------------- */
+
+let wrapPairsUI = null;
+
+async function renderWrapPane() {
+    const box = $('wrapPairsList');
+    if (!box) return;
+    if (!wrapPairsUI) {
+        try { wrapPairsUI = await invoke('wrap_pairs'); } catch (_) { wrapPairsUI = []; }
+    }
+    box.textContent = '';
+    for (const p of wrapPairsUI) {
+        const row = document.createElement('div');
+        row.className = 'item';
+        const nm = document.createElement('span');
+        nm.className = 'nm';
+        nm.textContent = p.name;
+        const sm = document.createElement('small');
+        sm.className = 'curl';
+        sm.textContent = p.left + '文' + p.right;
+        nm.appendChild(sm);
+        row.appendChild(nm);
+        box.appendChild(row);
+    }
+    syncWrapButtons();
+}
+
+function syncWrapButtons() {
+    const n = window.QS_WRAP || '@wrap';
+    if ($('btnWrapToBar')) {
+        const on = barHas(n);
+        $('btnWrapToBar').textContent = on ? '已在横条（点击移除）' : '添加到横条';
+        $('btnWrapToBar').classList.toggle('ghost', on);
+    }
+    if ($('btnWrapToGrid')) {
+        const on = gridHasAny(n);
+        $('btnWrapToGrid').textContent = on ? '已在网格页（点击移除）' : '添加到网格页';
+        $('btnWrapToGrid').classList.toggle('ghost', on);
+    }
+}
+
+/* ---------------- 绑定（脚本在 body 末尾，元素一定在） ---------------- */
+
+if ($('btnGridPick')) {
+    // 已由 bindGrid 绑过一次，这里不再重复
+} else if (0) { /* noop */ }
+
+if ($('btnWrapToBar')) {
+    $('btnWrapToBar').addEventListener('click', () => {
+        const n = window.QS_WRAP || '@wrap';
+        /* 不再往页面里写「已加到横条 / 已从横条移除」这类文字提示：
+         * 按钮自己的文案（「添加到横条」↔「已在横条（点击移除）」）已经把状态
+         * 说清楚了，多一行提示反而像出错信息（用户要求去掉）。 */
+        toggleAddTo('bar', n);
+    });
+}
+if ($('btnWrapToGrid')) {
+    $('btnWrapToGrid').addEventListener('click', () => {
+        const n = window.QS_WRAP || '@wrap';
+        toggleAddTo('grid', n);
+    });
+}
+
+if ($('pickClose')) $('pickClose').addEventListener('click', closePickModal);
+if ($('pickSearch')) {
+    $('pickSearch').addEventListener('input', () => renderPickBody($('pickSearch').value));
+    $('pickSearch').addEventListener('keydown', (e) => {
+        /* 这里的按键**一律不冒泡**：设置页里有几处 window 级 keydown（快捷键录入、
+         * 方向键导航）会 preventDefault，弹窗里打字时被它们截走就表现为"打不了字"。 */
+        e.stopPropagation();
+        if (e.key === 'Escape') { e.preventDefault(); closePickModal(); return; }
+        if (e.key === 'Enter') {
+            // 回车 = 添加当前列表里的第一条（键盘筛选 → 回车，整条路不用鼠标）
+            const first = $('pickBody') && $('pickBody').querySelector('.pickrow');
+            if (first) { e.preventDefault(); first.click(); }
+        }
+    });
+}
+
+/* Esc 关弹窗：焦点不在搜索框时（比如点了列表又滚了滚）也能关。 */
+document.addEventListener('keydown', (e) => {
+    const m = $('pickModal');
+    if (!m || m.hidden) return;
+    if (e.key === 'Escape') { e.preventDefault(); closePickModal(); }
+});
+if ($('pickModal')) {
+    // 点空白处关闭（点卡片内部不关）
+    $('pickModal').addEventListener('click', (e) => {
+        if (e.target === $('pickModal')) closePickModal();
+    });
+}

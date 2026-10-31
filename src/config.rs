@@ -112,6 +112,10 @@ pub const BAR_IMG: &str = "@img";
 /// 前端 `window.QS_TRANS` 必须与本常量保持一致。
 pub const BAR_TRANS: &str = "@trans";
 
+/// 包裹符号按钮的哨兵：它是一等横条成员（可拖、可移出、可加进网格页），
+/// 和 `@ocr` / `@trans` 同一套待遇。
+pub const BAR_WRAP: &str = "@wrap";
+
 /// 用户自己加的搜索引擎。
 ///
 /// 只存「名字 + URL 模板 + 分类」几样东西。图标故意不放进这个结构 ——
@@ -306,6 +310,53 @@ pub struct ExternalApp {
 }
 
 
+/// 「智能直达」的一条入口：软件 / 网址 / 本地文件，三类共用一个结构。
+///
+/// 为什么独立于 [`ExternalApp`]（外部软件）：
+///   · `ExternalApp` 的 `kind` 表达的是**用途**（拿选中文字去搜 / 原样打开），
+///     和"目标是软件还是网址"是两根轴，硬塞会互相打架；
+///   · 直达要能存**备注**、要能表达"文件/文件夹"，这些在 `ExternalApp` 里没有；
+///   · 两个列表各自排序、各自钉横条，互不影响 —— 老用户的外部软件不会因为
+///     新增直达功能而被打乱。
+///
+/// 横条上的哨兵是 `@go:<id>`（见 [`SHORTCUT_PREFIX`]），与 `@app:<id>` 同一套路。
+#[derive(Clone, Serialize, Deserialize, Debug)]
+#[serde(default)]
+pub struct Shortcut {
+    /// 唯一 id（随机串），横条哨兵与图标键都用它
+    pub id: String,
+    /// `app`（程序/快捷方式）/ `url`（网址）/ `file`（文件或文件夹）
+    pub kind: String,
+    /// 目标：网址原样；路径已展开 `%VAR%` 与 `~`，但**不**改成绝对路径 ——
+    /// 用户写的相对写法（`%USERPROFILE%\x`）留着更容易看懂，也便于跨账号搬
+    pub target: String,
+    /// 显示名（横条格子上的字）
+    pub name: String,
+    /// 备注：网址抓网页标题、软件取程序名、文件取文件名，之后用户可改
+    pub note: String,
+    /// 自定义图标：data URL 或 http(s) 图片地址。
+    /// 空 = 用类型默认（软件自动抠 exe 图标，网址/文件用字母徽标）
+    pub icon: String,
+}
+
+impl Default for Shortcut {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            kind: String::new(),
+            target: String::new(),
+            name: String::new(),
+            note: String::new(),
+            icon: String::new(),
+        }
+    }
+}
+
+/// 横条上直达入口的哨兵前缀：`@go:<id>`。
+///
+/// 前端 `window.QS_GO_PREFIX` 必须与本常量保持一致（见 shared.js）。
+pub const SHORTCUT_PREFIX: &str = "@go:";
+
 /// 一条外部软件的用途分类：`"search"` / `"open"`。
 ///
 /// kind 为空（老配置、没存过这个字段）时按 url 里有没有 `%s` 现推 ——
@@ -336,6 +387,28 @@ pub fn is_app_sentinel(name: &str) -> bool {
 /// 由 app id 拼出横条哨兵
 pub fn app_sentinel(id: &str) -> String {
     format!("{APP_PREFIX}{id}")
+}
+
+/// 直达入口在 `bar_list` 里的哨兵：`@go:<id>`。
+pub fn shortcut_sentinel(id: &str) -> String {
+    format!("{SHORTCUT_PREFIX}{id}")
+}
+
+/// 是不是直达入口的哨兵（`@go:<id>`）。
+pub fn is_go_sentinel(n: &str) -> bool {
+    n.starts_with(SHORTCUT_PREFIX)
+}
+
+/// 剪掉 `bar_list` 里指向**已经不存在**的直达入口的 `@go:<id>`，返回剪掉几个。
+///
+/// 和 `prune_app_sentinels` 同一职责：入口被删掉之后，横条上那一格必须跟着消失，
+/// 否则会留一个点了没反应的死格子。
+pub fn prune_shortcut_sentinels(cfg: &mut Config) -> usize {
+    let alive: std::collections::HashSet<String> =
+        cfg.shortcuts.iter().map(|x| shortcut_sentinel(&x.id)).collect();
+    let before = cfg.bar_list.len();
+    cfg.bar_list.retain(|n| !n.starts_with(SHORTCUT_PREFIX) || alive.contains(n));
+    before - cfg.bar_list.len()
 }
 
 /// 剪掉 `bar_list` 里指向**已经不存在的外部软件**的 `@app:<id>` 哨兵。返回剪掉几个。
@@ -397,16 +470,12 @@ pub fn prune_undefined_bar_engines(cfg: &mut Config) -> usize {
          *   `@ocr`     OCR 按钮
          *   `@img`     识图搜索按钮
          *   `@trans`   翻译按钮
+         *   `@wrap`    包裹符号按钮
          *   `@app:<id>`  外部软件
          *   `@fav:<id>`  收藏夹
+         *   `@go:<id>`   智能直达
          */
-        if n == SEP
-            || n == BAR_OCR
-            || n == BAR_IMG
-            || n == BAR_TRANS
-            || is_app_sentinel(n)
-            || is_fav_sentinel(n)
-        {
+        if is_bar_sentinel(n) {
             return true;
         }
         // 空白名没意义，剪掉
@@ -416,6 +485,460 @@ pub fn prune_undefined_bar_engines(cfg: &mut Config) -> usize {
         builtin.contains_key(n.as_str()) || custom.contains(n.as_str())
     });
     before - cfg.bar_list.len()
+}
+
+/* ---------------- 网格页（多页） ---------------- */
+
+/// 简单的 `*` 通配匹配（不区分大小写）。只支持 `*`，够用了：
+/// 用户填 `chrome.exe`（精确）或 `*chrome*`（模糊），不需要完整 glob。
+fn grid_glob_match(pat: &str, text: &str) -> bool {
+    let p: Vec<char> = pat.to_lowercase().chars().collect();
+    let t: Vec<char> = text.to_lowercase().chars().collect();
+    let (mut pi, mut ti) = (0usize, 0usize);
+    let (mut star, mut mark) = (usize::MAX, 0usize);
+    while ti < t.len() {
+        if pi < p.len() && (p[pi] == t[ti]) {
+            pi += 1;
+            ti += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star = pi;
+            mark = ti;
+            pi += 1;
+        } else if star != usize::MAX {
+            pi = star + 1;
+            mark += 1;
+            ti = mark;
+        } else {
+            return false;
+        }
+    }
+    while pi < p.len() && p[pi] == '*' {
+        pi += 1;
+    }
+    pi == p.len()
+}
+
+/// 一条「应用模式」对一个进程名的匹配得分；不匹配返回 None。
+///
+/// 得分 = (具体度, 模式长度)：`2` = 精确匹配（无 `*`），`1` = 通配匹配。
+/// 排序口径（横条与网格页**共用**，保证两类组件"冲突怎么办"完全一致）：
+///   1. 精确 > 通配；
+///   2. 同为通配时模式更长（更具体）的优先；
+///   3. 完全并列时先配的优先（由调用方的 `>` 比较天然做到）。
+///
+/// 大小写不敏感：Windows 进程名不分大小写，`Chrome.exe` 与 `chrome.exe`
+/// 必须算同一个，否则用户从任务管理器抄下来的名字永远对不上。
+fn app_match_score(pat: &str, app: &str) -> Option<(u8, usize)> {
+    let pat = pat.trim();
+    if pat.is_empty() || app.trim().is_empty() {
+        return None;
+    }
+    if pat.contains('*') {
+        if grid_glob_match(pat, app.trim()) {
+            Some((1, pat.chars().count()))
+        } else {
+            None
+        }
+    } else if pat.eq_ignore_ascii_case(app.trim()) {
+        Some((2, pat.chars().count()))
+    } else {
+        None
+    }
+}
+
+/// 按 id 找页下标。
+pub fn grid_page_index(cfg: &Config, id: &str) -> Option<usize> {
+    cfg.grid_pages.iter().position(|p| p.id == id)
+}
+
+/// 横条专项里，这个应用命中的是第几条（下标）。
+pub fn pick_bar_app_index(cfg: &Config, app: &str) -> Option<usize> {
+    let mut best: Option<((u8, usize), usize)> = None;
+    for (i, b) in cfg.bar_app_items.iter().enumerate() {
+        let Some(score) = app_match_score(&b.app, app) else { continue };
+        let better = match best {
+            None => true,
+            Some((s, _)) => score.0 > s.0 || (score.0 == s.0 && score.1 > s.1),
+        };
+        if better {
+            best = Some((score, i));
+        }
+    }
+    best.map(|(_, i)| i)
+}
+
+/// 网格页绑定里，这个应用命中的是第几条（下标）。
+pub fn pick_grid_app_index(cfg: &Config, app: &str) -> Option<usize> {
+    let mut best: Option<((u8, usize), usize)> = None;
+    for (i, b) in cfg.grid_app_pages.iter().enumerate() {
+        let Some(score) = app_match_score(&b.app, app) else { continue };
+        let better = match best {
+            None => true,
+            Some((s, _)) => score.0 > s.0 || (score.0 == s.0 && score.1 > s.1),
+        };
+        if better {
+            best = Some((score, i));
+        }
+    }
+    best.map(|(_, i)| i)
+}
+
+/// 「这一格到底是不是横条/网格页里合法的一格」—— 和 `prune_undefined_bar_engines`
+/// 的剥离口径**完全一致**（同一条判定，两处调用，不会各说各话）。
+///
+/// 合法 = 分隔线 / 内置哨兵 / 外部软件 / 收藏夹 / 智能直达 / 内置引擎 / 自定义引擎。
+pub fn bar_member_defined(cfg: &Config, n: &str) -> bool {
+    if is_bar_sentinel(n) {
+        return true;
+    }
+    if n.trim().is_empty() {
+        return false;
+    }
+    crate::engines::engines().contains_key(n)
+        || cfg.custom_engines.iter().any(|e| e.name == n)
+}
+
+/// 横条/网格页里的「哨兵」：不是引擎名，但确实是合法的一格。
+fn is_bar_sentinel(n: &str) -> bool {
+    n == SEP
+        || n == BAR_OCR
+        || n == BAR_IMG
+        || n == BAR_TRANS
+        || n == BAR_WRAP
+        || is_app_sentinel(n)
+        || is_fav_sentinel(n)
+        || is_go_sentinel(n)
+}
+
+/// 这个应用该用哪一页（返回 `grid_pages` 的下标）。
+///
+/// # 优先级（用户问的"冲突怎么办"）
+///
+/// 1. **精确匹配**优先于通配匹配（`chrome.exe` 比 `*chrome*` 更具体）；
+/// 2. 同为通配时，**模式越长越优先**（`*chrome.exe` 比 `*chrome*` 具体）；
+/// 3. 完全并列时，**配置表里靠前的赢**（先配的说了算，行为可预测）；
+/// 4. 都没命中 / 命中的页已被删 → 回落到 `grid_default_page`，再不行用第一页。
+///
+/// ⚠ 这里只管"**绑到哪一页**"（配置层事实）。"那一页是空的 → 展示时改回默认页"
+///   是**展示规则**，在 `resolve_grid_page` 里做 —— 两个问题分开，免得
+///   设置页说"这个应用绑的是工作页"、而这里已经悄悄换成了默认页。
+///
+/// 大小写不敏感：Windows 的进程名不区分大小写，`Chrome.exe` 和 `chrome.exe`
+/// 必须算同一个，否则用户从任务管理器抄下来的名字永远对不上。
+pub fn pick_grid_page(cfg: &Config, app: &str) -> usize {
+    let fallback = grid_page_index(cfg, &cfg.grid_default_page).unwrap_or(0);
+    let app = app.trim();
+    if app.is_empty() || cfg.grid_pages.is_empty() {
+        return fallback;
+    }
+    let Some(bi) = pick_grid_app_index(cfg, app) else {
+        return fallback;
+    };
+    grid_page_index(cfg, &cfg.grid_app_pages[bi].page).unwrap_or(fallback)
+}
+
+/// 网格页归一：老配置补页、修 id/名字、清悬空绑定、同步 `grid_list` 镜像。
+///
+/// 返回改动条数（只用于日志）。
+pub fn normalize_grid_pages(c: &mut Config) -> usize {
+    let mut changed = 0usize;
+
+    /* ① 老配置（只有 grid_list）→ 补出一页「默认」。
+     *    用户升级后第一次打开网格页看到的还是原来那些格子，不会突然清空。 */
+    if c.grid_pages.is_empty() {
+        c.grid_pages.push(GridPage {
+            id: "p1".to_string(),
+            name: "默认".to_string(),
+            items: c.grid_list.clone(),
+        });
+        c.grid_default_page = "p1".to_string();
+        changed += 1;
+    }
+
+    /* ② id 去重 / 补空；名字补空 */
+    let mut seen: Vec<String> = Vec::new();
+    let mut next_no = 1usize;
+    for p in c.grid_pages.iter_mut() {
+        if p.id.trim().is_empty() || seen.iter().any(|x| *x == p.id) {
+            loop {
+                let cand = format!("p{next_no}");
+                next_no += 1;
+                if !seen.iter().any(|x| *x == cand) {
+                    p.id = cand;
+                    break;
+                }
+            }
+            changed += 1;
+        }
+        seen.push(p.id.clone());
+        if p.name.trim().is_empty() {
+            p.name = format!("网格页 {}", seen.len());
+            changed += 1;
+        }
+        // 形状净化：空名/重复项丢掉（和 set_grid_items 同一口径）
+        let mut out: Vec<String> = Vec::new();
+        for it in p.items.iter() {
+            let n = it.trim().to_string();
+            if n.is_empty() || out.contains(&n) || out.len() >= 60 {
+                changed += 1;
+                continue;
+            }
+            out.push(n);
+        }
+        if out.len() != p.items.len() {
+            p.items = out;
+        }
+    }
+
+    /* ③ 默认页必须存在 */
+    if grid_page_index(c, &c.grid_default_page).is_none() {
+        c.grid_default_page = c.grid_pages.first().map(|p| p.id.clone()).unwrap_or_default();
+        changed += 1;
+    }
+
+    /* ④ 应用绑定：空名 / 指向已删页 / 重复绑定 都清掉（先配的保留） */
+    let before = c.grid_app_pages.len();
+    let mut kept: Vec<GridAppPage> = Vec::new();
+    for b in c.grid_app_pages.iter() {
+        let app = b.app.trim().to_string();
+        if app.is_empty() || grid_page_index(c, &b.page).is_none() {
+            continue;
+        }
+        if kept.iter().any(|x| x.app.eq_ignore_ascii_case(&app)) {
+            continue;
+        }
+        kept.push(GridAppPage { app, page: b.page.clone() });
+    }
+    if kept.len() != before {
+        changed += before - kept.len();
+        c.grid_app_pages = kept;
+    }
+
+    /* ⑤ 兼容镜像：`grid_list` 始终等于默认页的内容。
+     *    还有一批老代码/导出分组只认 `grid_list`，让它别指向一份过期的内容。 */
+    let mirror = grid_page_index(c, &c.grid_default_page)
+        .and_then(|i| c.grid_pages.get(i))
+        .map(|p| p.items.clone())
+        .unwrap_or_default();
+    if c.grid_list != mirror {
+        c.grid_list = mirror;
+        changed += 1;
+    }
+
+    changed
+}
+
+/* ---------------- 按应用绑定：解析（横条 / 网格页共用一套规则） ---------------- */
+
+/// 一次「按应用解析」的结果。
+///
+/// 横条和网格页都返回它 —— 设置页照着 `source` / `note` 就能说清
+/// 「现在是专项还是默认、为什么回退」，不需要再各自实现一遍判定。
+#[derive(Clone, Debug, Default)]
+pub struct Resolved {
+    /// 最终要显示的内容（引擎名 / 哨兵名）。
+    pub items: Vec<String>,
+    /// `"app"` = 命中了某个应用的专项配置；`"default"` = 回落到默认配置。
+    pub source: &'static str,
+    /// 命中的绑定（进程名模式，可能含 `*`）；没命中是空串。
+    pub matched: String,
+    /// 回退 / 修正的原因（给设置页与日志看）；没发生就是空串。
+    pub note: String,
+}
+
+impl Resolved {
+    pub fn is_default(&self) -> bool {
+        self.source == "default"
+    }
+}
+
+/// 网格页解析结果：在 `Resolved` 之上多带"实际显示的是哪一页"。
+#[derive(Clone, Debug, Default)]
+pub struct ResolvedGridPage {
+    /// `grid_pages` 里的下标。
+    pub index: usize,
+    pub id: String,
+    pub name: String,
+    pub resolved: Resolved,
+}
+
+/// 把「这一格还能不能显示」的条目数出来（不修改内容）。
+fn usable_count(cfg: &Config, items: &[String]) -> usize {
+    items.iter().filter(|n| bar_member_defined(cfg, n)).count()
+}
+
+/// **横条**：这个应用该看到哪一份内容。
+///
+/// 判定顺序（和网格页完全对称，见 `resolve_grid_page`）：
+/// 1. 进程名为空 → 默认横条（取不到进程名时绝不误绑）；
+/// 2. 没有命中的绑定 → 默认横条；
+/// 3. 命中但内容为空 → 默认横条，`note` 说明"专项配置为空"；
+/// 4. 命中但内容里没有一格是可用的（引擎被删/哨兵失效）→ 默认横条，
+///    `note` 说明"专项配置里的内容都不可用"；
+/// 5. 否则**严格按专项配置**显示。
+///
+/// ⚠ 第 3、4 条是用户明确要求的"清空/缺失/校验失败一律回退默认"。
+///   它们和"没配过"在界面上**结果一致**（都是默认横条），区别只在 `note`
+///   里给一句原因，方便设置页解释。
+pub fn resolve_bar(cfg: &Config, app: &str) -> Resolved {
+    let default = || Resolved {
+        items: cfg.bar_list.clone(),
+        source: "default",
+        matched: String::new(),
+        note: String::new(),
+    };
+    let app = app.trim();
+    if app.is_empty() {
+        return default();
+    }
+    let Some(i) = pick_bar_app_index(cfg, app) else {
+        return default();
+    };
+    let b = &cfg.bar_app_items[i];
+    let pattern = b.app.trim().to_string();
+    if b.items.is_empty() {
+        return Resolved {
+            items: cfg.bar_list.clone(),
+            source: "default",
+            matched: pattern,
+            note: "专项配置为空".to_string(),
+        };
+    }
+    if usable_count(cfg, &b.items) == 0 {
+        return Resolved {
+            items: cfg.bar_list.clone(),
+            source: "default",
+            matched: pattern,
+            note: "专项配置里的内容都不可用".to_string(),
+        };
+    }
+    Resolved {
+        items: b.items.clone(),
+        source: "app",
+        matched: pattern,
+        note: String::new(),
+    }
+}
+
+/// **网格页**：这个应用该看到哪一页。
+///
+/// 和 `resolve_bar` 同一套顺序，只是"内容"落在页上：
+/// 1. 进程名为空 / 没命中绑定 → 默认页；
+/// 2. 命中的绑定指向一页**已经不存在**的页 → 默认页（`normalize_grid_pages`
+///    按理已经剪掉了，这里再兜一层，防"配置读到一半被删"）；
+/// 3. 命中的页内容为空 → 默认页，`note` = "专项页为空"；
+/// 4. 命中的页里没有一格可用 → 默认页，`note` = "专项页里的内容都不可用"；
+/// 5. 否则**严格按专项页**显示。
+///
+/// ⚠ 回退时返回的是**默认页的下标**，不是"钉在空页上再塞默认内容" ——
+///   这样翻页器的页名/页码、编辑时的"当前页"、切页后记下的"应用→页"全都指向
+///   同一页，不会出现"显示的是默认内容、绑的却是另一页"这种前后不一致。
+pub fn resolve_grid_page(cfg: &Config, app: &str) -> ResolvedGridPage {
+    let def_idx = grid_page_index(cfg, &cfg.grid_default_page).unwrap_or(0);
+    let at = |idx: usize| -> (String, String, Vec<String>) {
+        match cfg.grid_pages.get(idx) {
+            Some(p) => (p.id.clone(), p.name.clone(), p.items.clone()),
+            None => (String::new(), "默认".to_string(), cfg.grid_list.clone()),
+        }
+    };
+    let fallback = |note: &str, matched: &str| -> ResolvedGridPage {
+        let (id, name, items) = at(def_idx);
+        ResolvedGridPage {
+            index: def_idx,
+            id,
+            name,
+            resolved: Resolved {
+                items,
+                source: "default",
+                matched: matched.to_string(),
+                note: note.to_string(),
+            },
+        }
+    };
+    let app = app.trim();
+    if app.is_empty() {
+        return fallback("", "");
+    }
+    let Some(bi) = pick_grid_app_index(cfg, app) else {
+        return fallback("", "");
+    };
+    let b = &cfg.grid_app_pages[bi];
+    let pattern = b.app.trim().to_string();
+    let Some(pi) = grid_page_index(cfg, &b.page) else {
+        return fallback("绑定的页不存在", &pattern);
+    };
+    // 绑的就是默认页：内容本来就一样，直接算"按专项"（页名/页码保持默认页）
+    if pi == def_idx {
+        let (id, name, items) = at(pi);
+        return ResolvedGridPage {
+            index: pi,
+            id,
+            name,
+            resolved: Resolved { items, source: "app", matched: pattern, note: String::new() },
+        };
+    }
+    let (id, name, items) = at(pi);
+    if items.is_empty() {
+        return fallback("专项页为空", &pattern);
+    }
+    if usable_count(cfg, &items) == 0 {
+        return fallback("专项页里的内容都不可用", &pattern);
+    }
+    ResolvedGridPage {
+        index: pi,
+        id,
+        name,
+        resolved: Resolved { items, source: "app", matched: pattern, note: String::new() },
+    }
+}
+
+/// 横条专项配置的归一：trim、去重、剪掉找不到定义的孤儿、清空整条绑定。
+///
+/// 为什么"清空就整条丢掉"：用户要求"专项配置被清空时回退默认"，
+/// 而一条 `items: []` 的绑定和"没有绑定"在展示上完全等价 —— 留着它只会在
+/// 设置页里显示一条"已绑定但空"的幽灵记录。丢掉之后 `matched` 也自然为空，
+/// 一句话就能说清"这个应用没配过，用默认"。
+pub fn normalize_bar_app_items(c: &mut Config) -> usize {
+    let mut changed = 0usize;
+    let mut kept: Vec<BarAppItems> = Vec::new();
+    for b in c.bar_app_items.iter() {
+        let app = b.app.trim().to_string();
+        if app.is_empty() {
+            changed += 1;
+            continue;
+        }
+        if kept.iter().any(|x| x.app.eq_ignore_ascii_case(&app)) {
+            changed += 1;
+            continue;
+        }
+        let mut items: Vec<String> = Vec::new();
+        for raw in b.items.iter() {
+            let n = raw.trim().to_string();
+            if n.is_empty() || !bar_member_defined(c, &n) || items.contains(&n) {
+                changed += 1;
+                continue;
+            }
+            items.push(n);
+        }
+        if items.len() > 60 {
+            items.truncate(60);
+            changed += 1;
+        }
+        if items.is_empty() {
+            // 剪干净了 = 这份专项等于没有 → 整条丢掉（展示上回退默认横条）
+            changed += 1;
+            continue;
+        }
+        if items != b.items || app != b.app {
+            changed += 1;
+        }
+        kept.push(BarAppItems { app, items });
+    }
+    if kept.len() != c.bar_app_items.len() {
+        changed += 1;
+    }
+    c.bar_app_items = kept;
+    changed
 }
 
 /// 一条自定义引擎"能不能真的用起来"。
@@ -714,11 +1237,58 @@ pub fn new_app_id() -> String {
     format!("{}{n:x}", &ms_hex[keep..])
 }
 
+/// 一个网格页。内容 = 格子里的项（引擎名 / 哨兵名），顺序即显示顺序。
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(default)]
+pub struct GridPage {
+    /// 稳定 id（`p1` / `p2`…）。应用绑定引用的就是它 —— 改名不影响绑定。
+    pub id: String,
+    /// 显示名（用户可改）
+    pub name: String,
+    pub items: Vec<String>,
+}
+
+/// 「某个应用默认打开哪一页」。
+///
+/// `app` 存**进程名**（`chrome.exe`），不区分大小写；允许 `*` 通配
+/// （`*chrome*` / `code*`）。为什么不用窗口标题：标题随文档变，绑不住；
+/// 用全路径又会因为更新/快捷方式不同而失配。
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(default)]
+pub struct GridAppPage {
+    pub app: String,
+    pub page: String,
+}
+
+/// 「某个应用用哪份横条内容」的专项配置。
+///
+/// 和网格页的 `GridAppPage` 是**同一套匹配规则**（精确 > 通配、通配里更长更优先、
+/// 并列取先配的），但存的东西不一样：横条没有"多页"概念，所以这里直接存一份
+/// **完整的内容列表**，命中时整体取代 `bar_list`（默认横条）。
+///
+/// 为什么不像网格那样先建"横条页"再引用：横条的默认内容就是 `bar_list` 这一份，
+/// 绝大多数用户只需要"某个软件少几颗按钮"，多一层页管理反而要维护两处内容。
+/// 将来若真要"横条也多页"，把 `items` 换成 `page: String` 即可，匹配逻辑不动。
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(default)]
+pub struct BarAppItems {
+    /// 进程名（`chrome.exe`），大小写不敏感，允许 `*` 通配。
+    pub app: String,
+    /// 这个应用看到的横条内容。空 = 视为"没配"，回退 `bar_list`。
+    pub items: Vec<String>,
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(default)]
 pub struct Config {
     /// 鼠标拖选就弹
     pub trigger_select: bool,
+    /// 用某个功能时，在**屏幕右下角**弹一条通知告诉用户"当前正在使用什么功能"。
+    ///
+    /// 默认开：这是用户点名要的"用了什么、有没有生效"的即时反馈；
+    /// 嫌吵可以在 设置 → 通用 里关掉（关掉之后不再产生任何通知）。
+    #[serde(default = "default_true")]
+    pub notify_feature: bool,
     /// Ctrl+C 也弹
     pub trigger_copy: bool,
     /// 开机自启
@@ -865,6 +1435,79 @@ pub struct Config {
     /// 唤起收藏夹的组合键，如 "Ctrl+Alt+F"。空串 = 没启用。
     #[serde(default)]
     pub fav_hotkey: String,
+    /* ------------------------ Ctrl+C 网格页 ------------------------
+     *
+     * 用户口径（2026-10-30）：选中文字弹的那根横条不动；**Ctrl+C 弹的是另一个
+     * 网格页面**，内容与样式都要和横条分开，互不干扰。
+     *
+     * 为什么不做成第二个窗口：横条窗口本来就承载"会变高变宽的浮层"（收藏面板、
+     * 引擎面板都是它），尺寸由前端量完 `layout_bar` 回填。网格页复用的正是这套，
+     * 少一个窗口就少一套定位/焦点/单实例的坑（"保留现有架构"）。
+     */
+    /// 唤起网格页的快捷键。**默认 `ctrl+c`**，用户可完全自定义；
+    /// 改了之后 Ctrl+C 就不再唤起它（"自定义快捷键需替代 Ctrl+C 生效"）。
+    #[serde(default = "default_grid_hotkey")]
+    pub grid_hotkey: String,
+    /// 网格行数（1-10）
+    #[serde(default = "default_grid_rows")]
+    pub grid_rows: u32,
+    /// 网格列数（1-10）
+    #[serde(default = "default_grid_cols")]
+    pub grid_cols: u32,
+    /// 单元格宽（CSS px，40-260）
+    #[serde(default = "default_grid_cell_w")]
+    pub grid_cell_w: u32,
+    /// 单元格高（CSS px，40-200）
+    #[serde(default = "default_grid_cell_h")]
+    pub grid_cell_h: u32,
+    /// 网格页（多页）。老配置里这里是空的 —— 读配置时会用 `grid_list`
+    /// 自动补出一页「默认」，见 `normalize_grid_pages`。
+    #[serde(default)]
+    pub grid_pages: Vec<GridPage>,
+    /// 默认网格页的 id（没给任何应用绑定页时用它）。空 = 第一页。
+    #[serde(default)]
+    pub grid_default_page: String,
+    /// 「哪个应用用哪一页」的绑定表。`app` 是进程名（如 `chrome.exe`），
+    /// 允许 `*` 通配；`page` 是 `grid_pages` 里的 id。
+    #[serde(default)]
+    pub grid_app_pages: Vec<GridAppPage>,
+    /// 网格里放哪些项（引擎名 / 哨兵名，顺序即显示顺序）。
+    /// 空列表 = 暂未单独配置，回落到横条的 `bar_list`（升级上来的老用户
+    /// 第一次按 Ctrl+C 不会看到一片空白）。
+    #[serde(default)]
+    pub grid_list: Vec<String>,
+    /// 格子之间的间距（px，0–24）
+    #[serde(default = "default_grid_gap")]
+    pub grid_gap: u32,
+    /// 单个格子的圆角（px，0–24）。和横条的「圆角」分开 ——
+    /// 格子在网格里更大，跟横条用同一个值会显得过圆或过方。
+    #[serde(default = "default_grid_radius")]
+    pub grid_radius: u32,
+    /// 格子里**要不要显示名称**（`false` = 只显示图标，格子更紧凑）。
+    ///
+    /// 用户口径："有些格子图标已经很清楚了，名称反而占地方"。默认 `true` ——
+    /// 名称是"这格是干什么的"的主要线索，不能默认藏起来。
+    #[serde(default = "default_true")]
+    pub grid_show_label: bool,
+    /// 是否启用网格页。关掉后快捷键不再唤起它（内容与配置都留着）。
+    #[serde(default = "default_true")]
+    pub grid_enable: bool,
+    /// 点格子时的行为：`auto` = 有文字就搜、没文字开首页（默认）；
+    /// `home` = 永远打开引擎首页（把网格当"书签面板"用）。
+    #[serde(default = "default_grid_click")]
+    pub grid_click: String,
+    /// 点空白格子时是否弹出「添加内容」面板。
+    /// 关掉后空位只作占位 —— 给"怕误触"的用户一个开关。
+    #[serde(default = "default_true")]
+    pub grid_allow_add: bool,
+    /// 「网格内容」是否已经从横条**播种**过（只播一次）。
+    ///
+    /// 为什么要这个标记：升级上来的用户第一次按 Ctrl+C 应该看到东西，
+    /// 而不是一片虚线空格；但用户点「清空」之后又必须真的是空的 ——
+    /// 用"空列表就回落到横条"实现前者，第二条就永远做不到。
+    /// 所以改成一次性播种：播完置 true，之后空就是空。
+    #[serde(default)]
+    pub grid_seeded: bool,
     /// 备份密码。非空时，所有备份（云端上传 + 本机导出）都会用它做
     /// AES-256-GCM 加密（密钥用 Argon2id 从这个密码派生）。
     /// 和 WebDAV 密码一样只存本机 config.json。
@@ -1051,8 +1694,15 @@ pub ocr_accurate: bool,
     ///   除非用户在窗口里点了「设为默认」—— 那个按钮才会写回这里。
     pub trans_target: String,
 
-    /// 横条上显示哪些引擎、什么顺序
+    /// 横条上显示哪些引擎、什么顺序（**默认横条**）
     pub bar_list: Vec<String>,
+    /// 横条的**按应用专项配置**：命中的应用用 `items` 取代 `bar_list`。
+    ///
+    /// 空 / 缺失 = 全部应用都用默认横条（老配置读进来就是这个状态）。
+    /// 校验（空项、重复、找不到定义的孤儿）在 `normalize_bar_app_items` 里做，
+    /// 清空后整条绑定会被丢掉 —— 效果就是"这个应用回退默认横条"。
+    #[serde(default)]
+    pub bar_app_items: Vec<BarAppItems>,
     /// 横条上两条分隔线之间的样式：line（细竖线）/ dot（点状）/ space（纯留白）
     pub sep_style: String,
     /// 用户自己添加的搜索引擎
@@ -1060,6 +1710,12 @@ pub ocr_accurate: bool,
     /// 用户自己加的外部软件（点横条上那一格直接唤起）
     #[serde(default)]
     pub apps: Vec<ExternalApp>,
+    /// 「智能直达」入口：软件 / 网址 / 文件，一条输入自动归类。
+    ///
+    /// `#[serde(default)]` 保证**老配置读进来是空列表**，不会因为缺字段整份配置
+    /// 解析失败 —— 老版本的 config.json / .QuickSearch 备份都能直接恢复。
+    #[serde(default)]
+    pub shortcuts: Vec<Shortcut>,
     /// 引擎名 -> 自定义图标文件名（存在 icons 目录里）
     pub overrides: HashMap<String, String>,
     /// 引擎名 -> 自定义搜索 URL 模板（带 %s 占位符）。
@@ -1308,10 +1964,37 @@ fn default_recent_max() -> usize {
     10
 }
 
+fn default_grid_gap() -> u32 {
+    8
+}
+fn default_grid_radius() -> u32 {
+    12
+}
+fn default_grid_click() -> String {
+    "auto".to_string()
+}
+
+fn default_grid_hotkey() -> String {
+    "ctrl+c".to_string()
+}
+fn default_grid_rows() -> u32 {
+    3
+}
+fn default_grid_cols() -> u32 {
+    3
+}
+fn default_grid_cell_w() -> u32 {
+    104
+}
+fn default_grid_cell_h() -> u32 {
+    76
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
             trigger_select: true,
+            notify_feature: true,
             trigger_copy: true,
             auto_start: false,
             icon_size: 30,
@@ -1345,13 +2028,31 @@ impl Default for Config {
             bar_pos: default_bar_pos(),
             favorites: Vec::new(),
             fav_hotkey: String::new(),
+            grid_hotkey: default_grid_hotkey(),
+            grid_rows: default_grid_rows(),
+            grid_cols: default_grid_cols(),
+            grid_cell_w: default_grid_cell_w(),
+            grid_cell_h: default_grid_cell_h(),
+            grid_list: Vec::new(),
+            grid_pages: Vec::new(),
+            grid_default_page: String::new(),
+            grid_app_pages: Vec::new(),
+            grid_gap: default_grid_gap(),
+            grid_radius: default_grid_radius(),
+            grid_show_label: true,
+            grid_enable: true,
+            grid_click: default_grid_click(),
+            grid_allow_add: true,
+            grid_seeded: false,
             backup_password: String::new(),
             fav_panel_sizes: std::collections::BTreeMap::new(),
             auto_elevate: true,
             delay_ms: 0,
             bar_idle_sec: default_bar_idle_sec(),
             bar_away_px: default_bar_away_px(),
-            bar_need_text: true,
+            // 便携测试版默认不拦（与原版用户的实际设置一致：浏览器里 UIA/OCR 常取不到字，
+            // 开着这条就表现为「选中了也不弹」）。正式版仍默认 true。
+            bar_need_text: !crate::QS_LITE_PORTABLE,
             filter_mode: "off".to_string(),
             filter_list: Vec::new(),
             ocr_enable: true,
@@ -1359,7 +2060,14 @@ impl Default for Config {
             ocr_secret: String::new(),
             ocr_lang: "CHN_ENG".to_string(),
             ocr_accurate: false,
-            ocr_engine: "baidu".to_string(),
+            // 便携测试版默认用本地引擎：免费、即时、不需要 Key。
+            // 原版默认是 baidu（在线、按量计费），新装用户一上手就会消耗额度 ——
+            // 测试版不背这个账。
+            ocr_engine: if crate::QS_LITE_PORTABLE {
+                "windows".to_string()
+            } else {
+                "baidu".to_string()
+            },
             ocr_parallel: false,
             ocr_multi: Vec::new(),
             ocr_stay_default: true,
@@ -1380,9 +2088,11 @@ impl Default for Config {
             trans_secrets: HashMap::new(),
             trans_target: crate::trans::DEFAULT_TARGET.to_string(),
             bar_list: DEFAULT_BAR.iter().map(|s| s.to_string()).collect(),
+            bar_app_items: Vec::new(),
             sep_style: "line".to_string(),
             custom_engines: Vec::new(),
             apps: Vec::new(),
+            shortcuts: Vec::new(),
             overrides: HashMap::new(),
             url_overrides: HashMap::new(),
             ai_suffix: DEFAULT_AI_SUFFIX.to_string(),
@@ -1658,6 +2368,146 @@ fn legacy_data_dir() -> Option<PathBuf> {
     let base = std::env::var("APPDATA").ok()?;
     let p = PathBuf::from(base).join(APP_DIR);
     p.is_dir().then_some(p)
+}
+
+/// 便携测试版：把**上一次安装里用户自定义的图标**搬过来。
+///
+/// # 为什么需要这个（而不是整份配置迁移）
+///
+/// 用户报「优化版 OCR 图标不是我自定义的那个」。查下来根因是：原版显示的图标
+/// 根本不在 `ui/data/icons/` —— 它在 **config 的 `overrides` 里**，值是 data URL
+/// （比如 `@ocr` → 8 KB 的 PNG）。新装的便携版配置是空的，于是：
+///   · OCR 按钮退回「OCR」文字徽标；
+///   · 百度/Google/知乎/淘宝… 退回内置 png —— 和用户自己那几张不是同一张图。
+///
+/// 但**不能**把整份配置搬过来：那份配置里有真实的付费引擎 Key 和
+/// `ocr_multi = [baidu,…]`，之前就是它把百度每日 500 次额度悄悄打满的。
+///
+/// 所以这里只做一件事：**只搬图标**（`overrides` + 对应图标文件），
+/// 密钥、引擎、语言、快捷键一概不碰。
+///
+/// # 源目录怎么找
+///
+/// `%APPDATA%\\QuickSearch`（安装版）优先；本项目的实际形态是便携版，
+/// 所以再往 exe 的上一级 / 上两级找 `Quick search data` —— 测试版就装在
+/// `…\\myself\\测试\\` 下，原版数据在 `…\\myself\\Quick search data`。
+///
+/// # 幂等
+///
+/// 搬完写一个 `.icons-imported` 标记文件。用户在设置页「恢复默认」把图标清掉
+/// 之后，下次启动也不该被强行塞回去。
+pub fn import_user_icons_if_needed() -> Option<String> {
+    if cfg!(test) || !crate::QS_LITE_PORTABLE {
+        return None;
+    }
+    // 显式指定数据目录（测试/调试）时不猜用户目录
+    if std::env::var("QS_DATA_DIR")
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    let new_dir = data_dir();
+    let marker = new_dir.join(".icons-imported");
+    if marker.exists() {
+        return None;
+    }
+
+    // ① 候选老数据目录
+    let mut cands: Vec<PathBuf> = Vec::new();
+    if let Some(d) = legacy_data_dir() {
+        cands.push(d);
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            for up in [1usize, 2] {
+                let mut p = dir.to_path_buf();
+                for _ in 0..up {
+                    if let Some(x) = p.parent() {
+                        p = x.to_path_buf();
+                    }
+                }
+                cands.push(p.join("Quick search data"));
+                cands.push(p.join("QuickSearch"));
+            }
+        }
+    }
+
+    for old_dir in cands {
+        if old_dir == new_dir {
+            continue;
+        }
+        let old_cfg = old_dir.join("config.json");
+        if !old_cfg.is_file() {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&old_cfg) else {
+            continue;
+        };
+        let pw = read_password_file(&old_dir.join("backup.key"));
+        let Ok(plain) = crate::crypto::unseal(&text, &pw) else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&plain) else {
+            continue;
+        };
+        let Some(ov) = v.get("overrides").and_then(|x| x.as_object()) else {
+            continue;
+        };
+        if ov.is_empty() {
+            continue;
+        }
+
+        // ② 图标文件（值若是文件名而非 data URL，就把文件也复制过来）
+        let _ = std::fs::create_dir_all(icons_dir());
+        let mut copied = 0usize;
+        let mut merged: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        for (k, val) in ov {
+            let Some(sv) = val.as_str() else { continue };
+            if sv.starts_with("data:") {
+                merged.insert(k.clone(), sv.to_string());
+                continue;
+            }
+            // 文件名形态：必须能在老目录里找到，否则宁可不导入（不能让前端拿到死路径）
+            let src = old_dir.join("icons").join(sv);
+            if !src.is_file() {
+                continue;
+            }
+            let dst = icons_dir().join(sv);
+            if !dst.exists() {
+                if std::fs::copy(&src, &dst).is_ok() {
+                    copied += 1;
+                } else {
+                    continue;
+                }
+            }
+            merged.insert(k.clone(), sv.to_string());
+        }
+
+        if merged.is_empty() {
+            continue;
+        }
+
+        // ③ 并进当前配置（只动 overrides，别的一个字段都不碰）
+        let mut c = load();
+        for (k, val) in &merged {
+            c.overrides.insert(k.clone(), val.clone());
+        }
+        save_to(&config_path(), &c);
+        let _ = std::fs::write(&marker, b"1");
+        crate::win::log(&format!(
+            "icons: 从 {} 导入 {} 个自定义图标（另复制 {} 个图标文件）",
+            old_dir.display(),
+            merged.len(),
+            copied
+        ));
+        return Some(format!("导入 {} 个自定义图标", merged.len()));
+    }
+
+    // 没找到可导入的源 —— 也写标记，避免每次启动都去翻一遍磁盘
+    let _ = std::fs::create_dir_all(&new_dir);
+    let _ = std::fs::write(&marker, b"1");
+    None
 }
 
 /// 需要迁移就迁移。返回一句人话（进日志 / 托盘提示），没事可做返回 None。
@@ -2519,6 +3369,32 @@ pub(crate) fn sanitize(mut c: Config) -> Config {
             "config: 清掉 {pruned_apps} 个指向已删除外部软件的横条哨兵"
         ));
     }
+    // 智能直达同理：入口被删掉后，横条上那根 @go:<id> 不该留成死格子。
+    /* 网格页第一次可用：把横条成员抄过去当初始内容（只做一次）。
+     * 用户之后清空/增删都不再触发 —— 见 `grid_seeded` 的注释。 */
+    if !c.grid_seeded {
+        c.grid_list = c.bar_list.iter().filter(|n| *n != SEP).take(60).cloned().collect();
+        c.grid_seeded = true;
+        crate::win::log("config: 网格内容首次从横条播种");
+    }
+    /* 网格页（多页）归一：老配置补「默认」页、id/名字补齐、清悬空的应用绑定、
+     * 并让 `grid_list` 始终是默认页的镜像。放在播种之后 —— 新用户那一次播种
+     * 的结果要成为第一页的内容。 */
+    let grid_fixed = normalize_grid_pages(&mut c);
+    if grid_fixed > 0 {
+        crate::win::log(&format!(
+            "config: 网格页归一完成（{} 处改动，现有 {} 页 / {} 条应用绑定）",
+            grid_fixed,
+            c.grid_pages.len(),
+            c.grid_app_pages.len()
+        ));
+    }
+    let pruned_go = prune_shortcut_sentinels(&mut c);
+    if pruned_go > 0 {
+        crate::win::log(&format!(
+            "config: 清掉 {pruned_go} 个指向已删除直达入口的横条哨兵"
+        ));
+    }
     /* r89：横条里**找不到定义**的引擎名（用户报的那个 bug）。
      *
      * 症状是"横条上明明有、引擎库里搜不到"—— 因为引擎库的数据源是
@@ -2538,6 +3414,18 @@ pub(crate) fn sanitize(mut c: Config) -> Config {
     if pruned_undefined > 0 {
         crate::win::log(&format!(
             "config: 清掉 {pruned_undefined} 个横条里没有定义的引擎名（孤儿条目）"
+        ));
+    }
+    /* 横条的「按应用专项」也要走同一道清洗 —— 它和 `bar_list` 是同一类内容，
+     * 判定口径必须一致（`bar_member_defined`）。剪空的整条绑定会被丢掉，
+     * 展示上就等于"这个应用回退默认横条"。放在 prune 之后，因为这里要用
+     * 已经修好的 `custom_engines` 来判断引擎名是否还有定义。 */
+    let bar_app_fixed = normalize_bar_app_items(&mut c);
+    if bar_app_fixed > 0 {
+        crate::win::log(&format!(
+            "config: 横条按应用专项归一完成（{} 处改动，现有 {} 条绑定）",
+            bar_app_fixed,
+            c.bar_app_items.len()
         ));
     }
     // r56：「最近使用」名单里那些已经不存在的引擎（用户在设置里删了它），
@@ -4494,15 +5382,20 @@ mod sanitize_tests {
         let _serial = big_lock();
         let (f, _g) = tmp_file("prune");
         let json = format!(
-            r#"{{"favorites":[{{"id":"alive","name":"活着"}}],"bar_list":["百度","{}alive","{}dead"],"fav_panel_sizes":{{"{}dead":[1.0,2.0]}}}}"#,
-            FAV_PREFIX, FAV_PREFIX, FAV_PREFIX
+            r#"{{"favorites":[{{"id":"alive","name":"活着"}}],"shortcuts":[{{"id":"g1","kind":"url","target":"https://a.b","name":"直达"}}],"bar_list":["百度","{}alive","{}dead","{}g1","{}ggone"],"fav_panel_sizes":{{"{}dead":[1.0,2.0]}}}}"#,
+            FAV_PREFIX, FAV_PREFIX, SHORTCUT_PREFIX, SHORTCUT_PREFIX, FAV_PREFIX
         );
         std::fs::write(&f, json).unwrap();
         let c = load_from(&f);
         assert_eq!(
             c.bar_list,
-            vec!["百度".to_string(), format!("{}alive", FAV_PREFIX)],
-            "载入时就该只剩存活的哨兵"
+            vec![
+                "百度".to_string(),
+                format!("{}alive", FAV_PREFIX),
+                // 智能直达：存活的要留、指向已删入口的要剪
+                format!("{}g1", SHORTCUT_PREFIX),
+            ],
+            "载入时就该只剩存活的哨兵（@fav 与 @go 都不能被误剪）"
         );
         assert!(
             c.fav_panel_sizes.is_empty(),
@@ -4524,6 +5417,212 @@ mod sanitize_tests {
     ///   都不是引擎名，各有各的归属校验。我第一版漏了 `@fav:`，
     ///   既有测试 `sanitize_prunes_dangling_sentinels` 立刻变红。
     ///   所以这条测试把**全部五种**哨兵都摆进来一起验。
+    /// 横条专项：命中就严格用专项；**没配 / 配了被清空 / 内容全不可用** 一律回退默认。
+    ///
+    /// 这是用户点名的规则（"专项配置被清空、缺失、校验失败时统一回退到默认"），
+    /// 四种情形在这里各钉一条断言。
+    #[test]
+    fn bar_app_items_override_default_and_fall_back() {
+        let _serial = big_lock();
+        let mut c = Config::default();
+        c.bar_list = vec!["百度".to_string(), SEP.to_string()];
+        c.bar_app_items = vec![BarAppItems {
+            app: "chrome.exe".to_string(),
+            items: vec![BAR_TRANS.to_string(), "百度".to_string()],
+        }];
+
+        // ① 命中 → 严格按专项（内容与默认不同）
+        let hit = resolve_bar(&c, "chrome.exe");
+        assert_eq!(hit.source, "app");
+        assert_eq!(hit.items, vec![BAR_TRANS.to_string(), "百度".to_string()]);
+        // 大小写不敏感
+        assert_eq!(resolve_bar(&c, "Chrome.EXE").source, "app");
+
+        // ② 没有专项的应用 / 取不到进程名 → 默认
+        let none = resolve_bar(&c, "firefox.exe");
+        assert_eq!(none.source, "default");
+        assert_eq!(none.items, c.bar_list);
+        assert_eq!(resolve_bar(&c, "   ").source, "default");
+
+        // ③ 专项被清空 → 回退默认，并给出原因
+        c.bar_app_items[0].items.clear();
+        let empty = resolve_bar(&c, "chrome.exe");
+        assert_eq!(empty.source, "default");
+        assert_eq!(empty.items, c.bar_list);
+        assert!(empty.note.contains("空"), "要给一句回退原因：{}", empty.note);
+
+        // ④ 专项里的名字全都认不出来（校验失败）→ 回退默认
+        c.bar_app_items[0].items = vec!["这个引擎不存在".to_string()];
+        let bad = resolve_bar(&c, "chrome.exe");
+        assert_eq!(bad.source, "default");
+        assert_eq!(bad.items, c.bar_list);
+        assert!(bad.note.contains("不可用"), "{}", bad.note);
+    }
+
+    /// 网格页专项：专项页为空 / 指向已删页 → 回退到**默认页的下标**，
+    /// 不是"钉在空页上塞默认内容"（否则页名、页码、编辑目标会互相矛盾）。
+    #[test]
+    fn grid_app_page_falls_back_to_default_page() {
+        let mut c = Config::default();
+        c.grid_pages = vec![
+            GridPage { id: "p1".into(), name: "默认".into(), items: vec!["百度".into()] },
+            GridPage { id: "p2".into(), name: "空页".into(), items: vec![] },
+            GridPage { id: "p3".into(), name: "工作".into(), items: vec!["Google".into()] },
+        ];
+        c.grid_default_page = "p1".into();
+        c.grid_app_pages = vec![GridAppPage { app: "code.exe".into(), page: "p2".into() }];
+
+        // 专项页是空的 → 回默认页
+        let empty = resolve_grid_page(&c, "code.exe");
+        assert_eq!(empty.index, 0, "回退时下标必须是默认页");
+        assert_eq!(empty.resolved.source, "default");
+        assert_eq!(empty.resolved.items, vec!["百度".to_string()]);
+        assert!(empty.resolved.note.contains("空"), "{}", empty.resolved.note);
+
+        // 换成有内容的一页 → 严格用它
+        c.grid_app_pages[0].page = "p3".into();
+        let ok = resolve_grid_page(&c, "code.exe");
+        assert_eq!(ok.index, 2);
+        assert_eq!(ok.id, "p3");
+        assert_eq!(ok.resolved.source, "app");
+        assert_eq!(ok.resolved.items, vec!["Google".to_string()]);
+
+        // 绑定的页被删了 → 回默认页
+        c.grid_app_pages[0].page = "gone".into();
+        let gone = resolve_grid_page(&c, "code.exe");
+        assert_eq!(gone.index, 0);
+        assert!(gone.resolved.note.contains("不存在"), "{}", gone.resolved.note);
+
+        // 没绑的应用 → 默认页
+        let other = resolve_grid_page(&c, "other.exe");
+        assert_eq!(other.resolved.source, "default");
+        assert_eq!(other.index, 0);
+    }
+
+    /// 横条专项的归一：空名/重复绑定/认不出的项/剪空之后整条绑定 都要清掉。
+    #[test]
+    fn bar_app_items_normalize_prunes_and_drops_empty() {
+        let _serial = big_lock();
+        let mut c = Config::default();
+        c.bar_app_items = vec![
+            BarAppItems { app: "   ".into(), items: vec!["百度".into()] },
+            BarAppItems {
+                app: " a.exe ".into(),
+                items: vec!["百度".into(), "   ".into(), "不存在的引擎".into(), "百度".into()],
+            },
+            BarAppItems { app: "A.EXE".into(), items: vec!["Google".into()] },
+            BarAppItems { app: "b.exe".into(), items: vec!["不存在的引擎".into()] },
+        ];
+        normalize_bar_app_items(&mut c);
+        assert_eq!(c.bar_app_items.len(), 1, "空名/重复/剪空 都要丢掉");
+        assert_eq!(c.bar_app_items[0].app, "a.exe");
+        assert_eq!(c.bar_app_items[0].items, vec!["百度".to_string()]);
+    }
+
+    /// **两类组件互不影响**：给某应用配了横条专项，它的网格页仍然是默认页；反之亦然。
+    #[test]
+    fn bar_and_grid_bindings_are_independent() {
+        let _serial = big_lock();
+        let mut c = Config::default();
+        c.grid_pages = vec![GridPage { id: "p1".into(), name: "默认".into(), items: vec!["百度".into()] }];
+        c.grid_default_page = "p1".into();
+        c.bar_app_items = vec![BarAppItems {
+            app: "vscode.exe".into(),
+            items: vec![BAR_TRANS.to_string()],
+        }];
+        assert_eq!(resolve_bar(&c, "vscode.exe").source, "app");
+        assert_eq!(
+            resolve_grid_page(&c, "vscode.exe").resolved.source,
+            "default",
+            "横条配了专项，不该把网格页也变成专项"
+        );
+
+        // 反过来：只绑网格页
+        c.bar_app_items.clear();
+        c.grid_app_pages = vec![GridAppPage { app: "vscode.exe".into(), page: "p1".into() }];
+        assert_eq!(resolve_bar(&c, "vscode.exe").source, "default");
+        // 绑的就是默认页 → 展示跟默认一致（且不会因为"页为空"回退）
+        assert_eq!(resolve_grid_page(&c, "vscode.exe").index, 0);
+    }
+
+    /// 「格子文字」（`grid_show_label`）：老配置里没有这个键，必须读成**显示名称** ——
+    /// 缺字段就当 false 的话，升级后所有格子会突然只剩图标，用户以为内容丢了。
+    #[test]
+    fn grid_show_label_defaults_to_true() {
+        let c: Config = serde_json::from_str("{}").expect("空配置也要能读");
+        assert!(c.grid_show_label, "老配置默认显示名称");
+        let c2: Config =
+            serde_json::from_str(r#"{"grid_show_label":false}"#).expect("显式关掉要能读");
+        assert!(!c2.grid_show_label);
+    }
+
+    /// 老配置（只有 `grid_list`）升级后必须**自动变成一页**，内容原样保留。
+    /// 这条是"升级不丢格子"的底线 —— 跳过了用户打开网格页会看到一片空白。
+    #[test]
+    fn grid_pages_migrate_from_legacy_list() {
+        let mut c = Config::default();
+        c.grid_list = vec!["百度".to_string(), "Google".to_string()];
+        let changed = normalize_grid_pages(&mut c);
+        assert!(changed >= 1, "补页要算一次改动");
+        assert_eq!(c.grid_pages.len(), 1);
+        assert_eq!(c.grid_pages[0].id, "p1");
+        assert_eq!(c.grid_pages[0].items, vec!["百度", "Google"]);
+        assert_eq!(c.grid_default_page, "p1");
+        // 归一之后 grid_list 是默认页的镜像
+        assert_eq!(c.grid_list, vec!["百度", "Google"]);
+        // 幂等
+        assert_eq!(normalize_grid_pages(&mut c), 0);
+    }
+
+    /// 应用 → 页的匹配优先级：**精确 > 通配；通配里模式更长 > 更短；都不中走默认**。
+    /// 用户明确要求把冲突规则说清楚，这条测试就是那份规则的执行版本。
+    #[test]
+    fn pick_grid_page_prefers_exact_then_longest_wildcard() {
+        let mut c = Config::default();
+        c.grid_pages = vec![
+            GridPage { id: "p1".into(), name: "默认".into(), items: vec![] },
+            GridPage { id: "p2".into(), name: "短通配".into(), items: vec![] },
+            GridPage { id: "p3".into(), name: "精确".into(), items: vec![] },
+            GridPage { id: "p4".into(), name: "长通配".into(), items: vec![] },
+        ];
+        c.grid_default_page = "p1".into();
+        c.grid_app_pages = vec![
+            GridAppPage { app: "*chrome*".into(), page: "p2".into() },
+            GridAppPage { app: "chrome.exe".into(), page: "p3".into() },
+            GridAppPage { app: "*chrome.exe".into(), page: "p4".into() },
+        ];
+        // 精确匹配赢过两条通配
+        assert_eq!(pick_grid_page(&c, "chrome.exe"), 2);
+        // 大小写不敏感
+        assert_eq!(pick_grid_page(&c, "Chrome.EXE"), 2);
+        // 只有通配命中时，长的那条赢（*chrome.exe 比 *chrome* 具体）
+        assert_eq!(pick_grid_page(&c, "my-chrome.exe"), 3);
+        // 只命中短通配
+        assert_eq!(pick_grid_page(&c, "chrome-helper"), 1);
+        // 都不中 / 空应用名 → 默认页
+        assert_eq!(pick_grid_page(&c, "firefox.exe"), 0);
+        assert_eq!(pick_grid_page(&c, ""), 0);
+    }
+
+    /// 归一必须清掉"指向已删除页"的应用绑定，并且默认页无效时回落到第一页。
+    #[test]
+    fn normalize_prunes_dangling_app_bindings_and_fixes_default() {
+        let mut c = Config::default();
+        c.grid_pages = vec![GridPage { id: "p1".into(), name: String::new(), items: vec![] }];
+        c.grid_default_page = "gone".into();
+        c.grid_app_pages = vec![
+            GridAppPage { app: "a.exe".into(), page: "p1".into() },
+            GridAppPage { app: "b.exe".into(), page: "nope".into() },   // 页不存在
+            GridAppPage { app: "  ".into(), page: "p1".into() },        // 空应用名
+            GridAppPage { app: "A.EXE".into(), page: "p1".into() },     // 大小写重复
+        ];
+        normalize_grid_pages(&mut c);
+        assert_eq!(c.grid_pages[0].name, "网格页 1", "空名字要补一个");
+        assert_eq!(c.grid_default_page, "p1", "默认页失效要回落到第一页");
+        assert_eq!(c.grid_app_pages.len(), 1, "悬空/空名/重复绑定都要清掉");
+        assert_eq!(c.grid_app_pages[0].app, "a.exe");
+    }
+
     #[test]
     fn prune_undefined_bar_engines_prunes_orphans_only() {
         let _serial = big_lock();
@@ -4548,6 +5647,11 @@ mod sanitize_tests {
             SEP.to_string(),
             BAR_OCR.to_string(),
             BAR_IMG.to_string(),
+            BAR_TRANS.to_string(),
+            // v2.6.1：`@wrap` 漏登记在本白名单之外，用户把「包裹符号」加到横条上
+            // 之后，下一次 sanitize / 重启就被当孤儿剪掉 —— 表现就是
+            // 「加到横条了，重启一下又没了」。这条断言专门看着它。
+            BAR_WRAP.to_string(),
             format!("{}abc", APP_PREFIX),
             format!("{}xyz", FAV_PREFIX),
         ];
@@ -4561,6 +5665,8 @@ mod sanitize_tests {
             SEP.to_string(),
             BAR_OCR.to_string(),
             BAR_IMG.to_string(),
+            BAR_TRANS.to_string(),
+            BAR_WRAP.to_string(),
             format!("{}abc", APP_PREFIX),
             format!("{}xyz", FAV_PREFIX),
         ] {
@@ -5114,10 +6220,16 @@ mod sanitize_tests {
     fn sanitize_clamps_bar_auto_hide_thresholds() {
         let _serial = big_lock();
         let c = Config::default();
+        /* `bar_need_text` 的默认值**便携版和正式版不同**：
+         * 正式版 true（没取到文字就不弹，防误触）；便携测试版 false
+         * （测试时要能随时把横条叫出来看，不该被"没取到文字"挡住）。
+         * 这条断言原先把 true 写死，于是便携构建下必然红 —— 现在跟着同一
+         * 个开关走，两边都对。 */
+        let expect_need_text = !crate::QS_LITE_PORTABLE;
         assert_eq!(
             (c.bar_idle_sec, c.bar_away_px, c.bar_need_text),
-            (5, 400, true),
-            "默认值：5 秒无操作收起 / 鼠标移远 400px 收起 / 没取到文字不弹"
+            (5, 400, expect_need_text),
+            "默认值：5 秒无操作收起 / 鼠标移远 400px 收起 / 没取到文字不弹（便携版不挡）"
         );
 
         let mut bad = Config::default();

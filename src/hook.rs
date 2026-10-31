@@ -77,6 +77,22 @@ const LLMHF_INJECTED: u32 = 0x0000_0001;
 fn allow_injected() -> bool {
     static ALLOW: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ALLOW.get_or_init(|| {
+        /* ⚠ 便携测试版**一律放开**。
+         *
+         * 实测踩到的坑：在虚拟机 / 远程桌面 / 虚拟鼠标设备这类环境下，
+         * **真实的物理鼠标输入也会被打上 LLMHF_INJECTED 标记**。
+         * 一旦按原来的规则过滤，钩子里所有事件都被丢掉 ——
+         * 表现就是"选中文字永远不弹"，而且日志里看不出任何异常
+         * （因为过滤发生在 send 之前，连 mouseup 都不会记）。
+         *
+         * 键盘那条路原版本就因为同样的理由放开了（见 keyboard_proc 的注释：
+         * 第三方工具发的 Ctrl+C 也要能触发），鼠标这里同理。
+         *
+         * 代价：别的自动化工具动鼠标时可能误触发。对测试版来说这个代价可接受，
+         * 总比"功能完全不可用"强。 */
+        if crate::QS_LITE_PORTABLE {
+            return true;
+        }
         std::env::var("QS_ALLOW_INJECTED")
             .map(|v| v == "1")
             .unwrap_or(false)
@@ -86,6 +102,19 @@ fn allow_injected() -> bool {
 unsafe extern "system" fn mouse_proc(code: i32, w: WPARAM, l: LPARAM) -> LRESULT {
     if code >= 0 {
         let info = win::ll_mouse(l);
+        {
+            let msg = w.0 as u32;
+            if msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP {
+                win::log(&format!(
+                    "hook: mouse {:?} at ({}, {}) injected={} allow={}",
+                    if msg == WM_LBUTTONDOWN { "DOWN" } else { "UP" },
+                    info.pt.x,
+                    info.pt.y,
+                    info.flags & LLMHF_INJECTED != 0,
+                    allow_injected()
+                ));
+            }
+        }
         if allow_injected() || info.flags & LLMHF_INJECTED == 0 {
             let msg = w.0 as u32;
             match msg {

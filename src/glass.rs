@@ -443,7 +443,7 @@ pub fn capture_encoded() -> Vec<u8> {
 }
 
 /// 把快照打成「16 字节小头（x,y,w,h，i32 LE）+ RGBA 字节块」，供 IPC 直传。
-/// 走 `tauri::ipc::Response` 原始字节，不过 JSON / base64 ——
+/// 走 `crate::t::ipc::Response` 原始字节，不过 JSON / base64 ——
 /// 一块 500KB 的纹理 base64 化要涨三分之一，还多一轮编解码。
 pub fn encode(snap: &Snap) -> Vec<u8> {
     let mut out = Vec::with_capacity(16 + snap.rgba.len());

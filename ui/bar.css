@@ -1686,3 +1686,660 @@ button.fav-grp-head:focus-visible {
 /* 胶囊要能弹出菜单，所以放它的这一行**不能**是 overflow 容器 —— 否则菜单被裁掉 */
 .lib-navrow.lib-lv2, .lib-navrow.lib-lv3 { overflow: visible; }
 .cat-nav.pick-nav { overflow: visible; }
+
+/* ==================================================================
+ * 网格页（Ctrl+C 唤起）—— 与文字横条**同一窗口、不同形态**
+ *
+ * 为什么用同一棵 DOM 里换布局，而不是新开一个窗口：横条窗口本来就靠前端
+ * 量尺寸回填 `layout_bar` 来撑开（收藏面板、引擎面板都是这么长出来的）。
+ * 网格按 `display:grid` 排一遍，`pushLayout` 量到的就是网格的实际大小，
+ * Rust 那边一行都不用改 —— 窗口、贴鼠标定位、点外面收起、Esc 收起全部复用。
+ *
+ * 视觉上刻意和文字横条区分：更大圆角、格子有独立背景、图标在上文字在下，
+ * 一眼就能看出"这是按键唤出的面板"，不会和划词横条混淆。
+ * ================================================================== */
+.bar.qs-grid {
+    /* 纵向：头部（标题 + 设置按钮）在上，格子网格在下。
+       为什么加头部：网格页原来"没有标题、没有出口"，用户不知道自己在哪一页、
+       也不知道怎么进设置。一颗 ⚙ 按钮解决这件事，且不占格子。 */
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+    /* 四边**同值**：原来是 `7px 10px 10px`（上 7 / 下 10），
+     * 网格页四边留白本来就不对称 —— 用户把宽高都调到最小时看得最明显。
+     * 现在统一 10px，横竖都严格对称。 */
+    padding: 10px;
+    border-radius: max(14px, var(--qs-bar-r, 14px));
+    /* 高度交给内容决定（横条默认是固定高度的那一套，这里要覆盖掉） */
+    height: auto;
+    min-height: 0;
+    width: max-content;
+}
+
+/* 网格模式下，文字横条专属的元素全部收起：
+   提示文字、网址按钮、OCR/翻译/识图那几颗、还有输入框。
+   （头部与选板是网格自己加的，要放行） */
+.bar.qs-grid > *:not(.engines):not(.qs-ghead):not(.qs-gpick) {
+    display: none !important;
+}
+
+/* 格子网格本身 */
+.bar.qs-grid .engines {
+    display: grid;
+    grid-template-columns: repeat(var(--gcols, 3), var(--gcw, 104px));
+    grid-auto-rows: var(--gch, 76px);
+    /* 间距与格子圆角由设置里的「网格页设置 → 外观」给（--ggap / --gr）。
+       兜底值与 Config 的默认值一致，预览页和真网格读的是同一套变量。 */
+    gap: var(--ggap, 8px);
+    /* ⚠ 必须有：`.engines` 的基础样式是 `align-items: center`（文字横条那边
+       图标要垂直居中），网格项会**继承这个值**，于是每个格子只按自身内容高度
+       （约 62px）居中摆放，"格子高"调多大都不变 —— 表现就是用户报的两条：
+         · 「间距／高度像是没生效」：格子之间空一大截，量出来永远是 62px；
+         · 高度调小（< 62）时内容溢出到下一行，**上下两格叠在一起**。
+       网格里必须让格子**撑满整行**（stretch），高度和间距才真的由 --gch / --ggap 决定。 */
+    align-items: stretch;
+    /* 网格比横条窄时（格子很小 / 列数少，而头部标题+按钮更宽），
+     * 剩下的宽度要**均分到左右两侧**；不加这一条会全堆在右边，
+     * 左右边距就不对称了（用户把宽高都调到最小时报的那个现象）。 */
+    justify-content: center;
+}
+
+/* 头部：左边一句"网格页"，右边一颗 ⚙。
+   ⚠ 高度压到 20px 左右 —— 用户要的是格子面板，头部只是"出口"，
+   不能抢格子的视觉重心。 */
+.qs-ghead {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    padding: 0 2px;
+    user-select: none;
+}
+
+.qs-ghead .qs-gtitle {
+    flex: 1 1 auto;
+    font-size: 10.5px;
+    letter-spacing: .04em;
+    color: var(--qs-fg-dim);
+    opacity: .75;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+
+/* 网格页翻页器：‹ 页名 1/3 ›
+ * 只有一页时整块 hidden（全局 `[hidden]{display:none!important}` 兜着）。
+ * 刻意做得很轻：它是"出口"级别的小控件，不该抢格子的视觉重心。 */
+.qs-gpager {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 1px;
+    padding: 0 2px;
+    border-radius: 7px;
+    background: var(--qs-hover);
+}
+
+.qs-gpager .qs-gpbtn {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 17px;
+    height: 18px;
+    padding: 0;
+    border: none;
+    border-radius: 5px;
+    background: transparent;
+    color: var(--qs-fg-dim);
+    font: inherit;
+    font-size: 13px;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.qs-gpager .qs-gpbtn:hover {
+    background: var(--qs-active);
+    color: var(--qs-fg);
+}
+
+.qs-gpager .qs-gpname {
+    max-width: 88px;
+    padding: 0 3px;
+    font-size: 10.5px;
+    font-weight: 600;
+    color: var(--qs-fg);
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+
+.qs-gpager .qs-gpnum {
+    padding-right: 3px;
+    font-size: 9.5px;
+    color: var(--qs-fg-dim);
+    opacity: .8;
+    font-variant-numeric: tabular-nums;
+}
+
+.qs-ghead .qs-gbtn {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: 7px;
+    background: transparent;
+    color: var(--qs-fg-dim);
+    font: inherit;
+    line-height: 1;
+    cursor: pointer;
+    transition: background-color .12s ease, color .12s ease, transform .06s ease;
+}
+
+.qs-ghead .qs-gbtn:hover {
+    background: var(--qs-hover);
+    border-color: var(--qs-border);
+    color: var(--qs-fg);
+}
+
+.qs-ghead .qs-gbtn:active {
+    transform: scale(.94);
+}
+
+.qs-ghead .qs-gbtn svg {
+    width: 14px;
+    height: 14px;
+    display: block;
+}
+
+/* 不在网格形态时（文字横条），这两个网格专属元素一律不显示 —— 渲染切换
+   时 DOM 可能还在，靠这条兜底，免得文字横条上莫名冒出一个头部 */
+.bar:not(.qs-grid) .qs-ghead,
+.bar:not(.qs-grid) .qs-gpick {
+    display: none !important;
+}
+
+/* 一格 */
+.bar.qs-grid .qs-gcell {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    min-width: 0;
+    /* 撑满整行 + 内容不许溢出：格子高度被调到比内容还矮时，宁可裁掉/省略，
+       也绝不让图标和文字溢出到相邻格子上去（那正是"重叠"的观感来源）。 */
+    min-height: 0;
+    overflow: hidden;
+    padding: 6px 4px;
+    border: 1px solid var(--qs-border);
+    border-radius: var(--gr, 12px);
+    background: var(--qs-field, rgba(15, 20, 40, .05));
+    color: var(--qs-fg);
+    cursor: pointer;
+    font: inherit;
+    transition: background-color .12s ease, border-color .12s ease, transform .06s ease;
+}
+
+.bar.qs-grid .qs-gcell:hover {
+    background: var(--qs-hover);
+    border-color: var(--qs-sep);
+}
+
+.bar.qs-grid .qs-gcell:active {
+    background: var(--qs-active);
+    transform: scale(.97);
+}
+
+/* 空位：可点，点开"添加内容"面板（用户要求：空白位置可点击弹选择面板）。
+   视觉上保留虚框 + 一个 "+"，一眼看出"这里能加东西"。 */
+.bar.qs-grid .qs-gcell.qs-gempty {
+    background: transparent;
+    border-style: dashed;
+    border-color: var(--qs-sep);
+    color: var(--qs-fg-dim);
+    opacity: .62;
+}
+
+.bar.qs-grid .qs-gcell.qs-gempty:hover {
+    opacity: 1;
+    background: var(--qs-hover);
+    border-color: var(--qs-accent, #2563EB);
+    color: var(--qs-accent, #2563EB);
+}
+
+.bar.qs-grid .qs-gcell.qs-gempty .qs-gplus {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    font-size: 20px;
+    line-height: 1;
+    font-weight: 300;
+}
+
+/* 只读态（v2.6.2）：网格页默认只读，空位只是占位 ——
+ * 不给 "+"、不给悬停高亮、不给手型光标，让"能点"和"不能点"一眼分得开。
+ * 进了编辑模式（.qs-gedit）才恢复成可添加的样子。 */
+.bar.qs-grid:not(.qs-gedit) .qs-gcell.qs-gempty {
+    cursor: default;
+    opacity: .3;
+}
+
+.bar.qs-grid:not(.qs-gedit) .qs-gcell.qs-gempty:hover {
+    background: transparent;
+    border-color: var(--qs-sep);
+    color: var(--qs-fg-dim);
+    opacity: .3;
+}
+
+.bar.qs-grid:not(.qs-gedit) .qs-gcell.qs-gempty .qs-gplus {
+    display: none;
+}
+
+/* 编辑态：空位的 "+" 亮起来（比只读时更明显，暗示"现在能加"） */
+.bar.qs-grid.qs-gedit .qs-gcell.qs-gempty {
+    opacity: 1;
+    border-color: var(--qs-accent, #2563EB);
+    color: var(--qs-accent, #2563EB);
+}
+
+/* ---------------- 添加内容面板（点空格子弹出） ---------------- */
+.bar.qs-grid .qs-gpick {
+    position: absolute;
+    inset: 0;
+    z-index: 20;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 8px 9px 9px;
+    border-radius: inherit;
+    /* 必须实色：面板盖在格子上面，半透明会把下面的格子透出来，读不清 */
+    background: var(--qs-bg-fill, var(--qs-bg));
+    animation: qs-pick-in .12s ease;
+}
+
+@keyframes qs-pick-in {
+    from { opacity: 0; transform: scale(.985); }
+    to { opacity: 1; transform: none; }
+}
+
+.qs-gpick-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: none;
+}
+
+.qs-gpick-head .qs-gpick-title {
+    flex: 1 1 auto;
+    font-size: 11.5px;
+    font-weight: 600;
+    color: var(--qs-fg);
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+
+.qs-gpick-head .qs-gbtn {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    padding: 0;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--qs-fg-dim);
+    font: inherit;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.qs-gpick-head .qs-gbtn:hover {
+    background: var(--qs-hover);
+    color: var(--qs-fg);
+}
+
+.qs-gpick-search {
+    flex: none;
+    width: 100%;
+    box-sizing: border-box;
+    padding: 4px 8px;
+    border: 1px solid var(--qs-border);
+    border-radius: 7px;
+    background: var(--qs-field, rgba(15, 20, 40, .05));
+    color: var(--qs-fg);
+    font: inherit;
+    font-size: 11.5px;
+    outline: none;
+}
+
+.qs-gpick-search:focus {
+    border-color: var(--qs-accent, #2563EB);
+}
+
+.qs-gpick-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding-right: 2px;
+}
+
+.qs-gpick-cat {
+    flex: none;
+    padding: 4px 2px 2px;
+    font-size: 10px;
+    letter-spacing: .04em;
+    color: var(--qs-fg-dim);
+    opacity: .8;
+}
+
+.qs-gpick-item {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    width: 100%;
+    padding: 4px 6px;
+    border: none;
+    border-radius: 7px;
+    background: transparent;
+    color: var(--qs-fg);
+    font: inherit;
+    font-size: 11.5px;
+    text-align: left;
+    cursor: pointer;
+}
+
+.qs-gpick-item:hover {
+    background: var(--qs-hover);
+}
+
+.qs-gpick-item .qs-gpick-ic {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    font-size: 13px;
+}
+
+.qs-gpick-item .qs-gpick-ic img,
+.qs-gpick-item .qs-gpick-ic svg {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+}
+
+.qs-gpick-item .qs-gpick-nm {
+    flex: 1 1 auto;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+
+.qs-gpick-empty {
+    padding: 10px 6px;
+    font-size: 11px;
+    color: var(--qs-fg-dim);
+    text-align: center;
+}
+
+.bar.qs-grid .qs-gicon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    /* 格子很矮时按格子高度收一点，别让图标顶满整格（40px 高的格子里 30px 图标
+     * 加上下内边距就溢出了）。`min()` 让它在正常尺寸下仍是 30px。 */
+    width: min(30px, max(14px, calc(var(--gch, 76px) - 20px)));
+    height: min(30px, max(14px, calc(var(--gch, 76px) - 20px)));
+    font-size: 18px;
+    line-height: 1;
+    flex: none;
+}
+
+/* 智能直达的内置图标（SVG）。容器多大它就多大 —— .qs-gicon 是 30px、
+   横条 .ico 是 28px、设置页 .ic 是 24px，三处共用一套规则。 */
+.qs-go-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    height: 100%;
+}
+
+.qs-go-icon svg {
+    width: 100%;
+    height: 100%;
+    display: block;
+}
+
+.bar.qs-grid .qs-gicon img {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+}
+
+/* 「只显示图标」模式（设置 → 网格页设置 → 外观 → 格子文字）。
+   名称整条藏掉，图标在格子里居中；格子更矮时也不会出现"图标 + 半行字"。 */
+.bar.qs-grid.qs-gnolabel .qs-glabel {
+    display: none;
+}
+
+.bar.qs-grid.qs-gnolabel .qs-gcell {
+    gap: 0;
+}
+
+.bar.qs-grid .qs-glabel {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 12px;
+    color: var(--qs-fg-dim);
+    line-height: 1.2;
+}
+
+/* ==================================================================
+ * 包裹符号
+ *
+ * v2.6.3：横条上那颗"常驻"的包裹按钮已删除 —— 入口统一由 bar_list 里的
+ * `@wrap` 成员提供（和翻译 / OCR 同一套），设置里加进来才出现、移出去就消失。
+ * 下面 `.ico.qs-wrap` 这两条已经没有节点匹配了，留着是因为图形样式与
+ * `qsFuncIcon('@wrap')` 产出的 SVG 一致，将来要再挂个固定按钮能直接复用。
+ * 菜单是 .bar 的**兄弟节点**、走文档流 —— 这样 stage 会跟着长高，
+ * 窗口由 pushLayout 撑开；写成 inset:0 的绝对定位会被横条那 40px 裁死。
+ * ================================================================== */
+.ico.qs-wrap svg {
+    width: 100%;
+    height: 100%;
+    display: block;
+    /* 线框造型：不吃 fill，跟着主题色走，悬停变强调色 */
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.7;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
+.ico.qs-wrap:hover { color: var(--qs-accent); }
+
+.wrapmenu {
+    width: 364px;
+    padding: 10px;
+    border-radius: 14px;
+    border: none;
+    background-color: var(--qs-bg-fill, var(--qs-bg));
+    box-shadow: var(--qs-shadow);
+    /* 和引擎面板同一套：面板本体只淡入，位移留给子元素（父元素带 transform
+       会让 pushLayout 量到动画中间态，窗口比内容小、边缘被切） */
+    animation: qs-panel-fade .15s cubic-bezier(.22, 1, .36, 1);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.wm-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.wm-title {
+    flex: none;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--qs-fg);
+}
+
+/* 当前（包裹后）的文字：菜单里唯一的"结果展示位"，长了就省略 */
+.wm-cur {
+    flex: 1 1 auto;
+    min-width: 0;
+    font-size: 11px;
+    color: var(--qs-fg-dim);
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+
+.wm-x {
+    height: 26px;
+    padding: 0 9px;
+    font-size: 12px;
+}
+
+/* 12 个符号排 4 列 —— 3 列会多出一行半，4 列刚好三行 */
+.wm-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 6px;
+}
+
+.wm-item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 3px;
+    padding: 7px 2px 6px;
+    border: 1px solid var(--qs-border);
+    border-radius: 9px;
+    background: var(--qs-field);
+    color: var(--qs-fg);
+    font: inherit;
+    cursor: pointer;
+    transition: background-color .12s ease, border-color .12s ease, transform .06s ease;
+}
+
+.wm-item:hover {
+    background: var(--qs-hover);
+    border-color: var(--qs-accent, #3B7DFF);
+}
+
+.wm-item:active { transform: scale(.96); }
+
+.wm-sym {
+    font-size: 13px;
+    line-height: 1.15;
+    letter-spacing: .01em;
+}
+
+.wm-nm {
+    font-size: 10px;
+    color: var(--qs-fg-dim);
+    white-space: nowrap;
+}
+
+.wm-foot {
+    font-size: 10.5px;
+    line-height: 1.4;
+    color: var(--qs-fg-dim);
+    min-height: 14px;
+}
+
+/* ------------------------------------------------------------------
+ * 网格页编辑模式
+ *
+ * 进入编辑后：每个有内容的格子右上角出现 ×，点它把这格移出网格页；
+ * 空格的 "+" 也照常可点（相当于"这里能加"）。编辑是临时状态，
+ * 不进配置，下次唤起自动回到正常模式。
+ * ------------------------------------------------------------------ */
+.bar.qs-grid.qs-gedit .qs-gcell {
+    /* 用虚线圈出"现在能改"，和正常态区分开 */
+    border-style: dashed;
+}
+
+.bar.qs-grid .qs-gdel {
+    position: absolute;
+    top: -6px;
+    right: -6px;
+    width: 17px;
+    height: 17px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    background: #DC2626;
+    color: #fff;
+    font-size: 12px;
+    line-height: 1;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, .28);
+    /* 点击热区比视觉大一圈，小格子也好点 */
+    padding: 0;
+    z-index: 3;
+}
+
+.bar.qs-grid .qs-gdel:hover {
+    background: #B91C1C;
+    transform: scale(1.08);
+}
+
+/* 有 × 的格子必须是定位上下文 */
+.bar.qs-grid.qs-gedit .qs-gcell {
+    position: relative;
+}
+
+/* 编辑按钮的"已开启"态：和悬停同一套强调色，一眼看出正在编辑 */
+.qs-ghead .qs-gbtn.on {
+    background: var(--qs-accent);
+    border-color: var(--qs-accent);
+    color: #fff;
+}
+
+/* 功能图标进到格子/选板里要撑满容器（qsFuncIcon 产出的是 svg 或字母徽标） */
+.bar.qs-grid .qs-gicon > svg,
+.qs-gpick-item .qs-gpick-ic > svg {
+    width: 100%;
+    height: 100%;
+    display: block;
+    fill: currentColor;
+}
+
+.bar.qs-grid .qs-gicon > .letter,
+.qs-gpick-item .qs-gpick-ic > .letter {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    height: 100%;
+    border-radius: 6px;
+    color: #fff;
+    font-weight: 600;
+    line-height: 1;
+}

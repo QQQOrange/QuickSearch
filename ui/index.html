@@ -87,6 +87,20 @@
            openMenu 用视口坐标设 left/top 也不会因此偏移。 -->
     <div class="menu" id="menu" hidden></div>
 
+    <!-- ---------------- 包裹符号菜单 ----------------
+         和 #panel 一样是 .bar 的**兄弟**：走文档流，stage 自然长高，
+         pushLayout 量到的就是"横条 + 菜单"的真实高度，窗口跟着撑开。
+         摆成绝对定位（inset:0）会被横条那 40px 的高度裁死，这里不能用那套。 -->
+    <div class="wrapmenu" id="wrapMenu" hidden>
+        <div class="wm-head">
+            <span class="wm-title">包裹符号</span>
+            <span class="wm-cur" id="wmCur"></span>
+            <button class="panel-x wm-x" id="btnWrapClose" title="收起（Esc）">收起</button>
+        </div>
+        <div class="wm-grid" id="wmGrid"></div>
+        <div class="wm-foot" id="wmFoot"></div>
+    </div>
+
 </div>
 
 <script src="shared.js"></script>

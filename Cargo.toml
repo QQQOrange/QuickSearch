@@ -1,101 +1,48 @@
+[workspace]
+members = ["qs-macros"]
+
 [package]
-name = "quicksearch"
-version = "1.5.22"
+name = "qs-hw"
+version = "2.6.7"
 edition = "2021"
-description = "Quick Search 桌面版 —— 任意软件里选中文字即可弹出搜索横条"
-build = "build.rs"
+description = "Quick Search 原生宿主（wry + tao 取代 Tauri 运行时）"
 
 [[bin]]
 name = "QuickSearch"
 path = "src/main.rs"
 
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
-# feature 调和器（原因见文件末尾注释）：build-dependency 那一侧也要补一份，
-# 因为 Cargo resolver 2 不会把 build-deps 和普通 deps 的 feature 统一起来。
-indexmap = { version = "1.9", default-features = false, features = ["std"] }
+embed-resource = "3"
+# 构建期把前端压成一个 deflate 包再嵌进 exe（体积 4.36 MB → 约 1.8 MB）
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon", "image-png"] }
+qs-macros = { path = "qs-macros" }
+
+# GUI 底座：直接驱动 WebView2，不再经过 Tauri 的框架层。
+tao = "0.37"
+wry = "0.57"
+pollster = "0.3"
+raw-window-handle = "0.6"
+
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rfd = "0.17"
 open = "5"
-
-# WebDAV 备份用的 HTTP 客户端。
-# 选 ureq 而不是 reqwest：它是**同步阻塞**的，不需要 tokio 运行时，丢进后台线程
-# 就能用；TLS 走 rustls（纯 Rust），不用管系统 OpenSSL。编译量也小一大截。
-ureq = "2"
-
-# 只为了让 OCR 的截图能压成 PNG / JPEG。
-# 百度文字识别要求 base64 之后不超过 4MB —— 直接发 BMP 的话，一张
-# 1600x800 的截图就要 3.8MB，随便框大一点就超了；PNG 一般只有它的十分之一。
-# jpeg 是给「上传前压缩」用的：一张 2 倍 DPR 的截图动辄 2~4MB PNG，
-# 缩到长边 1600px 再存成 JPEG(q85) 通常只有 200~400KB，上传时间掉一个数量级。
-#
-# #143 图标编辑器的「一键消除背景」也要解码用户挑的图（图库对话框放的
-# 格式全都得能解）：ico/webp/gif/bmp 都是小编码器，开这四个特性编译量
-# 增加很小，换来「挑什么格式都能消背景」。
+ureq = { version = "2", default-features = false, features = ["native-tls", "gzip", "charset", "json"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "ico", "webp", "gif", "bmp"] }
-
-# ---------------------------------------------------------------------------
-# AI 抠图（r80）：跑 ONNX 模型做神经网络抠图。
-#
-# # ⚠ 必须开 `load-dynamic`（r80g 实测纠正了我之前的错误结论）
-#
-# 不开它时，ort 会在编译期静态链接 `onnxruntime.lib`，于是 `onnxruntime.dll`
-# 是**进程启动期的硬依赖** —— 缺了它 exe 根本起不来。
-# （我第一版据此写了"缺 dll 也能启动"的结论，那次验证被 Windows 的
-#  "找不到 dll"模态错误框骗了：进程活着 ≠ 启动成功。重新验证时进程立刻退出，
-#  证明它确实是硬依赖。）
-#
-# 开了之后 ort 改为在**第一次真正推理时**用 `libloading` 加载 dll，
-# 并且认 `ORT_DYLIB_PATH` 环境变量（见 ort 的 `src/lib.rs::lib_handle`）。
-# 这正是"运行库随模型一起下载、可以放在任意目录"所必需的前提。
-#
-# # 其余 feature
-#
-# · `ndarray`：张量用 ndarray 构造，不手搓裸指针。
-# · 不再要 `copy-dylibs`：dll 改由运行时下载到「抠图模型」目录，不该再拷进程序目录。
-# · 编译期仍用 `ORT_SKIP_DOWNLOAD` + `ORT_LIB_LOCATION` 避免联网（见 .cargo/config.toml）。
 ort = { version = "=2.0.0-rc.10", features = ["ndarray", "load-dynamic"] }
-# r80g：运行库（onnxruntime.dll）现在**随模型一起下载**，而官方只发 zip，
-# 所以要解压。flate2 用纯 Rust 后端（rust_backend）—— 不拉 C 代码，
-# 且它**本来就在依赖树里**（png 那条线），加这个直接依赖零下载量。
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 ndarray = "0.16"
-
-# ---------------------------------------------------------------------------
-# 下面这行不是业务依赖，只是一个「feature 调和器」。
-# tauri-build / tauri-utils 会拉起 schemars 0.8，而 schemars 0.8 把 indexmap 1.9
-# 声明成 default-features = false + features = ["serde-1"]，于是 indexmap 编译时
-# 没有 std feature，`IndexMap<K, V, S = RandomState>` 的默认泛型就消失了，
-# schemars 直接 E0107 编译不过。显式把 std 打开让 feature 统一即可。
 indexmap = { version = "1.9", default-features = false, features = ["std"] }
-
-# 备份加密（用户要求：备份数据敏感，落盘/上云前必须加密）。
-# AES-256-GCM：带认证的对称加密，有 AES-NI 硬件加速、速度快；
-# Argon2id：由备份密码派生密钥，内存困难型 KDF，暴力破解成本极高。
 aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc", "rand_core"] }
 argon2 = { version = "0.5", default-features = false, features = ["alloc", "password-hash"] }
 rand = "0.8"
-
-# 在线 OCR 多引擎（需求 2）要用到 HMAC-SHA256：
-#   · 腾讯云的 TC3-HMAC-SHA256 签名；
-#   · 有道智云的 v3 签名（sha256(appKey+input+salt+curtime+secret)）。
-# sha2 本来就在依赖树里（rustls 那条线），提成直接依赖不增加下载量；
-# hmac 是很小的一层包装（HMAC 就是两次 sha256 的拼装，但自己手写容易在
-# 分组填充上写错，这种事不值得省一个依赖）。
 sha2 = "0.10"
 hmac = "0.12"
-
-# windows-rs 的 implement 宏（实现 UIA 事件处理器接口用）生成代码里用的是
-# `::windows_core::` 绝对路径，外部 crate 必须把 windows-core 提为直接依赖，
-# 否则找不到这个 crate。版本和 windows 内部依赖的对齐（同一个 lock 条目）。
 windows-core = "0.62"
 md5 = "0.8"
 
-# 只开需要的 Windows API 模块，能显著缩短编译时间
 [dependencies.windows]
 version = "0.62"
 features = [
@@ -104,24 +51,17 @@ features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
     "Win32_UI_HiDpi",
-    # UI Automation：**不碰剪贴板**直读当前选区文字 —— "选中就弹条"正解，
-    # 见 win::uia_selection_text 的注释。只用到 TextPattern 这一小撮接口。
     "Win32_UI_Accessibility",
     "Win32_System_Threading",
     "Win32_System_DataExchange",
     "Win32_System_Memory",
     "Win32_System_LibraryLoader",
-    # v1.2.0：自动更新要用 MoveFileExW 替换正在运行的 exe（先给自己改名、
-    # 再把新的搬进来）。这条 API 在 Win32_Storage_FileSystem 里。
     "Win32_Storage_FileSystem",
     "Win32_System_Registry",
     "Win32_System_ProcessStatus",
     "Win32_System_Com",
     "Win32_Graphics_Gdi",
     "Win32_Security",
-    # v1.4.0：本地数据静态加密用 DPAPI（CryptProtectData / CryptUnprotectData）。
-    # ⚠ 必须是 `Win32_Security_Cryptography`；下面那个 `Security_Cryptography`
-    #   是 WinRT 的命名空间，**不含** DPAPI，加错了编译期会报"模块被配置掉了"。
     "Win32_Security_Cryptography",
     "Foundation",
     "Foundation_Collections",
@@ -132,22 +72,20 @@ features = [
     "Storage_Streams",
 ]
 
-# WebView2 原生接口：用来关掉 WebView2 自带的右键菜单，
-# 否则在横条上右键会先弹出 Edge 的「前进/刷新」菜单。
 [dependencies.webview2-com]
 version = "0.39"
 
-# 本地 OCR（Windows.Media.Ocr）走的是 WinRT 异步接口，要阻塞等结果得用
-# windows_future 的 Async::join()。版本必须和 windows 内部用的那一份对齐。
 [dependencies.windows-future]
 version = "=0.3.2"
 default-features = false
 features = ["std"]
 
 [profile.release]
-opt-level = "s"
+opt-level = "z"
 lto = "fat"
 codegen-units = 1
-# 不用 panic = "abort"：子线程里 panic 会把整个程序带走，用户看到的是"软件莫名消失"。
-# 改成默认的 unwind + 自定义 panic hook（打到日志里），单线程挂掉不影响主程序。
 strip = true
+
+# 本地 vendor 的 ureq：让 native-tls(schannel) 成为默认后端，省掉整棵 rustls。
+[patch.crates-io]
+ureq = { path = "vendor/ureq" }

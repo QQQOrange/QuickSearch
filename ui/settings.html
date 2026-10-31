@@ -33,32 +33,37 @@
                     变化 → 参数放最后。预览在最下面时拖滑块根本看不到它。）
            范围 = 在哪些软件里不弹 / 只在哪里弹
            抠图 = AI 抠图（图标编辑器） -->
-    <button type="button" data-tab="look"><span class="tb-i" aria-hidden="true">🎨</span>外观</button>
+    <button type="button" data-tab="look"><span class="tb-i" aria-hidden="true">🎨</span>横条外观</button>
+    <!-- 网格页设置：按键唤出的格子面板。单独立一栏（原来塞在「通用」里）——
+         它有自己的外观（行列/格子/间距/圆角）、功能（启用/点击行为）和内容，
+         混在通用里既找不到，也没地方放实时预览。 -->
+    <button type="button" data-tab="grid"><span class="tb-i" aria-hidden="true">🧩</span>网格页设置</button>
+    <!-- 按应用：给某个软件**单独**配一份横条内容 / 指定一页网格页。
+         横条与网格页是两套独立配置，所以单独一栏，不塞进上面两栏里的任何一栏。 -->
+    <button type="button" data-tab="appbind"><span class="tb-i" aria-hidden="true">🪟</span>按应用</button>
     <button type="button" data-tab="scope"><span class="tb-i" aria-hidden="true">🚫</span>范围</button>
     <button type="button" data-tab="engines"><span class="tb-i" aria-hidden="true">🔎</span>引擎</button>
-    <button type="button" data-tab="ai"><span class="tb-i" aria-hidden="true">🤖</span>AI 工具</button>
-    <button type="button" data-tab="matte"><span class="tb-i" aria-hidden="true">✂️</span>抠图</button>
-    <button type="button" data-tab="ocr"><span class="tb-i" aria-hidden="true">🔤</span>文字识别</button>
+    <!-- 附加功能：AI / 智能直达 / 抠图 / 文字识别 / 翻译 / 识图 / 收藏夹 / 包裹符号
+         全部收进这一栏（顶栏原来 8 颗按钮，太长也找不到重点）。 -->
+    <button type="button" data-tab="extras"><span class="tb-i" aria-hidden="true">➕</span>附加功能</button>
+    <!-- 智能直达：一条输入自动判类型（软件 / 网址 / 文件），钉到横条上点一下即开。
+         放在「引擎」之后、「AI 工具」之前 —— 与"点一下去哪儿"的引擎是同一族。 -->
     <!-- v1.5.16：翻译。放「文字识别」后面 —— 两者都是"拿到一段文字 → 交给某个
          引擎处理"，用户心智上会挨着找；OCR 结果窗里也有翻译入口，用的同一份配置。 -->
-    <button type="button" data-tab="trans"><span class="tb-i tb-i-img" aria-hidden="true"><img alt="" src="data:image/png;base64,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"></span>翻译</button>
     <!-- r54：识图搜索。放「文字识别」后面 —— 两者是同类动作（框一块屏幕 → 交给某个
          引擎），用户心智上会挨着找。 -->
-    <button type="button" data-tab="imgsearch"><span class="tb-i tb-i-img" aria-hidden="true"><img alt="" src="data:image/png;base64,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"></span>识图搜索</button>
-    <button type="button" data-tab="fav"><span class="tb-i" aria-hidden="true">⭐</span>收藏夹</button>
     <!-- r54：数据导入/导出。与「备份」分成两栏是用户明确要求的：
          「备份功能单独存在且支持加密」—— 导出是明文、备份是加密，两件事不能混。 -->
     <button type="button" data-tab="data"><span class="tb-i" aria-hidden="true">📦</span>数据</button>
-    <button type="button" data-tab="backup"><span class="tb-i" aria-hidden="true">☁️</span>备份</button>
-    <button type="button" data-tab="help"><span class="tb-i" aria-hidden="true">📖</span>帮助</button>
     <button type="button" data-tab="about"><span class="tb-i" aria-hidden="true">ℹ️</span>关于</button>
 </nav>
 <!-- /.shell 的闭合在 </main> 之后（main 也在 shell 里） -->
+<!-- v2.6.2：添加内容弹窗原来就摆在这一行下面，正好把上面那条注释劈成两半，
+     注释一直没闭合，页面里于是漏出一段可见的注释残文。
+     现在弹窗挪到 body 末尾（fixed 定位，放哪儿都不影响覆盖整页）。 -->
 
 <main id="main">
-
-    <!-- ============================ 通用 ============================ -->
-    <div class="pane" data-pane="general">
+<div class="pane" data-pane="general">
     <section class="card">
         <h2>触发</h2>
         <div class="row">
@@ -66,8 +71,16 @@
             <label class="sw"><input type="checkbox" id="s-triggerSelect"><i></i></label>
         </div>
         <div class="row">
-            <div class="rt"><b>按 Ctrl+C 也弹出横条</b><small>键盘选中后复制，同样弹出来</small></div>
+            <div class="rt"><b>按快捷键弹出网格页</b><small>默认 Ctrl+C；快捷键可在下面「网格页」里改。关掉它 = 按这个键什么都不弹</small></div>
             <label class="sw"><input type="checkbox" id="s-triggerCopy"><i></i></label>
+        </div>
+        <!-- 右下角"正在使用什么功能"的通知（v2.6.7） -->
+        <div class="row">
+            <div class="rt"><b>右下角提示当前功能</b>
+                <small>用划词横条 / 网格页 / 文字识别 / 翻译 / 识图时，在屏幕右下角弹一条系统通知，
+                    写明「正在使用：功能 · 软件」，约 5 秒自动消失；同一功能 4 秒内只提示一次</small>
+            </div>
+            <label class="sw"><input type="checkbox" id="s-notifyFeature"><i></i></label>
         </div>
         <div class="row col">
             <div class="rt"><b>出现延迟</b><small>松手后等这么久才弹，调大可避免还在拖选时就冒出来 · 当前 <span id="s-delayVal">0</span> ms</small></div>
@@ -86,6 +99,8 @@
             <label class="sw"><input type="checkbox" id="s-barNeedText"><i></i></label>
         </div>
     </section>
+
+
 
     <section class="card">
         <h2>系统</h2>
@@ -150,7 +165,8 @@
     <!-- 顺序是用户点名的：**主题 → 预览 → 外观参数**。
          预览必须排在参数**前面** —— 放最下面时拖滑块根本看不见它，
          「即时观察」就白搭了；主题（明暗）放最前，是因为它一变整条预览跟着换皮。 -->
-    <div class="pane" data-pane="look" hidden>
+
+<div class="pane" data-pane="look" hidden>
     <section class="card">
         <h2>界面主题 <small>设置窗口与横条共用的明暗皮肤</small></h2>
         <div class="row col">
@@ -292,7 +308,224 @@
 
 
     <!-- ============================ 范围 ============================ -->
-    <div class="pane" data-pane="scope" hidden>
+    <!-- ============================ 网格页设置 ============================ -->
+
+<div class="pane" data-pane="grid" hidden>
+
+    <section class="card">
+        <h2>实时预览 <small>和快捷键唤出的网格页是同一套样式</small></h2>
+        <div class="hint">
+            下面这块不是"仿照横条画的示意图"——它加载的是<b>网格页自己的 bar.css</b>、
+            同一套 DOM 结构（<code>.bar.qs-grid</code> + 格子），所以布局、尺寸、间距、圆角、
+            颜色、阴影、磨砂都跟真弹出来的一致。改下面任何一项，这里<b>立刻</b>跟着变。
+        </div>
+        <!-- 复用横条预览的舞台样式（.preview-stage）：纹理底、圆角、内边距一致 -->
+        <div class="preview-stage gprev-wrap" id="gridPreviewWrap" data-dark="0">
+            <!-- iframe 隔离：bar.css 里有 `*` / `html,body` / `.stage` 这些全局规则，
+                 直接引进来会把设置页整页样式冲掉 -->
+            <iframe id="gridPreview" src="gridpreview.html" title="网格页预览"></iframe>
+        </div>
+        <div class="row">
+            <button class="btn ghost" type="button" id="btnGridPreview">弹出真实网格</button>
+            <span class="hint">走的是和快捷键同一条唤起链路（设置页里点它，等于你按了一次 Ctrl+C）。</span>
+        </div>
+    </section>
+
+    <section class="card">
+        <h2>外观 <small>布局、尺寸与视觉样式</small></h2>
+        <!-- 紧凑排布：6 个数字框一行排完（以前是两行"标签 + 长输入框"，
+             纵向占掉小半屏，用户明确说"占空间过多"） -->
+        <div class="gcompact">
+            <label>行 <input class="txt" type="number" id="gridRows" min="1" max="10"></label>
+            <label>列 <input class="txt" type="number" id="gridCols" min="1" max="10"></label>
+            <label>格子宽 <input class="txt" type="number" id="gridCellW" min="40" max="260" step="2"></label>
+            <label>高 <input class="txt" type="number" id="gridCellH" min="40" max="200" step="2"></label>
+            <label>间距 <input class="txt" type="number" id="gridGap" min="0" max="24" step="1"></label>
+            <label>圆角 <input class="txt" type="number" id="gridRadius" min="0" max="24" step="1"></label>
+            <button class="btn" type="button" id="btnGridSize">保存外观</button>
+            <button class="btn ghost" type="button" id="btnGridReset">恢复默认</button>
+        </div>
+        <!-- 格子文字：显示名称还是只显示图标。改完即时生效（不用点保存外观） -->
+        <div class="row">
+            <div class="rt"><b>格子文字</b><small>只显示图标更清爽（格子可以做得更矮）；显示名称能一眼看清这格是干什么的</small></div>
+            <select class="txt" id="gridShowLabel" style="max-width:200px">
+                <option value="1">图标 + 名称</option>
+                <option value="0">只显示图标</option>
+            </select>
+        </div>
+        <div class="upd-token-status" id="gridSizeMsg"></div>
+        <div class="hint">
+            颜色、阴影、磨砂、不透明度这些跟<b>横条外观</b>走（网格页不单独配色），
+            要换主题去「横条外观」改。
+        </div>
+    </section>
+
+    <section class="card">
+        <h2>功能 <small>启用状态与交互行为</small></h2>
+        <div class="row">
+            <div class="rt"><b>启用网格页</b><small>关掉后快捷键不再唤起它；内容与下面的配置都保留</small></div>
+            <label class="sw"><input type="checkbox" id="s-gridEnable"><i></i></label>
+        </div>
+        <div class="row">
+            <div class="rt"><b>编辑模式下可添加内容</b><small>网格页默认只读；点开右上角 ✏️ 进编辑后才能点空位加内容。关掉这里则编辑态也不给加（纯展示用）</small></div>
+            <label class="sw"><input type="checkbox" id="s-gridAllowAdd"><i></i></label>
+        </div>
+        <div class="row col">
+            <div class="rt"><b>点格子时的行为</b><small>有复制/选中的文字时怎么办</small></div>
+            <select class="txt" id="gridClick" style="max-width:320px">
+                <option value="auto">有文字就用这段文字搜索（推荐）</option>
+                <option value="home">总是打开引擎首页（把网格当书签面板）</option>
+            </select>
+        </div>
+
+        <div class="row col">
+            <div class="rt"><b>唤起快捷键</b><small>写法：<code>ctrl+c</code> / <code>ctrl+shift+g</code> / <code>alt+space</code>。改了之后 <b>Ctrl+C 不再生效</b></small></div>
+            <div class="upd-token-row">
+                <input class="txt" id="gridHotkey" spellcheck="false" placeholder="ctrl+c">
+                <button class="btn" type="button" id="btnGridHotkey">保存快捷键</button>
+                <button class="btn ghost" type="button" id="btnGridDiag">快捷键自检</button>
+            </div>
+            <div class="upd-token-status" id="gridHotkeyMsg"></div>
+        </div>
+        <div class="upd-token-status" id="gridBehMsg"></div>
+    </section>
+
+    <section class="card">
+        <h2>格子内容 <small>和划词横条那份完全分开</small></h2>
+        <div class="row">
+            <div class="rt"><b>正在编辑的页</b><small>下面的列表和「＋ 添加内容」都只作用于这一页；换页不会丢内容</small></div>
+            <select class="txt" id="gridEditPage" style="max-width:240px"></select>
+        </div>
+        <div class="hint">
+            <b>按住任意一项上下拖动</b>即可调整顺序，松手立刻保存。格子数量 = 行 × 列，
+            多出来的不显示、空的显示虚框。加内容有三条路：点上面「＋ 添加内容」、在网格页里点虚框、或在各功能项上直接点「加到网格页」。
+            <br><b>功能格子（图标后面没有网址的那种）是什么：</b>
+            「文字识别」= 框选屏幕识别文字、「识图」= 框选图片按图搜索、「翻译」= 翻译横条当前这段文字、
+            <b>「包裹符号」= 点开一组符号（“” 《》 【】 等），把选中的文字套上 / 拆掉 / 换一对</b>；
+            识别与翻译用哪一家模型，由 设置 → 附加功能 里选中的那个决定（和横条上那颗按钮共用同一份配置）。
+        </div>
+        <div class="row">
+            <div class="upd-token-row">
+                <!-- 用户要求：去掉"搜索框 + 添加"这一套，改成从选择窗口里挑 -->
+                <button class="btn" type="button" id="btnGridPick">＋ 添加内容</button>
+                <button class="btn ghost" type="button" id="btnGridImport">从横条导入</button>
+                <button class="btn ghost" type="button" id="btnGridClear">清空</button>
+            </div>
+        </div>
+        <div class="list" id="gridItemList"></div>
+        <div class="upd-token-status" id="gridItemsMsg"></div>
+    </section>
+
+    <section class="card">
+        <h2>网格页 <small>多页管理 · 滚轮切换</small></h2>
+        <div class="hint">
+            可以建好几页格子，比如「工作」「娱乐」「常用」。在网格页上<b>滚动鼠标滚轮</b>
+            就在这些页之间翻（<b>首尾循环</b>：最后一页再往后回到第一页）；页头有
+            <b>‹ 页名 2/3 ›</b> 的翻页器，← → 也能翻。翻到哪页会<b>记住当前这个应用</b>，
+            下次在同一个软件里唤起还是那页。
+        </div>
+        <div class="row">
+            <div class="upd-token-row">
+                <input class="txt" id="gridPageName" placeholder="新页名字，如「工作」" maxlength="24">
+                <button class="btn" type="button" id="btnGridPageAdd">＋ 新建页</button>
+            </div>
+            <div class="upd-token-status" id="gridPageMsg"></div>
+        </div>
+        <div class="list" id="gridPageList"></div>
+    </section>
+
+    <section class="card">
+        <h2>按应用切换 <small>哪个软件默认用哪一页</small></h2>
+        <div class="hint">
+            填<b>进程名</b>（任务管理器 → 详细信息里那一列，如 <code>chrome.exe</code>）。
+            支持 <code>*</code> 通配：<code>*chrome*</code> 能同时命中 Chrome 的各种进程。
+            匹配优先级：<b>精确 &gt; 通配；同为通配时模式更长的优先；仍并列时先配的优先</b>；
+            都没命中就用「默认」页（下面标着 ★ 的那页）。
+        </div>
+        <div class="row">
+            <div class="upd-token-row">
+                <input class="txt" id="gridAppName" placeholder="chrome.exe" maxlength="80">
+                <select class="txt" id="gridAppPage" style="max-width:180px"></select>
+                <button class="btn" type="button" id="btnGridAppAdd">添加 / 更新</button>
+            </div>
+            <div class="upd-token-status" id="gridAppMsg"></div>
+        </div>
+        <div class="list" id="gridAppList"></div>
+    </section>
+    </div>
+
+<!-- ============================ 按应用绑定 ============================
+     横条（bar_list）和网格页（grid_pages）**各自**可以给某个软件单独配一份内容。
+     两边数据结构不同（横条是一份扁平列表、网格页是"页"），但优先级/回退规则
+     用的是同一套实现（Rust `config::resolve_bar` / `config::resolve_grid_page`），
+     所以「没配 / 配了被清空 / 校验失败」三种情况在两类组件上表现一致。 -->
+<div class="pane" data-pane="appbind" hidden>
+
+    <section class="card">
+        <h2>选一个应用 <small>看它现在用的是专项配置还是默认配置</small></h2>
+        <div class="hint">
+            填<b>进程名</b>（任务管理器 → 详细信息里的「名称」列，如 <code>chrome.exe</code>），
+            支持 <code>*</code> 通配（<code>*chrome*</code> 能命中 Chrome 的各种进程）。
+            「取当前应用」会抓<b>你刚才在用的那个软件</b>（设置窗口自己不算，抓错了直接改输入框）。
+            <br>横条与网格页是<b>两套独立配置</b>，改一边不会影响另一边。
+        </div>
+        <div class="row">
+            <div class="upd-token-row">
+                <input class="txt" id="appBindName" placeholder="chrome.exe" maxlength="80" spellcheck="false">
+                <button class="btn ghost" type="button" id="btnAppBindFg"
+                        title="抓你刚才在用的那个软件（设置窗口自己不算）；抓错了可以直接改上面的输入框">取当前应用</button>
+                <button class="btn" type="button" id="btnAppBindLoad">查看 / 配置</button>
+            </div>
+            <div class="upd-token-status" id="appBindMsg"></div>
+        </div>
+    </section>
+
+    <section class="card" id="appBarCard" hidden>
+        <h2>横条 <small id="appBarState">—</small></h2>
+        <div class="hint" id="appBarHint">
+            这里的每一项都会<b>整份取代</b>默认横条（设置 → 横条外观里的那一份），
+            只对这个软件生效。改完立刻生效，下次在它里面唤起横条就是这套。
+        </div>
+        <div class="list" id="appBarList"></div>
+        <div class="acts">
+            <button class="btn ghost" type="button" id="btnAppBarAdd">＋ 添加内容</button>
+            <button class="btn ghost" type="button" id="btnAppBarReset">恢复默认横条</button>
+        </div>
+        <div class="upd-token-status" id="appBarMsg"></div>
+    </section>
+
+    <section class="card" id="appGridCard" hidden>
+        <h2>网格页 <small id="appGridState">—</small></h2>
+        <div class="hint" id="appGridHint">
+            给这个软件指定<b>一页</b>网格页。不指定 / 指定的页是空的 → 自动用默认页
+            （标 ★ 的那一页），和其它软件看到的一样。
+        </div>
+        <div class="row">
+            <div class="upd-token-row">
+                <select class="txt" id="appGridPage" style="max-width:220px"></select>
+                <button class="btn" type="button" id="btnAppGridBind">绑定这一页</button>
+                <button class="btn ghost" type="button" id="btnAppGridReset">跟随默认</button>
+            </div>
+        </div>
+        <div class="list" id="appGridList"></div>
+        <div class="acts">
+            <button class="btn ghost" type="button" id="btnAppGridAdd">＋ 往这一页加内容</button>
+            <span class="hint" id="appGridAddHint"></span>
+        </div>
+        <div class="upd-token-status" id="appGridMsg"></div>
+    </section>
+
+    <section class="card">
+        <h2>已配置的应用 <small>横条 / 网格页 分开显示</small></h2>
+        <div class="hint">
+            一条应用一行：<b>横条</b>列显示它有没有专项内容，<b>网格页</b>列显示它绑的是哪一页。
+            「—」= 没有专项，用默认配置。
+        </div>
+        <div class="list" id="appBindList"></div>
+    </section>
+    </div>
+
+<div class="pane" data-pane="scope" hidden>
     <section class="card">
         <h2>应用范围 <small>在哪些软件里不弹 / 只在哪里弹</small></h2>
         <div class="row col">
@@ -317,86 +550,8 @@
     </div>
 
     <!-- ============================ AI 抠图 ============================ -->
-    <div class="pane" data-pane="matte" hidden>
-    <!-- ==================== r80：AI 抠图（图标编辑器） ====================
-         用户要求：「图标的编辑功能处于可选，在设置通用里面打开，打开之后就会验证
-         本地有没有这个模型，有的话就直接调用，没有的话那要下载，会弹出下载窗口
-         以及下载进度条，而这个（模型）本身不包含在安装包之内」。
-         所以：开关默认关 → 开了之后列出可下载的模型（4.4MB ~ 168MB 可选）→
-         选中的那个若没下载就提示下载，下载走独立窗口 + 进度条。 -->
-    <section class="card" id="aiMatteCard">
-        <h2>AI 抠图 <small>用神经网络抠图标背景，适合主体与背景颜色接近的图</small></h2>
-        <div class="row">
-            <div class="rt"><b>启用 AI 抠图</b>
-                <small>图标编辑器里的「自动抠图」会先用 AI 模型；<b>关着也能用</b>（走本地算法，毫秒级、无需下载任何东西）</small>
-            </div>
-            <label class="sw"><input type="checkbox" id="s-aiMatting"><i></i></label>
-        </div>
-        <!-- 运行时缺失是硬阻塞（模型能下，但没有 onnxruntime.dll 就跑不了推理）。
-             这条只在真的缺时才出现。
-             r80p：给一个**独立下载按钮** —— 用户要求
-             「这个运行库一直没下下来，也要在设置里提供一个下载的选项」。
-             以前写的是"重新下载完整程序包"，那是 r80g 之前的口径（dll 随包），
-             现在是按需下载，文案一起改。 -->
-        <div class="row" id="aiRuntimeRow" hidden>
-            <div class="rt"><b>⚠ 缺少推理运行时</b>
-                <small>还没有 <code>onnxruntime.dll</code>（11.84MB），AI 抠图无法运行。
-                    点右边「下载运行库」即可，会存到模型目录里。</small>
-            </div>
-            <div class="am-b" id="aiRuntimeBtns">
-                <button class="btn primary" id="btnAiRuntimeDl">下载运行库</button>
-            </div>
-        </div>
-        <div id="aiModelWrap" hidden>
-            <div class="ai-models" id="aiModels"></div>
-            <p class="ai-tip" id="aiMatteTip"></p>
 
-            <!-- r80g：模型存放位置。用户要求「提供直达模型储存位置的按钮和选项，
-                 换完位置之后软件自动把模型都迁移过去」。 -->
-            <div class="ai-dir">
-                <div class="ad-t">
-                    <b>模型存放位置</b>
-                    <small id="aiDirMode">默认位置</small>
-                </div>
-                <div class="ad-path" id="aiDirPath" title="点「打开」可以直接在资源管理器里看到">…</div>
-                <div class="ad-btns">
-                    <button class="btn" id="btnAiDirOpen" title="在资源管理器里打开这个目录">打开</button>
-                    <button class="btn" id="btnAiDirPick" title="换一个目录放模型；已有模型会自动迁移过去">更换…</button>
-                    <button class="btn" id="btnAiDirReset" title="恢复到默认位置（同样会迁移模型）" hidden>恢复默认</button>
-                    <!-- r80i：清理下载残留（半截的 .part / 下运行库的 zip）
-                         与**旧位置**留下的模型。用户要求"做进一步的清除"。 -->
-                    <button class="btn" id="btnAiCleanup" title="清掉下载残留（.part / zip）与旧位置遗留的模型文件">清理残留</button>
-                </div>
-            </div>
-
-            <!-- r80g：独立抠图工具。用户要求「设置通用 ai 抠图这一框最好也有一个
-                 抠图按钮，这样我也可以用这个软件来实现抠图，抠完我就直接自己
-                 自定义地方保存」。 -->
-            <div class="ai-cut">
-                <div class="ac-t">
-                    <b>抠图工具</b>
-                    <small>随便挑一张图来抠，抠完自己选地方保存（不涉及图标、不改任何设置）</small>
-                </div>
-                <div class="ac-btns">
-                    <button class="btn primary" id="btnAiCutout">挑一张图抠…</button>
-                    <button class="btn" id="btnAiCutoutSave" disabled title="把抠好的图另存到你自己选的位置">保存结果…</button>
-                    <label class="ac-model" title="临时换一个模型重抠（不影响你在上面选的默认模型）">
-                        模型
-                        <select id="aiCutModel"></select>
-                    </label>
-                </div>
-                <div class="ac-prev" id="aiCutPrev" hidden>
-                    <div class="ap-box"><img id="aiCutImg" alt="抠图结果"></div>
-                    <div class="ap-meta" id="aiCutMeta"></div>
-                </div>
-            </div>
-        </div>
-    </section>
-    </div>
-
-
-    <!-- ============================ 引擎 ============================ -->
-    <div class="pane" data-pane="engines" hidden>
+<div class="pane" data-pane="engines" hidden>
     <section class="card">
         <h2>预览 <small>加好引擎、排好顺序，这里就是横条真实的样子</small></h2>
         <div class="preview-stage" id="previewStageB">
@@ -599,8 +754,135 @@
 
     </div>
 
+    <!-- ============================ 智能直达 ============================ -->
+
+<!-- ==================== 附加功能（组内导航） ==================== -->
+    <div class="pane" data-pane="extras" hidden>
+        <section class="card subnav-card">
+            <h2>附加功能 <small>工具类的都收在这里，点一项展开</small></h2>
+            <div class="subnav" data-group="extras">
+                <button type="button" class="chip on" data-sub="ai">🤖 AI 工具</button>
+                <button type="button" class="chip" data-sub="go">🎯 智能直达</button>
+                <button type="button" class="chip" data-sub="matte">✂️ 抠图</button>
+                <button type="button" class="chip" data-sub="ocr">🔤 文字识别</button>
+                <button type="button" class="chip" data-sub="trans">🌐 翻译</button>
+                <button type="button" class="chip" data-sub="imgsearch">🖼 识图搜索</button>
+                <button type="button" class="chip" data-sub="fav">⭐ 收藏夹</button>
+                <button type="button" class="chip" data-sub="wrap">🧷 包裹符号</button>
+            </div>
+        </section>
+    </div>
+
+<div class="pane" data-pane="matte" hidden>
+    <!-- ==================== r80：AI 抠图（图标编辑器） ====================
+         用户要求：「图标的编辑功能处于可选，在设置通用里面打开，打开之后就会验证
+         本地有没有这个模型，有的话就直接调用，没有的话那要下载，会弹出下载窗口
+         以及下载进度条，而这个（模型）本身不包含在安装包之内」。
+         所以：开关默认关 → 开了之后列出可下载的模型（4.4MB ~ 168MB 可选）→
+         选中的那个若没下载就提示下载，下载走独立窗口 + 进度条。 -->
+    <section class="card" id="aiMatteCard">
+        <h2>AI 抠图 <small>用神经网络抠图标背景，适合主体与背景颜色接近的图</small></h2>
+        <div class="row">
+            <div class="rt"><b>启用 AI 抠图</b>
+                <small>图标编辑器里的「自动抠图」会先用 AI 模型；<b>关着也能用</b>（走本地算法，毫秒级、无需下载任何东西）</small>
+            </div>
+            <label class="sw"><input type="checkbox" id="s-aiMatting"><i></i></label>
+        </div>
+        <!-- 运行时缺失是硬阻塞（模型能下，但没有 onnxruntime.dll 就跑不了推理）。
+             这条只在真的缺时才出现。
+             r80p：给一个**独立下载按钮** —— 用户要求
+             「这个运行库一直没下下来，也要在设置里提供一个下载的选项」。
+             以前写的是"重新下载完整程序包"，那是 r80g 之前的口径（dll 随包），
+             现在是按需下载，文案一起改。 -->
+        <div class="row" id="aiRuntimeRow" hidden>
+            <div class="rt"><b>⚠ 缺少推理运行时</b>
+                <small>还没有 <code>onnxruntime.dll</code>（11.84MB），AI 抠图无法运行。
+                    点右边「下载运行库」即可，会存到模型目录里。</small>
+            </div>
+            <div class="am-b" id="aiRuntimeBtns">
+                <button class="btn primary" id="btnAiRuntimeDl">下载运行库</button>
+            </div>
+        </div>
+        <div id="aiModelWrap" hidden>
+            <div class="ai-models" id="aiModels"></div>
+            <p class="ai-tip" id="aiMatteTip"></p>
+
+            <!-- r80g：模型存放位置。用户要求「提供直达模型储存位置的按钮和选项，
+                 换完位置之后软件自动把模型都迁移过去」。 -->
+            <div class="ai-dir">
+                <div class="ad-t">
+                    <b>模型存放位置</b>
+                    <small id="aiDirMode">默认位置</small>
+                </div>
+                <div class="ad-path" id="aiDirPath" title="点「打开」可以直接在资源管理器里看到">…</div>
+                <div class="ad-btns">
+                    <button class="btn" id="btnAiDirOpen" title="在资源管理器里打开这个目录">打开</button>
+                    <button class="btn" id="btnAiDirPick" title="换一个目录放模型；已有模型会自动迁移过去">更换…</button>
+                    <button class="btn" id="btnAiDirReset" title="恢复到默认位置（同样会迁移模型）" hidden>恢复默认</button>
+                    <!-- r80i：清理下载残留（半截的 .part / 下运行库的 zip）
+                         与**旧位置**留下的模型。用户要求"做进一步的清除"。 -->
+                    <button class="btn" id="btnAiCleanup" title="清掉下载残留（.part / zip）与旧位置遗留的模型文件">清理残留</button>
+                </div>
+            </div>
+
+            <!-- r80g：独立抠图工具。用户要求「设置通用 ai 抠图这一框最好也有一个
+                 抠图按钮，这样我也可以用这个软件来实现抠图，抠完我就直接自己
+                 自定义地方保存」。 -->
+            <div class="ai-cut">
+                <div class="ac-t">
+                    <b>抠图工具</b>
+                    <small>随便挑一张图来抠，抠完自己选地方保存（不涉及图标、不改任何设置）</small>
+                </div>
+                <div class="ac-btns">
+                    <button class="btn primary" id="btnAiCutout">挑一张图抠…</button>
+                    <button class="btn" id="btnAiCutoutSave" disabled title="把抠好的图另存到你自己选的位置">保存结果…</button>
+                    <label class="ac-model" title="临时换一个模型重抠（不影响你在上面选的默认模型）">
+                        模型
+                        <select id="aiCutModel"></select>
+                    </label>
+                </div>
+                <div class="ac-prev" id="aiCutPrev" hidden>
+                    <div class="ap-box"><img id="aiCutImg" alt="抠图结果"></div>
+                    <div class="ap-meta" id="aiCutMeta"></div>
+                </div>
+            </div>
+        </div>
+    </section>
+    </div>
+
+
+    <!-- ============================ 引擎 ============================ -->
+
+<div class="pane" data-pane="go" hidden>
+    <section class="card">
+        <h2>添加智能直达入口 <small>粘贴链接、软件路径或文件路径，自动识别类型</small></h2>
+        <div class="hint">
+            一条输入自动判断是 <b>软件</b>、<b>网址</b>还是<b>本地文件</b>，保存前先校验能不能用。<br>
+            网址可以只写 <code>example.com</code>（自动补 https）；软件/文件可以直接把文件拖进输入框，
+            也可以只写名字（如 <code>notepad</code>，会去 PATH 里找）。
+        </div>
+        <div class="row col">
+            <input class="txt" id="goInput" spellcheck="false"
+                   placeholder="https://example.com ｜ D://Tools//App.exe ｜ %USERPROFILE%\Desktop\清单.xlsx">
+        </div>
+        <div class="row">
+            <button class="btn" type="button" id="goDetectBtn">识别并添加</button>
+            <span class="hint" id="goMsg"></span>
+        </div>
+        <!-- 识别出来之后先在这儿确认：名称 / 备注 / 图标都能改，改完再保存。
+             新增和编辑共用这一张卡（编辑时它是"改这条入口"的表单）。 -->
+        <div class="list" id="goPreview" hidden></div>
+    </section>
+
+    <section class="card" id="sec-go">
+        <h2>已添加的入口 <small>编辑、删除、调整顺序、固定到横条</small></h2>
+        <div class="list" id="goList"></div>
+    </section>
+    </div>
+
     <!-- ============================ AI 工具 ============================ -->
-    <div class="pane" data-pane="ai" hidden>
+
+<div class="pane" data-pane="ai" hidden>
     <section class="card">
         <h2>AI 提问后缀 <small>选中文字点 AI 图标时，自动接在后面一起问</small></h2>
         <div class="hint">
@@ -619,7 +901,8 @@
     </div>
 
     <!-- ============================ OCR ============================ -->
-    <div class="pane" data-pane="ocr" hidden>
+
+<div class="pane" data-pane="ocr" hidden>
     <section class="card">
         <h2>文字识别 <small>框一块屏幕区域，把里面的字抠出来</small></h2>
         <!-- r49（用户要求：设置页尽量简洁，说明统一放帮助里）：
@@ -753,7 +1036,8 @@
          于是这一栏整体改成「识别引擎」那一栏的模样：名单来自后端注册表
          （trans_engines_list），点一行 = 设为默认引擎并展开它填凭据；
          「同时翻译」多选 = 额外和默认引擎一起翻的那几家。 -->
-    <div class="pane" data-pane="trans" hidden>
+
+<div class="pane" data-pane="trans" hidden>
     <section class="card">
         <h2>翻译 <small>选中文字点横条上的「译」，或在识别结果窗点「翻译」</small></h2>
         <div class="hint">走各家的 OpenAI 兼容接口，把一段文字翻成另一种语言。<b>点下面一行 = 设为默认引擎</b>（每次翻译一定用它）；展开那一行填 Key、选模型，「同时翻译」里勾中的几家会<b>和默认引擎一起翻</b>，翻译窗里一家一个文本框同时摆开。各家怎么申请、怎么排查，见<b>帮助 ⑥ 翻译</b>。</div>
@@ -802,7 +1086,8 @@
     </div>
 
     <!-- ============================ 识图搜索（r54） ============================ -->
-    <div class="pane" data-pane="imgsearch" hidden>
+
+<div class="pane" data-pane="imgsearch" hidden>
     <section class="card">
         <h2>识图搜索 <small>框一块屏幕，按图搜图</small></h2>
         <div class="hint">
@@ -886,7 +1171,67 @@
     </div>
 
     <!-- ======================= 数据导入导出（r54） ======================= -->
-    <div class="pane" data-pane="data" hidden>
+
+<div class="pane" data-pane="fav" hidden>
+    <section class="card">
+        <h2>收藏夹 <small>存常用文字 / 图片，点一下就复制；目录可以放进横条</small></h2>
+        <div class="hint">
+            一级目录里既能直接放内容，也能再建<b>二级目录</b>（最多两级）；目录可以<b>放进横条</b>。
+            拖拽怎么拖、快捷键怎么录，见<b>帮助 ⑥ 收藏夹</b>。
+        </div>
+        <div class="row col">
+            <div class="rt"><b>唤起收藏夹的快捷键</b><small>点按钮后按下组合键（要带 Ctrl / Alt / Shift）；Esc 或点别处退出录入，「清除」= 不设</small></div>
+            <div class="hotkey-row">
+                <button class="btn ghost" id="btnFavHotkey">未设置</button>
+                <button class="btn ghost" id="btnFavHotkeyClear">清除</button>
+                <span class="grab-hint" id="favHotkeyHint"></span>
+            </div>
+        </div>
+        <div class="acts">
+            <button class="btn ghost" id="btnFavAddGroup">＋ 添加一级目录</button>
+            <button class="btn ghost" id="btnFavExpandAll">全部展开</button>
+            <button class="btn ghost" id="btnFavCollapseAll">全部折叠</button>
+            <span class="grab-hint" id="favHint"></span>
+        </div>
+        <div id="favTree"></div>
+    </section>
+    </div>
+
+    <!-- ============================ 备份 ============================ -->
+
+<!-- ==================== 包裹符号 ==================== -->
+    <div class="pane" data-pane="wrap" hidden>
+    <section class="card">
+        <h2>包裹符号 <small>把选中的文字套成一对符号，再点一次拆掉</small></h2>
+        <div class="hint">
+            选中文字后，横条（或网格页）上会出现一颗 <b>[ ]</b> 按钮：点开是 12 组符号，
+            选一组就套上、再点同一组拆掉，换一组是替换外层符号；结果自动复制到剪贴板，
+            回原处 Ctrl+V 覆盖即可。<br>
+            它是个独立入口 —— 想用就把它加到横条或网格页，不必每次进设置。
+        </div>
+        <div class="row">
+            <div class="rt"><b>放到哪里</b><small>横条与网格页可以同时加，互不影响</small></div>
+            <div class="upd-token-row">
+                <button class="btn" type="button" id="btnWrapToBar">添加到横条</button>
+                <button class="btn ghost" type="button" id="btnWrapToGrid">添加到网格页</button>
+            </div>
+        </div>
+        <div class="list" id="wrapPairsList"></div>
+    </section>
+    </div>
+
+<!-- ==================== 数据（组内导航） ==================== -->
+    <div class="pane" data-pane="datanav" hidden>
+        <section class="card subnav-card">
+            <h2>数据 <small>导入导出、清理，以及备份与同步</small></h2>
+            <div class="subnav" data-group="data">
+                <button type="button" class="chip on" data-sub="data">📦 数据与导入导出</button>
+                <button type="button" class="chip" data-sub="backup">☁️ 备份与同步</button>
+            </div>
+        </section>
+    </div>
+
+<div class="pane" data-pane="data" hidden>
     <section class="card">
         <h2>数据 <small>导出明文配置、导入恢复</small></h2>
         <div class="hint">
@@ -942,33 +1287,8 @@
     </div>
 
     <!-- ============================ 收藏夹 ============================ -->
-    <div class="pane" data-pane="fav" hidden>
-    <section class="card">
-        <h2>收藏夹 <small>存常用文字 / 图片，点一下就复制；目录可以放进横条</small></h2>
-        <div class="hint">
-            一级目录里既能直接放内容，也能再建<b>二级目录</b>（最多两级）；目录可以<b>放进横条</b>。
-            拖拽怎么拖、快捷键怎么录，见<b>帮助 ⑥ 收藏夹</b>。
-        </div>
-        <div class="row col">
-            <div class="rt"><b>唤起收藏夹的快捷键</b><small>点按钮后按下组合键（要带 Ctrl / Alt / Shift）；Esc 或点别处退出录入，「清除」= 不设</small></div>
-            <div class="hotkey-row">
-                <button class="btn ghost" id="btnFavHotkey">未设置</button>
-                <button class="btn ghost" id="btnFavHotkeyClear">清除</button>
-                <span class="grab-hint" id="favHotkeyHint"></span>
-            </div>
-        </div>
-        <div class="acts">
-            <button class="btn ghost" id="btnFavAddGroup">＋ 添加一级目录</button>
-            <button class="btn ghost" id="btnFavExpandAll">全部展开</button>
-            <button class="btn ghost" id="btnFavCollapseAll">全部折叠</button>
-            <span class="grab-hint" id="favHint"></span>
-        </div>
-        <div id="favTree"></div>
-    </section>
-    </div>
 
-    <!-- ============================ 备份 ============================ -->
-    <div class="pane" data-pane="backup" hidden>
+<div class="pane" data-pane="backup" hidden>
     <section class="card">
         <h2>备份加密与跨设备恢复 <small>备份里有 Key / 密码 / 令牌 / 收藏内容</small></h2>
         <div class="hint">
@@ -1115,7 +1435,19 @@
     </div>
 
     <!-- ============================ 帮助 ============================ -->
-    <div class="pane" data-pane="help" hidden>
+
+<!-- ==================== 关于（组内导航） ==================== -->
+    <div class="pane" data-pane="aboutnav" hidden>
+        <section class="card subnav-card">
+            <h2>关于 <small>版本、更新与帮助</small></h2>
+            <div class="subnav" data-group="about">
+                <button type="button" class="chip on" data-sub="about">ℹ️ 关于与更新</button>
+                <button type="button" class="chip" data-sub="help">📖 帮助</button>
+            </div>
+        </section>
+    </div>
+
+<div class="pane" data-pane="help" hidden>
     <!-- ⚠ 这一整张卡有自己的一份英文版（_i18n_parts/helpCard.html），
          靠 data-i18n-block 整块换掉 —— 三百多句长文拆成句键既难维护，
          也会因为一个换行差异就失配退回中文。加/改帮助内容时**两边都要动**。 -->
@@ -1468,7 +1800,8 @@
     </div>
 
     <!-- ============================ 关于 ============================ -->
-    <div class="pane" data-pane="about" hidden>
+
+<div class="pane" data-pane="about" hidden>
     <section class="card">
         <h2>关于</h2>
         <div class="about-meta">
@@ -1622,6 +1955,24 @@
 
 </main>
 </div>   <!-- /.shell：左侧目录 + 右侧内容（r56） -->
+
+<!-- ==================== 添加内容（弹窗） ====================
+     放在 body 末尾、.shell 外面：它是 position:fixed 的整页遮罩，
+     摆在哪一层都不影响覆盖范围，但放在外面不会搅乱 .shell 的 flex 布局。
+     默认 hidden —— 显隐**只**由 .pickmodal[hidden] 那条 CSS 管（见 settings.css），
+     否则 .pickmodal{display:flex} 会盖掉 hidden 属性，弹窗一进设置页就赖着不走。 -->
+<div class="pickmodal" id="pickModal" hidden>
+    <div class="pickcard" role="dialog" aria-modal="true" aria-label="添加内容">
+        <div class="pickhead">
+            <b id="pickTitle">添加内容</b>
+            <button type="button" class="pickx" id="pickClose" title="关闭（Esc）">✕</button>
+        </div>
+        <input class="txt" id="pickSearch" type="text" spellcheck="false"
+               autocomplete="off" autocapitalize="off" autocorrect="off"
+               placeholder="搜引擎 / 智能直达 / 收藏夹 / 附加功能…">
+        <div class="pickbody" id="pickBody"></div>
+    </div>
+</div>
 
 <div class="toast" id="toast" hidden></div>
 

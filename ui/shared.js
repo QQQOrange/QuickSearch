@@ -130,6 +130,266 @@ window.qsAppIconNode = function (sentinel) {
     return span;
 };
 
+/** 把一个"横条成员名"翻译成**给人看的名字**。
+ *
+ *  为什么需要：横条成员里有大量内部哨兵（`@ocr` / `@trans` / `@img` /
+ *  `@app:<id>` / `@go:<id>` / `@fav:<id>`）。横条上它们是图标，用户只看到图；
+ *  但网格页和设置列表里必须显示文字，直接把哨兵原样打出来就成了
+ *  `@ocr`、`@//ocr/` 这种谁也看不懂的符号（用户原话："难以理解的符号和缩写"）。
+ *
+ *  规则（从具体到宽泛）：
+ *    1. `@app:` / `@go:` / `@fav:` → 取对应条目的名称（收藏夹就是"收藏夹"）
+ *    2. 已知固定哨兵 → 固定中文名（OCR / 翻译 / 识图 / 分隔线）
+ *    3. 兜底：把 `@`、`/`、`\` 这些符号去掉；去掉后如果还是空的，退回原名
+ */
+/**
+ * 一条「智能直达」在界面上的**显示名**。
+ *
+ * 优先级：**备注 > 名称 > 目标**。
+ *
+ * 用户口径（2026-10-31）：「即使已设置备注，备注也没有作为名称显示。需改为优先显示备注，
+ * 仅在无备注时才显示名称」。所以备注不是"附带说明"，而是**主标题** ——
+ * 备注通常是自动抓来的网页标题（"百度一下，你就知道"），比域名好认得多。
+ *
+ * 所有地方（设置列表、横条、网格格子、添加内容选板）都走这一个函数，口径不会跑偏。
+ */
+window.qsGoLabel = function (it) {
+    if (!it) return '';
+    const note = String(it.note || '').trim();
+    if (note) return note;
+    const name = String(it.name || '').trim();
+    if (name) return name;
+    return String(it.target || '').trim();
+};
+
+window.qsDisplayName = function (name) {
+    if (typeof name !== 'string') return String(name == null ? '' : name);
+    const raw = name.trim();
+    if (!raw) return '';
+    // ① 带 id 的哨兵：去查真实名字
+    try {
+        if (raw.startsWith(window.QS_APP_PREFIX)) {
+            const a = window.qsAppBySentinel && window.qsAppBySentinel(raw);
+            if (a && a.name) return a.name;
+        }
+        if (window.QS_GO_PREFIX && raw.startsWith(window.QS_GO_PREFIX)) {
+            const g = window.qsGoBySentinel && window.qsGoBySentinel(raw);
+            /* 备注优先（用户要求"设了备注就用备注当名字"）—— 见 qsGoLabel。 */
+            if (g) return window.qsGoLabel(g);
+        }
+        if (window.QS_FAV_PREFIX && raw.startsWith(window.QS_FAV_PREFIX)) {
+            /* v2.6.2：以前一律回"收藏夹"这个泛称，网格/设置列表里两个目录
+             * 长得一模一样，分不出是哪个 —— 现在回目录真名（找不到才用泛称）。 */
+            const g = window.qsFavFindGroup && window.qsFavFindGroup(raw.slice(window.QS_FAV_PREFIX.length));
+            return (g && g.name) || '收藏夹';
+        }
+    } catch (_) { /* 上面的查询失败不该影响显示 */ }
+    // ② 固定哨兵 → 可读名。规范化时把 @ / \ 空格都去掉、转小写，
+    //    这样 "@ocr"、"@//ocr/" 这类写法都能认出来。
+    const key = raw.replace(/^[@\\/\s]+|[@\\/\s]+$/g, '').toLowerCase();
+    const FIXED = {
+        ocr: '文字识别',
+        trans: '翻译',
+        img: '识图',
+        /* 包裹符号：以前漏了这一项，`@wrap` 落到下面的兜底分支，`@` 被剥掉之后
+         * 界面上显示成一个英文单词「wrap」（用户报的"wrap 选项看不懂"）。
+         * 它在网格里是一颗**功能格子**：点开一组符号（“” 《》 【】 等），
+         * 把选中的文字套上 / 拆掉 / 换一对，和横条上那颗 [ ] 是同一件事。 */
+        wrap: '包裹符号',
+        '|': '分隔线',
+    };
+    if (Object.prototype.hasOwnProperty.call(FIXED, key)) return FIXED[key];
+    // ③ 兜底：还有 @ 或斜杠就剥掉；剥空了就用原名
+    if (/^[@\\/]/.test(raw) || /[@\\/]$/.test(raw)) {
+        const cleaned = raw.replace(/^[@\\/\s]+|[@\\/\s]+$/g, '');
+        if (cleaned) return cleaned;
+    }
+    return raw;
+};
+
+/** 智能直达放进横条时的哨兵前缀：`@go:<id>`。
+ *  和 `@app:` 同一类：横条成员、不是搜索引擎，点下去直接打开目标。
+ *  Rust 侧 config::SHORTCUT_PREFIX 必须与之保持一致。 */
+window.QS_GO_PREFIX = '@go:';
+
+/** 靠哨兵名（`@go:<id>`）找到对应的直达入口；没有返回 null。 */
+window.qsGoBySentinel = function (name) {
+    if (typeof name !== 'string' || !name.startsWith(window.QS_GO_PREFIX)) return null;
+    const id = name.slice(window.QS_GO_PREFIX.length);
+    const list = (window.CONF && window.CONF.shortcuts) || [];
+    for (const it of list) if (it && it.id === id) return it;
+    return null;
+};
+
+/** 包裹符号在横条/网格里的哨兵名。 */
+window.QS_WRAP = '@wrap';
+
+/** 内置功能的**统一图标节点**（OCR / 翻译 / 识图 / 包裹）。
+ *
+ *  为什么要有它：网格页的格子里以前是 emoji（🔤🌐🖼），而横条上是各功能自己的
+ *  图标（OCR 徽标、翻译那张图、识图那颗 SVG）—— 同一个功能两处长得不一样，
+ *  用户会以为是两个东西。这里统一按"横条上的样子"产出，网格、预览、设置三处共用。
+ *
+ *  卡片里没有对应节点时（比如设置页没加载 bar），退回一个简洁的内联 SVG，
+ *  绝不返回 null —— 少一张图比留个空洞好。
+ */
+window.qsFuncIcon = function (name) {
+    const conf = window.CONF || {};
+    const custom = conf.overrideIcons ? conf.overrideIcons[name] : null;
+    if (custom) {
+        const img = document.createElement('img');
+        img.src = custom;
+        img.alt = '';
+        img.draggable = false;
+        return img;
+    }
+    if (name === window.QS_TRANS && window.qsTransIconNode) {
+        return window.qsTransIconNode();
+    }
+    // 识图：直接复用横条那颗按钮里的 SVG（同一张图，不用再画一遍）
+    if (name === window.QS_IMG) {
+        const src = document.getElementById('btnImg');
+        const svg = src && src.querySelector('svg');
+        if (svg) return svg.cloneNode(true);
+    }
+    if (name === window.QS_OCR) {
+        // OCR 在横条上就是一枚字母徽标，这里保持一致
+        const sp = document.createElement('span');
+        sp.className = 'letter';
+        sp.textContent = 'OCR';
+        sp.style.setProperty('--lt-color', '#B45309');
+        sp.style.fontSize = '8px';
+        return sp;
+    }
+    if (name === window.QS_WRAP) {
+        /* ⚠ 尺寸必须写在**内联样式**里，不能指望各页面的 CSS：
+         *   `.pickic > svg` / `.qs-gicon > svg` 都只认**直接子节点**，而这里
+         *   外面套了一层 span（要和 .letter 那类徽标保持同一种返回形态）。
+         *   以前没写尺寸，结果包裹图标在横条、网格、设置选板里全是 0×0 ——
+         *   按钮在、点得动，但看起来像一格空白（用户只会说"按钮不显示"）。 */
+        const sp = document.createElement('span');
+        sp.style.cssText = 'display:block;width:100%;height:100%';
+        sp.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"'
+            + ' stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"'
+            + ' style="display:block;width:100%;height:100%">'
+            + '<path d="M9.5 4.5H6.5v15h3M14.5 4.5h3v15h-3"/></svg>';
+        return sp;
+    }
+    const sp = document.createElement('span');
+    sp.textContent = '•';
+    return sp;
+};
+
+/** 智能直达的**内置图标**：一条 SVG path + 配色。
+ *
+ *  为什么用内联 SVG 而不是 emoji / 字母徽标：
+ *    · emoji 在不同 Windows 版本里长得不一样（有的还是彩色的），和横条风格打架；
+ *    · 字母徽标只能告诉你"首字是什么"，看不出这是网址还是视频；
+ *    · SVG 走 `currentColor`，亮暗主题自动跟着变，不用维护两套图。
+ *
+ *  这套图只做**默认值**：用户一旦在设置里换了图（`icon` 非空），那张图永远优先。
+ */
+window.QS_GO_ICONS = {
+    url: {
+        c: '#2563EB',
+        d: '<circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c2.4 2.9 2.4 14.1 0 17M12 3.5c-2.4 2.9-2.4 14.1 0 17"/>',
+    },
+    app: {
+        c: '#C2410C',
+        d: '<rect x="3.5" y="3.5" width="7" height="7" rx="1.6"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.6"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.6"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.6"/>',
+    },
+    folder: {
+        c: '#B45309',
+        d: '<path d="M3.5 7.5A1.8 1.8 0 0 1 5.3 5.7h3.9l2.1 2.4h7.4a1.8 1.8 0 0 1 1.8 1.8v6.6a1.8 1.8 0 0 1-1.8 1.8H5.3a1.8 1.8 0 0 1-1.8-1.8z"/>',
+    },
+    image: {
+        c: '#0F766E',
+        d: '<rect x="3.5" y="4.5" width="17" height="15" rx="2"/><circle cx="8.6" cy="9.6" r="1.6"/><path d="M3.8 17.2l4.6-4.4 3.3 3.1 2.6-2.4 5.4 5"/>',
+    },
+    video: {
+        c: '#7C3AED',
+        d: '<rect x="3.5" y="5.5" width="12" height="13" rx="2"/><path d="M15.5 10.3l4.4-2.6v8.6l-4.4-2.6z"/>',
+    },
+    audio: {
+        c: '#DB2777',
+        d: '<path d="M9 17V6l9-2v11"/><circle cx="6.6" cy="17.4" r="2.4"/><circle cx="15.6" cy="15.4" r="2.4"/>',
+    },
+    text: {
+        c: '#475569',
+        d: '<path d="M6.5 3.5h7l4 4v13h-11z"/><path d="M13.2 3.6v4.3h4.2"/><path d="M9 12h6M9 15.4h6M9 8.6h2.4"/>',
+    },
+    pdf: {
+        c: '#B91C1C',
+        d: '<path d="M6.5 3.5h7l4 4v13h-11z"/><path d="M13.2 3.6v4.3h4.2"/><path d="M9 17.2V12h1.4a1.4 1.4 0 0 1 0 2.8H9M13 17.2V12h1.6a2.6 2.6 0 0 1 0 5.2z"/>',
+    },
+    archive: {
+        c: '#64748B',
+        d: '<rect x="3.5" y="5" width="17" height="4.6" rx="1.2"/><path d="M5.2 9.6h13.6v9a1.6 1.6 0 0 1-1.6 1.6H6.8a1.6 1.6 0 0 1-1.6-1.6z"/><path d="M10.6 13h2.8"/>',
+    },
+    code: {
+        c: '#0E7490',
+        d: '<path d="M9 7.5L4.5 12 9 16.5M15 7.5L19.5 12 15 16.5"/>',
+    },
+    doc: {
+        c: '#1D4ED8',
+        d: '<path d="M6.5 3.5h7l4 4v13h-11z"/><path d="M13.2 3.6v4.3h4.2"/><path d="M9 11.4h6M9 14.6h6M9 17.6h4"/>',
+    },
+    file: {
+        c: '#6B7280',
+        d: '<path d="M6.5 3.5h7l4 4v13h-11z"/><path d="M13.2 3.6v4.3h4.2"/>',
+    },
+};
+
+/** 拼一个图标节点（内部用）。`kind` 认不出就退回通用文件图。 */
+function qsGoSvgIcon(kind) {
+    const spec = window.QS_GO_ICONS[kind] || window.QS_GO_ICONS.file;
+    const span = document.createElement('span');
+    span.className = 'qs-go-icon';
+    span.style.color = spec.c;
+    span.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"'
+        + ' stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">'
+        + spec.d + '</svg>';
+    return span;
+}
+
+/** 智能直达那一格的图标节点。
+ *
+ *  优先级（用户要求：不同类型有不同默认图，但也允许手动改）：
+ *    1. 用户自己设的图标（本地图片 / 图片地址，存成 data URL）；
+ *    2. `iconKind` 对应的内置图（网址=地球、文件夹=文件夹、视频=播放器、
+ *       音频=音符、图片=相框、文本=文档、软件=四方块…）；
+ *    3. 实在没有（老数据、悬空哨兵）→ 退回名称首字徽标，不能留空白方块。
+ *
+ *  `iconKind` 由后端 `go_icon_kind()` 实时算出来（目录 / 扩展名），所以
+ *  \"把 .txt 改成 .mp4\" 之后图标会自己跟着变，不需要用户重设。
+ */
+window.qsGoIconNode = function (sentinel) {
+    const it = window.qsGoBySentinel(sentinel);
+    if (it && it.icon) {
+        const img = document.createElement('img');
+        img.src = it.icon;
+        img.alt = '';
+        img.draggable = false;
+        // 图裂了（用户填了个失效地址）就退回内置图，不能留个空白方块
+        img.addEventListener('error', () => {
+            const fb = qsGoSvgIcon(it.iconKind || it.kind || 'file');
+            if (img.parentNode) img.parentNode.replaceChild(fb, img);
+        });
+        if (window.qsApplyOpticalScale) {
+            window.qsApplyOpticalScale(img, window.CONF ? window.CONF.unifyIcons !== false : true);
+        }
+        return img;
+    }
+    if (it) return qsGoSvgIcon(it.iconKind || it.kind || 'file');
+    // 悬空哨兵（条目刚被删、配置广播还没到）：首字徽标兜底
+    const nm = (it && it.name) || '直';
+    const span = document.createElement('span');
+    span.className = 'letter';
+    span.textContent = (nm.match(/[A-Za-z0-9\u4e00-\u9fa5]/) || ['直'])[0].toUpperCase();
+    span.style.setProperty('--lt-color', '#6B7280');
+    return span;
+};
+
 /* ------------------------------------------------------------------ */
 /* 翻译按钮（@trans）的默认图标                                          */
 /* ------------------------------------------------------------------ */

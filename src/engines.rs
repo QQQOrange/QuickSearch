@@ -33,11 +33,28 @@ use crate::config;
 /// 免得以后加引擎时两头忘改。AI 引擎的搜索词会额外拼上「提问后缀」。
 /// 内置的 AI 引擎名单：engines.json 里分类标题含 "AI" 的那一组。
 /// 只算一次，之后永不改变。
+/// engines.json 的**压缩内嵌**版本。
+///
+/// 原文 223KB，直接 `include_str!` 会原样躺进 exe 的 .rdata；gzip 后约 30KB，
+/// 首次访问解压一次即可（flate2 本来就在依赖树里，是抠图那条线用的）。
+/// 换架构时体积预算卡得紧，这是最不伤功能的一刀。
+fn raw_json() -> &'static str {
+    static RAW: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    RAW.get_or_init(|| {
+        use std::io::Read;
+        static GZ: &[u8] = include_bytes!("../ui/data/engines.json.gz");
+        let mut d = flate2::read::GzDecoder::new(GZ);
+        let mut s = String::new();
+        let _ = d.read_to_string(&mut s);
+        s
+    })
+}
+
 pub fn builtin_ai_engines() -> &'static HashSet<String> {
     static AI_ENGINES: OnceLock<HashSet<String>> = OnceLock::new();
     AI_ENGINES.get_or_init(|| {
         let mut s = HashSet::new();
-        let raw = include_str!("../ui/data/engines.json");
+        let raw = raw_json();
         if let Ok(v) = serde_json::from_str::<Value>(raw) {
             if let Some(cats) = v.get("categories").and_then(|x| x.as_array()) {
                 for c in cats {
@@ -140,7 +157,7 @@ pub fn engines() -> &'static HashMap<String, EngineEntry> {
     static ENGINES: OnceLock<HashMap<String, EngineEntry>> = OnceLock::new();
     ENGINES.get_or_init(|| {
         let mut m = std::collections::HashMap::new();
-        let raw = include_str!("../ui/data/engines.json");
+        let raw = raw_json();
         if let Ok(v) = serde_json::from_str::<Value>(raw) {
             let mut push = |arr: Option<&Vec<Value>>| {
                 if let Some(list) = arr {

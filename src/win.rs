@@ -180,6 +180,10 @@ fn log_flush_loop(rx: std::sync::mpsc::Receiver<String>) {
 fn log_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
+        // 便携测试版一律写日志：排查问题全靠它，不能让用户去设环境变量。
+        if crate::QS_LITE_PORTABLE {
+            return true;
+        }
         if std::env::var("QS_DEBUG").map(|v| v == "1").unwrap_or(false) {
             return true;
         }
@@ -479,6 +483,36 @@ pub fn shell_execute_raw(target: &str) -> bool {
     }
 }
 
+/// 在 `PATH` 里找一个可执行文件。
+///
+/// 用途：「智能直达」允许用户只输入一个裸名字（`notepad` / `微信`），
+/// 而不是完整路径。`SearchPathW` 会按 `PATH` + 当前目录 + `PATHEXT` 依次找，
+/// 行为和「运行」对话框一致 —— 比自己拼 `PATH` 再逐个试扩展名靠谱。
+///
+/// 找不到返回 `None`（调用方据此给出"找不到这个位置"的提示）。
+pub fn resolve_on_path(name: &str) -> Option<std::path::PathBuf> {
+    if name.trim().is_empty() {
+        return None;
+    }
+    let w = wide(name);
+    let mut buf = vec![0u16; 1024];
+    let n = unsafe {
+        windows::Win32::Storage::FileSystem::SearchPathW(
+            windows::core::PCWSTR::null(),
+            windows::core::PCWSTR(w.as_ptr()),
+            windows::core::PCWSTR::null(),
+            Some(&mut buf[..]),
+            None,
+        )
+    };
+    if n == 0 || n as usize >= buf.len() {
+        return None;
+    }
+    let found = String::from_utf16_lossy(&buf[..n as usize]);
+    let p = std::path::PathBuf::from(found);
+    if p.is_file() { Some(p) } else { None }
+}
+
 /// 某个 URI 协议（scheme，如 `weixin` / `dingtalk`）本机有没有注册处理程序。
 ///
 /// 为什么必须查注册表：见 `shell_execute_raw` 的 ⚠ —— 未注册协议的
@@ -617,6 +651,14 @@ pub fn already_running() -> bool {
     static ONCE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ONCE.get_or_init(|| unsafe {
         let tag = std::env::var("QS_INSTANCE_TAG").unwrap_or_default();
+        // 便携测试版固定带 -lite 后缀：它不能提权（见 main.rs 里 QS_LITE_PORTABLE
+        // 的说明），因此拿不到 QS_INSTANCE_TAG 的情况是常态 —— 不加后缀就会和
+        // 正在运行的正式版抢同一个互斥体，双击后静默退出。
+        let tag = if crate::QS_LITE_PORTABLE {
+            format!("{tag}-lite")
+        } else {
+            tag
+        };
         let name = wide(&format!("Local\\QuickSearch-8F42A1C6-SingleInstance{tag}"));
         let takeover = std::env::var("QS_TAKEOVER").map(|v| v == "1").unwrap_or(false);
 
@@ -2063,6 +2105,35 @@ pub fn send_text(s: &str) {
     flush(&mut batch);
 }
 
+/// 连发 `n` 次退格。
+///
+/// 用途只有一个：**包裹符号连续点击时的"就地替换"**（见 main.rs 的
+/// `wrap_text`）。我们注入完一段文字之后，光标停在注入内容末尾、选区已经没了；
+/// 用户再点另一种符号时，只能先把上一条注入的内容退格删掉再重新输入 ——
+/// 否则会变成"在原文字后面又粘一份"。
+///
+/// ⚠ 和 `send_text` 一样带 `SELF_INJECT_TAG`，否则退回的这批 Backspace
+///   会被我们自己的键盘钩子当成用户按键（进而触发取词/快捷键）。
+pub fn send_backspaces(n: usize) {
+    if n == 0 {
+        return;
+    }
+    /* ⚠ 逐键发、每键之间留 7ms，**不要**像 send_text 那样几十个事件塞进一次
+     *   SendInput：实测（记事本 / RichEdit）一次塞 14 个 Backspace，后面几个会
+     *   和紧接着的 Ctrl+V 抢跑 —— 结果是"新文本插在没删完的旧文本中间"。
+     *   14 个字 ≈ 100ms，用户无感，但顺序是确定的。 */
+    for _ in 0..n {
+        unsafe {
+            keybd_event(VK_BACK.0 as u8, 0, KEYBD_EVENT_FLAGS(0), SELF_INJECT_TAG);
+        }
+        std::thread::sleep(Duration::from_millis(4));
+        unsafe {
+            keybd_event(VK_BACK.0 as u8, 0, KEYEVENTF_KEYUP, SELF_INJECT_TAG);
+        }
+        std::thread::sleep(Duration::from_millis(3));
+    }
+}
+
 /* ------------------------------------------------------------------ */
 /* 组合键模拟（引擎「快捷键」类）                                        */
 /* ------------------------------------------------------------------ */
@@ -2847,7 +2918,7 @@ pub fn foreground_window() -> HWND {
 /// 给「框选遮罩抢焦点」用：窗口建好后 WebView2 拿到键盘焦点有时会晚一点，
 /// 靠反复 `set_focus()` + 这个判断，就能确认它真的成为前台了、按键能收到了，
 /// 不用傻等一个写死的时长（等短了没收住，等长了用户觉得卡）。
-pub fn foreground_is(w: &tauri::WebviewWindow) -> bool {
+pub fn foreground_is(w: &crate::t::WebviewWindow) -> bool {
     let Ok(hwnd) = w.hwnd() else { return false };
     let fg = unsafe { GetForegroundWindow() };
     fg.0 as isize == hwnd.0 as isize

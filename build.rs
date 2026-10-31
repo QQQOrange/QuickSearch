@@ -1,91 +1,83 @@
-fn main() {
-    // ---------------------------------------------------------------
-    // 必须先声明 ui/ 的依赖！
-    //
-    // ui/ 里的 html/css/js/图标是由 `tauri::generate_context!()` 在编译期
-    // 打包进 exe 的（资源写到 OUT_DIR，主 crate 再 include! 进去）。
-    // 如果构建脚本不重跑，OUT_DIR 里的资源就是旧的 —— 于是会出现
-    // 「明明改了 bar.js，编译也过了，跑起来还是老行为」这种鬼打墙。
-    // 加一条目录级 rerun-if-changed，Cargo 会递归盯着整棵树。
-    // ---------------------------------------------------------------
-    println!("cargo:rerun-if-changed=ui");
-    println!("cargo:rerun-if-changed=tauri.conf.json");
-    println!("cargo:rerun-if-changed=icons");
-    // src 也要盯：下面那条 BUILD_STAMP 是本脚本算出来的，只有在脚本重跑时
-    // 才会刷新。如果只改了 src/*.rs 而没动 ui/，脚本不重跑 → 新编译出来的
-    // exe 会挂着上一轮的构建时间，设置页「关于」里显示的就是个错的时间。
-    // 盯上 src / Cargo.toml 之后：源码变了脚本必重跑，时间必是新的；
-    // 源码没变时脚本不重跑，exe 也不会重编 —— 此时时间"不刷新"正好等于
-    // "这一版没有任何改动"，语义上反而是对的。
-    println!("cargo:rerun-if-changed=src");
-    println!("cargo:rerun-if-changed=Cargo.toml");
+//! 把 Windows 资源（图标 + 版本信息）编进 exe，**并把前端 ui/ 压缩后一起嵌进去**。
+//!
+//! 为什么要嵌前端：发布出去的是一个单独的 exe（GitHub Release 只挂 `QuickSearch.exe`），
+//! 而 WebView 需要 index.html / bar.js / data/icons/*.png。以前这些文件靠
+//! 「exe 同目录的 ui/」提供，找不到就回退到一个**开发者本机的绝对路径** ——
+//! 换台机器就是白屏。自动更新只会下载 exe，不会带 ui/ 目录。
+//!
+//! 为什么压缩：前端原始 4.36 MB（图标 2.54 MB + 文本 1.82 MB），直接 include_bytes
+//! 会让 exe 从 5.07 MB 涨到 9.57 MB。整包 deflate 之后约 1.8 MB，exe 约 6.9 MB。
+//! 运行时首次请求时解压一次到内存（几十毫秒），之后就是个 HashMap 查表。
 
-    println!("cargo:rustc-env=QS_BUILD_STAMP={}", build_stamp::now_local());
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
 
-    /* ⚠ r80g：这里**不再**把 onnxruntime.dll 拷到产物目录。
-     *
-     * 早期版本（r80）会拷 —— 那时 ort 是静态链接，dll 必须和 exe 放一起。
-     * 现在改用 ort 的 `load-dynamic`：dll 由程序在**运行时**下载到
-     * 「抠图模型」目录（用户要求「运行库随模型一起下载，并且跟模型存在一起」），
-     * 再由 `aimatte::point_ort_at_runtime()` 通过 `ORT_DYLIB_PATH` 指过去。
-     * 所以产物目录**不该**再有它 —— 有的话反而会让"随模型下载"看起来没生效。
-     * 详见 Cargo.toml 的 `ort` 注释与 .cargo/config.toml。 */
-
-    tauri_build::build()
+fn walk(dir: &Path, base: &Path, out: &mut Vec<(String, PathBuf)>) {
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    for ent in rd.flatten() {
+        let p = ent.path();
+        if p.is_dir() {
+            walk(&p, base, out);
+        } else if p.is_file() {
+            if let Ok(rel) = p.strip_prefix(base) {
+                let rel = rel.to_string_lossy().replace('\\', "/");
+                out.push((rel, p));
+            }
+        }
+    }
 }
 
-/// 算「这次构建发生在本地时间的哪一刻」，交给 `cargo:rustc-env` 打进二进制。
-///
-/// 为什么手写 `GetLocalTime` 而不引 chrono：build.rs 只要一个时间戳字符串，
-/// 为它多背一个 crate（及其整条编译依赖链）不划算。SYSTEMTIME 全是 WORD，
-/// 布局固定，`#[link(name="kernel32")]` 默认就已经链接上了。
-///
-/// 用户要求「关于」里给出**当前版本更新的时间** —— 用构建时刻而不是 exe 的
-/// 文件修改时间，是因为后者会被「复制/下载/杀软扫描」这类和程序无关的动作改写，
-/// 只有编译进二进制里的这个值，才是这一版代码真正被构建出来的时间。
-mod build_stamp {
-    #[cfg(windows)]
-    #[repr(C)]
-    #[derive(Default)]
-    struct SystemTime {
-        year: u16,
-        month: u16,
-        day_of_week: u16,
-        day: u16,
-        hour: u16,
-        minute: u16,
-        second: u16,
-        milliseconds: u16,
-    }
+fn main() {
+    println!("cargo:rerun-if-changed=app.rc");
 
-    #[cfg(windows)]
-    #[link(name = "kernel32")]
-    extern "system" {
-        /// <https://learn.microsoft.com/windows/win32/api/sysinfoapi/nf-sysinfoapi-getlocaltime>
-        fn GetLocalTime(lp_system_time: *mut SystemTime);
-    }
-
-    /// `YYYY-MM-DD HH:MM:SS`（本地时间）。
-    ///
-    /// 取不到就返回「未知」——「关于」页少一行信息是可以接受的，
-    /// 但绝不能让构建脚本自己失败（那会把整个编译带崩）。
-    pub fn now_local() -> String {
-        #[cfg(windows)]
-        {
-            let mut t = SystemTime::default();
-            unsafe { GetLocalTime(&mut t) };
-            // 年份为 0 = API 没写进去，按失败处理
-            if t.year == 0 {
-                return "未知".to_string();
-            }
-            format!(
-                "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
-                t.year, t.month, t.day, t.hour, t.minute, t.second
-            )
+    /* 版本资源**不会**跟着 Cargo.toml 自动走 —— 它是手写在 app.rc 里的。
+     * v2.1.0 就踩过：程序里 `config::VERSION` 是 2.1.0，右键属性却还写着 2.0.0，
+     * `OriginalFilename` 更是留着构建名 `QuickSearch-lite.exe`（用户以为装错了）。
+     * 这里在构建期对一次账，不一致就大声警告，别等发出去才发现。 */
+    if let Ok(rc) = std::fs::read_to_string("app.rc") {
+        let want = env!("CARGO_PKG_VERSION");
+        if !rc.contains(&format!("VALUE \"FileVersion\", \"{want}\"")) {
+            println!("cargo:warning=app.rc 的 FileVersion 与 Cargo.toml 的 {want} 不一致 —— 右键属性会显示旧版本号");
         }
-        #[cfg(not(windows))]
-        {
-            "未知".to_string()
+        if !rc.contains("VALUE \"OriginalFilename\", \"QuickSearch.exe\"") {
+            println!("cargo:warning=app.rc 的 OriginalFilename 不是 QuickSearch.exe —— 属性里会显示构建名");
         }
     }
+
+    println!("cargo:rerun-if-changed=icons/icon.ico");
+    // rc.exe 找不到（没装 Windows SDK）时不要中断构建，只是没有图标而已
+    let _ = embed_resource::compile("app.rc", embed_resource::NONE);
+
+    // ---- 前端打包 + 压缩 ----
+    // 格式：magic("QSUI1") | u32 条目数 | 重复{ u16 名字长 | 名字 | u32 数据长 | 数据 }
+    let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui");
+    println!("cargo:rerun-if-changed=ui");
+    let mut files: Vec<(String, PathBuf)> = Vec::new();
+    walk(&base, &base, &mut files);
+    files.sort();
+
+    let mut raw: Vec<u8> = Vec::new();
+    raw.extend_from_slice(b"QSUI1");
+    raw.extend_from_slice(&(files.len() as u32).to_le_bytes());
+    for (rel, abs) in &files {
+        let Ok(data) = std::fs::read(abs) else { continue };
+        let name = rel.as_bytes();
+        raw.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        raw.extend_from_slice(name);
+        raw.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        raw.extend_from_slice(&data);
+    }
+
+    let mut enc = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::best());
+    enc.write_all(&raw).expect("压缩前端失败");
+    let packed = enc.finish().expect("压缩前端失败");
+
+    let out = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("ui.bundle");
+    std::fs::write(&out, &packed).expect("写 ui.bundle 失败");
+    println!(
+        "cargo:warning=前端已内嵌：{} 个文件，{:.2} MB → 压缩后 {:.2} MB",
+        files.len(),
+        raw.len() as f64 / 1048576.0,
+        packed.len() as f64 / 1048576.0
+    );
 }

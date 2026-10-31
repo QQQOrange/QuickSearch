@@ -53,6 +53,10 @@ let ocrOnly = false;
 const btnPanelClose = $('btnPanelClose');
 const inputQ = $('q');
 const menuEl = $('menu');
+/* 包裹符号菜单（#wrapMenu）。放在这里而不是跟包裹那一段的其它变量一起声明，
+ * 是因为 `pushLayout()`（在上面很远的地方定义）要拿它算窗口包围盒 ——
+ * 它每次被调用都可能早于包裹那段的 `const` 求值，那时引用就是 TDZ 报错。 */
+const wrapMenuEl = $('wrapMenu');
 /* 引擎搜索框（面板头部，在「关键词」框右边）。
  * ⚠ 它是 index.html 里的**常驻节点**，不在 renderPanel 里新建 —— 面板每次重画
  *   （改设置、主题广播、切换分类…）都重建元素的话，光标和已输入的过滤词全丢。 */
@@ -224,6 +228,17 @@ let barRoomBelow = 0;
 let viaCopy = false;
 /** 上一次 `qs://show` 的触发指纹（见 qs://show 里的 sameTrigger）。 */
 let lastShowSig = null;
+
+/* ---------------- 横条的「按应用专项」 ---------------- */
+/** 本次唤起命中的横条专项内容（引擎名 / 哨兵名）；null = 用默认 `bar_list`。
+ *
+ *  后端在 `qs://show` 里带 `bar` 段（见 Rust `config::resolve_bar`）：
+ *  `source === 'app'` 才算命中，`'default'` 表示"没配 / 配了但回退"。
+ *  这里刻意**只在命中时覆盖** —— 三种回退情形（没配、配置被清空、校验失败）
+ *  在后端已经统一成了同一份默认内容，前端不需要再分辨，展示结果必然一致。 */
+let barOverride = null;
+/** 这次 `bar` 段的原样副本（`source` / `matched` / `note`），排障用。 */
+let barOverrideInfo = null;
 /** 横条此刻是不是「弹出着」。
  *
  *  窗口本身是 Rust 显隐的，页面一直活着 —— 前端只能靠事件推：
@@ -754,9 +769,13 @@ function openFavPanel(sentinel) {
 
 function barList() {
     const all = CATALOG.toolbar.map((e) => e.name);
-    const raw = CONF && Array.isArray(CONF.barList) && CONF.barList.length
-        ? CONF.barList
-        : all;
+    /* 按应用专项优先（整份取代默认横条）。没命中时走原来的 `CONF.barList` ——
+     * 于是"没配 / 配了被清空 / 校验失败回退"三条路在这里看起来**完全一样**。 */
+    const raw = (barOverride && barOverride.length)
+        ? barOverride
+        : (CONF && Array.isArray(CONF.barList) && CONF.barList.length
+            ? CONF.barList
+            : all);
     // 注意别把分隔线一起过滤掉：它不是引擎，但确实是横条上的一员。
     // OCR 哨兵同理 —— 它是"横条上的 OCR 按钮"，用户能拖到任意位置。
     // 收藏夹目录（@fav:<id>，一级二级都行）也是一员；目录被删掉时对应哨兵自动消失。
@@ -765,12 +784,17 @@ function barList() {
     const kept = raw.filter((n) => {
         // r72：识图（@img）也是一等成员了，别被后面那条"必须是认识的名字"筛掉。
         // v1.5.16：翻译（@trans）同理。
-        if (n === QS_SEP || n === QS_OCR || n === window.QS_IMG || n === window.QS_TRANS) return true;
+        if (n === QS_SEP || n === QS_OCR || n === window.QS_IMG
+            || n === window.QS_TRANS || n === window.QS_WRAP) return true;
         if (typeof n === 'string' && n.startsWith(QS_FAV_PREFIX)) {
             return !!favGroupBySentinel(n);
         }
         if (typeof n === 'string' && n.startsWith(QS_APP_PREFIX)) {
             return !!qsAppBySentinel(n);
+        }
+        // 智能直达（@go:<id>）：入口被删掉时那一格自动消失。
+        if (typeof n === 'string' && n.startsWith(window.QS_GO_PREFIX)) {
+            return !!window.qsGoBySentinel(n);
         }
         if (ENGINE_BY_NAME.has(n)) return true;
         /* 定义存在、但"不完整"的自定义引擎（快捷键类没按键序列 / 其余类没地址）
@@ -1000,6 +1024,11 @@ function renderBar(force) {
     //   还是 null —— 直接进渲染会在 barList()/签名里抛 TypeError，本次横条就空了
     //   （下一帧 boot 完成后会自己补一次渲染）。
     if (!CATALOG || !CONF) return;
+    /* 网格页开着的时候别用"文字横条的引擎行"去重画它 ——
+     * 配置广播（比如在设置里加/减横条成员）刚好落在网格页展开期间时，
+     * 这里会把格子全部换成引擎按钮，网格页当场变成一堆错位的图标。
+     * 网格有自己那套 renderGrid，等下一次唤起自然是最新的。 */
+    if (gridOn) return;
     const list = barList();
     /* ⚠ 签名必须覆盖**所有会改变渲染结果**的输入。
      *
@@ -1118,6 +1147,22 @@ function renderBar(force) {
             engines++;
             continue;
         }
+        /* 包裹符号（@wrap）：和 @trans 同一套地位 —— bar_list 成员、可拖可移出，
+         * 点下去打开包裹菜单。设置 → 附加功能 → 包裹符号 里可以加进横条。 */
+        if (name === window.QS_WRAP) {
+            const b = document.createElement('button');
+            b.className = 'ico engine qs-wrap-inbar';
+            b.title = '包裹符号：把当前这段文字套成 “” 《》 【】 等（再点一次拆掉）';
+            b.dataset.engine = window.QS_WRAP;
+            b.appendChild(window.qsFuncIcon(window.QS_WRAP));
+            b.addEventListener('click', (e) => {
+                e.stopPropagation();
+                openWrapMenu();
+            });
+            enginesEl.appendChild(b);
+            engines++;
+            continue;
+        }
         if (typeof name === 'string' && name.startsWith(QS_FAV_PREFIX)) {
             // 收藏夹目录：点开列出内容（不是搜索引擎，不走 open_search）
             const g = favGroupBySentinel(name);
@@ -1158,6 +1203,29 @@ function renderBar(force) {
                     id: name.slice(QS_APP_PREFIX.length),
                     text: kind === 'search' ? (currentText || null) : null,
                 }).catch((e) => showBarTip('打不开：' + String(e || '未知错误').slice(0, 60)));
+            });
+            enginesEl.appendChild(b);
+            engines++;
+            continue;
+        }
+        if (typeof name === 'string' && name.startsWith(window.QS_GO_PREFIX)) {
+            /* 智能直达：点一下**直接打开**（网址走默认浏览器，软件/文件交给系统关联）。
+             * 悬停提示带上备注 —— 用户给入口写的备注往往比名字更能说明用途。 */
+            const it = window.qsGoBySentinel(name);
+            const b = document.createElement('button');
+            b.className = 'ico engine qs-go-inbar';
+            const kindTip = it && it.kind === 'url' ? '网址'
+                : (it && it.kind === 'app' ? '软件' : '文件');
+            b.title = ((it && it.name) || '直达')
+                + (it && it.note ? '\n' + it.note : '')
+                + '\n（' + kindTip + '·点一下直接打开）';
+            b.dataset.go = name;
+            b.appendChild(window.qsGoIconNode(name));
+            b.addEventListener('click', () => {
+                // 打不开时把原因写在横条提示位上：路径被移动、软件被卸掉这类
+                // 情况必须让用户看见原因，不能点了没反应。
+                invoke('shortcut_open', { id: name.slice(window.QS_GO_PREFIX.length) })
+                    .catch((e) => showBarTip('打不开：' + String(e || '未知错误').slice(0, 60)));
             });
             enginesEl.appendChild(b);
             engines++;
@@ -2356,6 +2424,13 @@ function pushLayout() {
     const rects = barEl.classList.contains('ghost') ? [] : [barRect];
     if (!panelEl.hidden) rects.push(panelEl.getBoundingClientRect());
     if (!menuEl.hidden) rects.push(menuEl.getBoundingClientRect());
+    /* ⚠ 包裹菜单**必须**进包围盒，别以为"它是 stage 的子节点、窗口自然会跟着长高"就够了：
+     *   窗口高度确实会长（h 取的 s.height），但 Rust 侧判断"点是不是落在横条自己身上"
+     *   用的是 iw/ih 这块**实体矩形**（`is_bar_inner` → `bar_rects().1`）。漏了这块，
+     *   点符号按钮那一下就会被当成"点在横条外面"→ 先 `dismiss_bar()` 收条再谈点击，
+     *   于是菜单还在、点哪个都没反应 —— 用户报的「包裹符号功能并没有真正生效」就是这个。
+     *   （引擎面板和右键菜单早就加进来了，包裹菜单是后写的，漏了这一步。） */
+    if (wrapMenuEl && !wrapMenuEl.hidden) rects.push(wrapMenuEl.getBoundingClientRect());
 
     const left = Math.min(...rects.map((r) => r.left));
     const top = Math.min(...rects.map((r) => r.top));
@@ -2497,6 +2572,184 @@ let lastMenuAt = 0;   // 钩子那条路的去重时间戳（见下面 qs://rcli
 document.addEventListener('contextmenu', (e) => {
     e.preventDefault();
 }, true);
+
+/* ------------------------------------------------------------------ */
+/* 包裹符号                                                            */
+/*                                                                     */
+/* 用户口径：选中文字 → 一键套成成对符号（双引号 / 单引号 / 书名号 /    */
+/* 中括号 / 大括号…）。反复点同一对要来回切换，套两层要能一次拆干净，  */
+/* 已经包着别的符号时点另一对是**换外层**而不是再叠一层。               */
+/* 逻辑全在后端 `wrap_apply`（纯函数 + 单测），这里只负责交互与展示。   */
+/* ------------------------------------------------------------------ */
+
+
+/** 符号表缓存。**后端 `wrap_pairs` 是唯一来源**，不在 JS 里另抄一份。 */
+let wrapPairsCache = null;
+
+/** 本次菜单会话的"当前文字"：点一次包一层，再点同一对就是拆。 */
+let wrapBase = '';
+
+/** 打开菜单时那段原文。用来判断"是不是换了一段新选中的字"。 */
+let wrapOrigin = '';
+
+/** 这一轮菜单里**已经真的替换过原文**了吗？
+ *
+ *  v2.6.2 起点符号会把结果直接输入回原来那个软件（不用手动粘贴）。
+ *  第一次是"整段替换当前选区"；之后再点，光标已经停在上一版末尾、选区没了，
+ *  后端必须先按上次的字数退格再输入新版 —— 前端这个标记就是告诉它
+ *  "这是第几次"。菜单一关就复位（下一次唤起是新的选区）。 */
+let wrapPasted = false;
+
+/** 压成一行 + 截断 —— 菜单头那行必须永远只占一行，否则窗口会随内容变高变矮。 */
+function oneLine(s) {
+    const t = String(s || '').replace(/\s+/g, ' ').trim();
+    return t.length > 42 ? t.slice(0, 42) + '…' : t;
+}
+
+/** v2.6.3：横条上**不再有一颗固定的包裹按钮**。
+ *
+ *  以前 index.html 里有个常驻的 `#btnWrap`，只要选中了文字就冒出来 ——
+ *  可它是写死的，和 `bar_list` 完全无关：用户在设置里把「包裹符号」
+ *  从横条移除了，这颗按钮照样在（用户报的「取消了但横条里还显示」）。
+ *
+ *  现在唯一的入口就是 `bar_list` 里的 `@wrap` 成员（和翻译 / OCR 同一套），
+ *  加进来才出现、移出去立刻消失，按钮状态和横条内容天然一致。
+ *  这个函数留空壳是因为 `qs://show` / `qs://text` 等处还在调它 ——
+ *  删调用点没必要，留着也不会做任何事。 */
+function syncWrapBtn() { }
+
+function closeWrapMenu() {
+    if (!wrapMenuEl || wrapMenuEl.hidden) return;
+    wrapMenuEl.hidden = true;
+    wrapBase = '';
+    wrapOrigin = '';
+    wrapPasted = false;
+    wrapQueued = null;
+    pushLayout();
+    armIdle();
+}
+
+async function openWrapMenu() {
+    if (!currentText || !currentText.trim()) {
+        // 没选中文字：明确说一句，别让按钮点了毫无反应
+        showBarTip('先选中一段文字，再来包符号');
+        return;
+    }
+    // 和引擎面板互斥：两块同时展开会把窗口撑得老高，而且语义上互不需要
+    if (!panelEl.hidden) togglePanel(false);
+    closeMenu();
+    wrapBase = currentText;
+    wrapOrigin = currentText;
+    wrapPasted = false;
+    wrapMenuEl.hidden = false;
+    $('wmCur').textContent = '当前：' + oneLine(wrapBase);
+    $('wmFoot').textContent = '点一次就套上并替换原文；再点同一组是拆掉，换一组是替换外层符号。';
+    await renderWrapGrid();
+    pushLayout();
+    // 菜单刚显示时高度还要再量一次（字体/换行落定后），否则窗口会矮一截
+    requestAnimationFrame(() => setTimeout(pushLayout, 0));
+}
+
+async function renderWrapGrid() {
+    const grid = $('wmGrid');
+    if (!grid) return;
+    if (!wrapPairsCache) {
+        try {
+            wrapPairsCache = await invoke('wrap_pairs');
+        } catch (_) {
+            wrapPairsCache = [];
+        }
+    }
+    grid.textContent = '';
+    for (const p of wrapPairsCache) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'wm-item';
+        b.dataset.key = p.key;
+        b.title = '用' + p.name + '包住选中的文字';
+        const sym = document.createElement('span');
+        sym.className = 'wm-sym';
+        // 中间放个「文」当占位：一眼看出左右符号各长什么样（对称符号也不会看成两个）
+        sym.textContent = p.left + '文' + p.right;
+        const nm = document.createElement('span');
+        nm.className = 'wm-nm';
+        nm.textContent = p.name;
+        b.appendChild(sym);
+        b.appendChild(nm);
+        b.addEventListener('click', () => applyWrap(p.key));
+        grid.appendChild(b);
+    }
+}
+
+/** 回写是"一次一条"的：上一次还在往目标软件里粘贴时，再点一次**不能并发**发出去
+ *  （实测：连点两下，两次退格/粘贴互相插队，正文被糊成两份）。
+ *  这里把点击排成队：正在跑就记下"最后一次点的符号"，等这一条落地再补发。 */
+let wrapBusy = false;
+let wrapQueued = null;
+
+async function applyWrap(key) {
+    if (wrapBusy) { wrapQueued = key; return; }
+    wrapBusy = true;
+    try {
+        let k = key;
+        for (;;) {
+            await applyWrapOnce(k);
+            if (wrapQueued == null) break;
+            k = wrapQueued;
+            wrapQueued = null;
+        }
+    } finally {
+        wrapBusy = false;
+        wrapQueued = null;
+    }
+}
+
+/** 真正干活的那一下（排队逻辑见上面的 applyWrap）。 */
+async function applyWrapOnce(key) {
+    if (!wrapBase || !wrapBase.trim()) {
+        showBarTip('先选中一段文字，再来包符号');
+        return;
+    }
+    try {
+        /* apply = 直接把结果输入回原来那个软件（用户要求"不用手动粘贴"）。
+         * fresh = 这一轮菜单里还没替换过 —— 第一次是整段替换手头的选区；
+         * 从第二次起，后端要先退格删掉上一版再输入（光标这时停在上一版末尾）。 */
+        const r = await invoke('wrap_text', {
+            text: wrapBase,
+            pair: key,
+            apply: true,
+            fresh: !wrapPasted,
+        });
+        // 会话内以新结果为基准：于是"再点一次同一对"就是拆，点另一对就是换外层
+        wrapBase = r.text;
+        const act = r.action === 'unwrap'
+            ? '已拆掉这组符号'
+            : (r.action === 'swap' ? '已换成这组符号' : '已包裹');
+        $('wmCur').textContent = '当前：' + oneLine(wrapBase);
+        if (r.applied) {
+            wrapPasted = true;
+            $('wmFoot').textContent = act + '，已替换原文（Ctrl+Z 可撤销）';
+            showBarTip(act + '（已替换原文）');
+        } else {
+            /* 回写没做成：退回复制那套，并说清为什么，别让用户以为点丢了。
+             * 同时把"已经替换过"的标记清掉 —— 目标文档其实没被我们动过，
+             * 下一次点击应该重新按"替换当前选区"来（fresh）。 */
+            wrapPasted = false;
+            const why = r.note ? '（' + r.note + '）' : '';
+            $('wmFoot').textContent = r.copied
+                ? act + '，已复制到剪贴板' + why + ' —— 回原处 Ctrl+V 覆盖即可'
+                : act + '，但剪贴板被占用，没能复制' + why;
+            showBarTip(r.copied ? act + '（已复制）' : act);
+        }
+        /* 结果变长/变短后菜单可能多一行或少一行 —— 重新量一次，
+         * 不然窗口还按上一次的高度算，新多出来那行会被裁在窗口外面。 */
+        pushLayout();
+    } catch (e) {
+        showBarTip(String(e || '操作失败'));
+    }
+}
+
+if ($('btnWrapClose')) $('btnWrapClose').addEventListener('click', closeWrapMenu);
 
 /** 「打开这个网址」按钮显不显示。口径与 `syncPathBtn` 一致。
  *
@@ -2973,10 +3226,763 @@ function glassRefit() {
  *
  * ⚠ 搜完**一律把输入框清空**。它是"一次性关键词口"：留着的话，下一次点引擎
  *   会拿上一次的词去搜（用户报的「这输入框带记忆功能，搜一次就该清掉」）。 */
-function runEngineSearch(engine) {
+/* ------------------------------------------------------------------ */
+/* 网格页（Ctrl+C）                                                     */
+/* ------------------------------------------------------------------ */
+
+/** 当前是不是网格形态（决定 pushLayout 之后要不要恢复文字横条的排版）。 */
+let gridOn = false;
+
+/** 网格里可以放的特殊按钮 → 显示名与点击动作。
+ *  这些不是"搜索引擎"，点下去走各自原来那条路（复用横条上那颗按钮的点击）。 */
+const GRID_SENTINELS = {
+    '@ocr': { label: '文字识别' },
+    '@trans': { label: '翻译' },
+    '@img': { label: '识图' },
+    // 包裹符号：点一下直接打开包裹菜单（把剪贴板/当前这段文字套成一对符号）
+    '@wrap': { label: '包裹符号' },
+};
+
+/** 三类「模型」：文字识别 / 识图 / 翻译各自的引擎清单。
+ *
+ *  为什么要单独拉一份：网格的"添加内容"选板里，用户搜「百度」时应该既看到
+ *  百度搜索，也看到**百度 OCR**；搜「翻译」时应该看到翻译模型而不是只有搜索引擎。
+ *  这些清单在 Rust 那边是注册表，前端只通过命令读，避免两处各写一份名字。
+ *
+ *  ⚠ 格子本身仍然只是"这个功能"（`@ocr` / `@img` / `@trans`）—— 具体用哪一家
+ *  由 设置 → 附加功能 里选中的模型决定。这里把模型列出来是为了**能被搜到、
+ *  能看清有哪些**，不是给每一格单独绑模型。 */
+const GRID_MODELS = { ocr: [], img: [], trans: [] };
+
+async function loadGridModels() {
+    const grab = async (cmd, key) => {
+        try {
+            const r = await invoke(cmd);
+            if (Array.isArray(r)) GRID_MODELS[key] = r;
+        } catch (_) { /* 命令不可用：该分组直接不出现，不影响其它内容 */ }
+    };
+    await Promise.all([
+        grab('ocr_engines_list', 'ocr'),
+        grab('img_engines_list', 'img'),
+        grab('trans_engines_list', 'trans'),
+    ]);
+}
+
+/** 内置功能格子的点击动作。
+ *
+ *  ⚠ 以前这里是 `document.getElementById(sent.btn).click()` —— 但横条上**根本没有
+ *  btnTrans / btnWrap 这些按钮**（翻译是作为 bar_list 成员动态渲染出来的），
+ *  于是网格里的「翻译」点了完全没反应（用户报的原话）。
+ *  改成直连后端命令，和横条上那颗按钮走的是同一条路。 */
+function runGridFunc(key) {
+    const t = (currentText || '').trim();
+    if (key === '@ocr') {
+        invoke('ocr_start').catch(() => { });
+        return;
+    }
+    if (key === '@img') {
+        invoke('img_start').catch(() => { });
+        return;
+    }
+    if (key === '@trans') {
+        // 没文字也照发（后端会开一个空翻译窗让用户自己粘贴），与横条一致
+        invoke('trans_start', { text: t || null }).catch(() => { });
+        return;
+    }
+    if (key === '@wrap') {
+        openWrapMenu();
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* 点空位 → 「添加内容」面板                                           */
+/* ------------------------------------------------------------------ */
+
+/** 最近一次网格载荷（往格子里加完内容要按它重画）。 */
+let gridLast = null;
+
+/* ---------------- 多页 ---------------- */
+/** 全部网格页（`[{id,name,items}]`），来自载荷。 */
+let gridPages = [];
+/** 当前显示第几页（下标）。 */
+let gridPageIdx = 0;
+/** 这次唤起是哪个应用叫出来的（进程名，可能为空）——滚轮切页要按它记住。 */
+let gridApp = '';
+/** 滚轮切页的节流：一次滚轮会连发很多条，不节流会"一滑翻三页"。 */
+let gridWheelAcc = 0;
+let gridWheelAt = 0;
+/** 「这个应用看哪页」的落盘节流。
+ *  每翻一页就写一次配置太重（配置是加密落盘的，还会广播一轮），
+ *  连续翻五页没必要写五次 —— 400ms 合并成一次，收起时再兜底刷一次。 */
+let gridPersistTimer = 0;
+let gridPersistDirty = false;
+
+/** 当前页对象（永远不返回 null）。 */
+function gridPageNow() {
+    return gridPages[gridPageIdx] || { id: '', name: '默认', items: (gridLast && gridLast.items) || [] };
+}
+
+/** 按当前状态拼一份载荷 —— 改完内容重画用（避免各处各拼一份、漏字段）。 */
+function gridPayloadNow() {
+    return Object.assign({}, gridLast || {}, {
+        pages: gridPages,
+        active: gridPageIdx,
+        items: gridPageNow().items,
+    });
+}
+
+/** 点格子行为（auto / home），由载荷给。 */
+let gridClickMode = 'auto';
+
+/** 空位能不能点开添加面板。 */
+let gridAllowAdd = true;
+
+/** 是不是"编辑模式"：格子上出现删除角标，点一下就移出。
+ *  纯 UI 状态，不进配置（下次唤起就是正常模式）。 */
+let gridEdit = false;
+
+/** 正在给第几个空位选内容；-1 = 没在选。 */
+let gridPickAt = -1;
+
+/** 能往网格里加的东西，按用户要求分三组：内置功能 / 智能直达 / 引擎。 */
+function gridPickGroups() {
+    const inGrid = new Set((gridLast && Array.isArray(gridLast.items)) ? gridLast.items : []);
+    const groups = [];
+
+    // ① 软件内置功能（文字识别 / 翻译 / 识图）—— 即"当前软件内置的功能"
+    const builtin = [];
+    for (const key of ['@ocr', '@trans', '@img', '@wrap']) {
+        const meta = GRID_SENTINELS[key];
+        if (!meta || inGrid.has(key)) continue;
+        builtin.push({
+            name: key,
+            label: meta.label,
+            // 图标与横条上那颗同一套（以前这里是 emoji，和设置里对不上）
+            node: () => (window.qsFuncIcon ? window.qsFuncIcon(key) : document.createTextNode('•')),
+        });
+    }
+    if (builtin.length) groups.push({ title: '内置功能', items: builtin });
+
+    // ② 智能直达（图标走统一的内置图 / 用户自定义图）
+    const goItems = [];
+    for (const it of ((window.CONF && window.CONF.shortcuts) || [])) {
+        if (!it || !it.id) continue;
+        const sentinel = window.QS_GO_PREFIX + it.id;
+        if (inGrid.has(sentinel)) continue;
+        goItems.push({
+            name: sentinel,
+            // 备注优先（备注 = 自动抓来的网页标题，比域名好认）
+            label: (it.note || '').trim() || it.name || it.target,
+            node: () => window.qsGoIconNode(sentinel),
+        });
+    }
+    if (goItems.length) groups.push({ title: '智能直达', items: goItems });
+
+    /* ②-b 收藏夹（v2.6.2）：一格 = 一个目录，加进去的是 `@fav:<id>` 哨兵。
+     * 点格子会像横条上那颗收藏夹按钮一样展开这个目录（见 renderGrid 的哨兵分支），
+     * 目录里的条目再点一下就是复制/注入到原软件。 */
+    const favItems = [];
+    const walkFav = (g, lv) => {
+        if (!g || !g.id) return;
+        const sent = QS_FAV_PREFIX + g.id;
+        if (!inGrid.has(sent)) {
+            favItems.push({
+                name: sent,
+                label: (lv ? '\u3000'.repeat(lv) + '└ ' : '') + (g.name || '收藏夹'),
+                node: () => (window.qsFavIconNode ? window.qsFavIconNode(sent) : document.createTextNode('★')),
+            });
+        }
+        for (const sub of (g.children || [])) walkFav(sub, lv + 1);
+    };
+    for (const g of window.qsFavGroups()) walkFav(g, 0);
+    if (favItems.length) groups.push({ title: '收藏夹', items: favItems });
+
+    // ③ 引擎（工具栏 + 全部分类，按名字去重；同样的名字在网格里只该出现一次）
+    const seen = new Set();
+    const engItems = [];
+    const pushEng = (n) => {
+        if (!n || seen.has(n) || inGrid.has(n)) return;
+        seen.add(n);
+        engItems.push({ name: n, label: n, eng: true });
+    };
+    try {
+        for (const c of (CATALOG.categories || [])) for (const e of (c.engines || [])) pushEng(e.name);
+        for (const e of (CATALOG.toolbar || [])) pushEng(e.name);
+    } catch (_) { /* 目录还没加载出来就只显示前两组 */ }
+    /* ②-c 三类「模型」：文字识别 / 识图 / 翻译，**各自成组**。
+     *
+     *  用户口径：「OCR 模型、图片识别模型、翻译模型等应能被搜索到并分别展示」——
+     *  以前这里只有「内置功能 / 智能直达 / 收藏夹 / 引擎」，搜「百度」只能搜到
+     *  搜索引擎，搜「翻译」只看得到那颗通用按钮，看不出有哪些模型可用。 */
+    const addModelGroup = (title, list, sentinel, activeIds) => {
+        if (!list.length || inGrid.has(sentinel)) return;
+        const items = list.map((m) => ({
+            name: sentinel,
+            label: (m.name || m.id) + (activeIds.has(String(m.id)) ? '（当前使用）' : ''),
+            /* 每行都用**功能自己的图标**：这三组的条目最终加进网格的就是那颗功能格子，
+             * 用各家模型自己的 logo 反而会让人以为"这一格单独绑了那一家"。 */
+            node: () => (window.qsFuncIcon ? window.qsFuncIcon(sentinel) : document.createTextNode('•')),
+        }));
+        if (items.length) groups.push({ title, items });
+    };
+    const imgOn = new Set(((window.CONF && window.CONF.imgEngines) || []).map(String));
+    addModelGroup('文字识别模型', GRID_MODELS.ocr, '@ocr',
+        new Set([String((window.CONF && window.CONF.ocrEngine) || '')]));
+    addModelGroup('识图模型', GRID_MODELS.img, '@img', imgOn);
+    addModelGroup('翻译模型', GRID_MODELS.trans, '@trans',
+        new Set([String((window.CONF && window.CONF.transEngine) || '')]));
+
+    if (engItems.length) groups.push({ title: '引擎', items: engItems });
+
+    return groups;
+}
+
+/** 关掉选板（顺带把借来的焦点还回去）。 */
+function closeGridPicker() {
+    const p = barEl.querySelector('.qs-gpick');
+    if (p) p.remove();
+    gridPickAt = -1;
+    if (gridPickFocusHeld) {
+        gridPickFocusHeld = false;
+        invoke('focus_bar', { enable: false }).catch(() => { });
+    }
+}
+
+/** 进入 / 退出编辑模式。只切 UI，不动配置。 */
+function toggleGridEdit() {
+    gridEdit = !gridEdit;
+    barEl.classList.toggle('qs-gedit', gridEdit);
+    const b = document.getElementById('qsGridEdit');
+    if (b) {
+        b.classList.toggle('on', gridEdit);
+        b.title = gridEdit ? '退出编辑（回到只读）' : '编辑格子：进入后才能添加内容、点 × 移出';
+    }
+    closeGridPicker();
+    // 用当前页的内容重画（多页下不能再去读 CONF.gridItems —— 那是默认页的）
+    renderGrid(gridPayloadNow());
+    showBarTip(gridEdit ? '编辑模式：点空格子添加，点 × 移出' : '已退出编辑（只读）');
+}
+
+/** 把第 i 项从网格页移出（不删智能直达/引擎本身）。 */
+async function gridRemoveAt(i) {
+    const pg = gridPageNow();
+    const cur = (Array.isArray(pg.items) ? pg.items : []).slice();
+    if (i < 0 || i >= cur.length) return;
+    const name = cur[i];
+    cur.splice(i, 1);
+    try {
+        // 只改**当前这一页**（page 带上 id；空 id = 老单页载荷，后端按默认页处理）
+        await invoke('set_grid_items', { items: cur, page: pg.id || null });
+        pg.items = cur;
+        renderGrid(gridPayloadNow());
+        showBarTip('已移出：' + (window.qsDisplayName ? window.qsDisplayName(name) : name));
+    } catch (e) {
+        showBarTip('移出失败：' + String(e || '').slice(0, 40));
+    }
+}
+
+/** 选板是否替我们向系统"借"过前台焦点（见 openGridPicker）。
+ *  借了就要还 —— 不还的话关掉选板后键盘还锁在横条上，用户在别的软件里
+ *  打字会全部落空。 */
+let gridPickFocusHeld = false;
+
+/** 切到上/下一页。`delta` = ±1。
+ *
+ *  - **首尾循环**：最后一页再往后回到第一页（页数通常只有两三页，循环比"卡住"
+ *    更顺手，而且用户不会在边界上以为滚轮坏了）；
+ *  - 只有一页时什么也不做（连提示都不给，避免噪音）；
+ *  - 切页会**关掉"添加内容"选板**：它绑定的是某一个空格，换页后那个位置已经不对了；
+ *  - 编辑模式、当前文字都保持 —— 用户可以在编辑态下连续改好几页；
+ *  - 切完会把这个「应用 → 页」记下来（见 grid_app_page_set），
+ *    下次在同一个应用里唤起还是这页。
+ *
+ * 返回是否真的切了（滚轮节流靠它判断要不要重置）。 */
+function switchGridPage(delta) {
+    const n = gridPages.length;
+    if (n < 2) return false;
+    const next = ((gridPageIdx + delta) % n + n) % n;
+    if (next === gridPageIdx) return false;
+    gridPageIdx = next;
+    closeGridPicker();
+    renderGrid(gridPayloadNow());
+    const pg = gridPageNow();
+    if (pg.id && gridApp) persistGridPageSoon();
+    showBarTip('第 ' + (next + 1) + '/' + n + ' 页 · ' + (pg.name || '未命名'));
+    return true;
+}
+
+/** 把「当前应用 → 当前页」记下来（400ms 合并一次）。 */
+function persistGridPageSoon() {
+    if (!gridApp) return;
+    gridPersistDirty = true;
+    if (gridPersistTimer) return;
+    gridPersistTimer = setTimeout(() => {
+        gridPersistTimer = 0;
+        flushGridPagePersist();
+    }, 400);
+}
+
+/** 立刻落盘（收起 / 切页结束都要调，不能把用户刚翻的页丢掉）。 */
+function flushGridPagePersist() {
+    if (!gridPersistDirty) return;
+    gridPersistDirty = false;
+    const pg = gridPageNow();
+    if (!gridApp || !pg.id) return;
+    invoke('grid_app_page_set', { app: gridApp, page: pg.id }).catch(() => { });
+}
+
+/** 清掉上一次网格会话的临时状态（每次唤起网格页时调）。
+ *  只清 UI 状态，**不动配置** —— 格子内容仍然是用户保存的那份。 */
+function resetGridTransient() {
+    // 先把手头没落盘的那次切页写掉（用户翻完立刻按 Esc 的场景）
+    flushGridPagePersist();
+    gridEdit = false;
+    barEl.classList.remove('qs-gedit');
+    closeGridPicker();          // 顺手把焦点还回去
+    gridPickAt = -1;
+    gridWheelAcc = 0;
+    gridWheelAt = 0;
+    if (gridPersistTimer) { clearTimeout(gridPersistTimer); gridPersistTimer = 0; }
+}
+
+/** 打开选板。`index` = 被点的空位下标（新内容插到这个位置）。 */
+async function openGridPicker(index) {
+    gridPickAt = typeof index === 'number' ? index : -1;
+    renderGridPicker();
+    /* 横条默认是"不抢焦点"的浮层（WS_EX_NOACTIVATE）：鼠标点得动，但键盘
+     * 永远进不来 —— 表现就是选板里的搜索框点了也没法打字（用户报的）。
+     * 引擎面板打开时做的是同一件事（focus_bar(true)），这里照抄。
+     * 引擎面板已经借过焦点时不重复借，免得关选板时把它的焦点也一起还了。 */
+    if (panelEl.hidden && !gridPickFocusHeld) {
+        gridPickFocusHeld = true;
+        try { await invoke('focus_bar', { enable: true }); } catch (_) { }
+    }
+    focusGridPickSearch();
+}
+
+/** 把光标送进选板的搜索框（刚建出来时元素还没完成布局，聚焦可能落空，
+ *  所以补一次延时重试 —— 和设置页那个弹窗同一个坑）。 */
+function focusGridPickSearch() {
+    const q = barEl.querySelector('.qs-gpick-search');
+    if (!q) return;
+    q.focus();
+    requestAnimationFrame(() => { const el = q; if (el && document.contains(el)) el.focus(); });
+    setTimeout(() => { if (document.contains(q)) q.focus(); }, 80);
+}
+
+/** 画选板。外壳只建一次，之后换搜索词只重画列表 —— 否则每敲一个字
+ *  输入框都会被重建，焦点直接丢掉。 */
+function renderGridPicker(query) {
+    let box = barEl.querySelector('.qs-gpick');
+    if (!box) {
+        box = document.createElement('div');
+        box.className = 'qs-gpick';
+
+        const head = document.createElement('div');
+        head.className = 'qs-gpick-head';
+        const ti = document.createElement('span');
+        ti.className = 'qs-gpick-title';
+        ti.textContent = '添加到这一格';
+        head.appendChild(ti);
+        const x = document.createElement('button');
+        x.type = 'button';
+        x.className = 'qs-gbtn';
+        x.title = '关闭';
+        x.textContent = '✕';
+        x.addEventListener('click', closeGridPicker);
+        head.appendChild(x);
+        box.appendChild(head);
+
+        const q = document.createElement('input');
+        q.className = 'qs-gpick-search';
+        q.type = 'text';
+        q.spellcheck = false;
+        q.placeholder = '搜索引擎 / 智能直达 / 收藏夹 / 识别·识图·翻译模型';
+        q.addEventListener('input', () => renderGridPicker());
+        // 选板里打字不应该被横条的按键处理截走（Esc 留给全局关闭）
+        q.addEventListener('keydown', (e) => {
+            if (e.key !== 'Escape') e.stopPropagation();
+        });
+        box.appendChild(q);
+
+        const body = document.createElement('div');
+        body.className = 'qs-gpick-body';
+        box.appendChild(body);
+
+        barEl.appendChild(box);
+        q.focus();
+    }
+    const q = box.querySelector('.qs-gpick-search');
+    if (typeof query === 'string' && q.value !== query) q.value = query;
+    renderGridPickBody(box.querySelector('.qs-gpick-body'), (q.value || '').trim().toLowerCase());
+}
+
+/** 选板里的列表主体。 */
+function renderGridPickBody(body, kw) {
+    if (!body) return;
+    body.textContent = '';
+    let shown = 0;
+    for (const g of gridPickGroups()) {
+        const items = kw
+            ? g.items.filter((it) => String(it.label || it.name).toLowerCase().includes(kw))
+            : g.items;
+        if (!items.length) continue;
+        const ct = document.createElement('div');
+        ct.className = 'qs-gpick-cat';
+        ct.textContent = g.title;
+        body.appendChild(ct);
+        for (const it of items) {
+            const b = document.createElement('button');
+            b.type = 'button';
+            b.className = 'qs-gpick-item';
+            const ic = document.createElement('span');
+            ic.className = 'qs-gpick-ic';
+            if (it.node) {
+                ic.appendChild(it.node());
+            } else if (it.eng) {
+                try {
+                    ic.appendChild(buildIconInner(it.name).node);
+                } catch (_) {
+                    ic.textContent = '🔎';
+                }
+            } else {
+                ic.textContent = it.icon || '•';
+            }
+            b.appendChild(ic);
+            const nm = document.createElement('span');
+            nm.className = 'qs-gpick-nm';
+            nm.textContent = it.label || it.name;
+            b.appendChild(nm);
+            b.title = String(it.label || it.name);
+            b.addEventListener('click', () => gridAddItem(it.name));
+            body.appendChild(b);
+            shown++;
+        }
+    }
+    if (!shown) {
+        const e = document.createElement('div');
+        e.className = 'qs-gpick-empty';
+        e.textContent = kw ? '没找到匹配的内容' : '没有可添加的内容了（都已在网格里）';
+        body.appendChild(e);
+    }
+}
+
+/** 把 `name` 加到被点的那一格。落库走 `set_grid_items`，和其它改动同一套。 */
+async function gridAddItem(name) {
+    if (!name) return;
+    const pg = gridPageNow();
+    const cur = (Array.isArray(pg.items) ? pg.items : []).slice();
+    if (cur.includes(name)) {
+        showBarTip('这一项已经在网格里了');
+        return;
+    }
+    // 插到被点的那个位置；位置超出当前长度就追加（空位本来就在末尾之后）
+    const at = Math.max(0, Math.min(gridPickAt >= 0 ? gridPickAt : cur.length, cur.length));
+    cur.splice(at, 0, name);
+    try {
+        await invoke('set_grid_items', { items: cur, page: pg.id || null });
+        pg.items = cur;
+        closeGridPicker();
+        renderGrid(gridPayloadNow());
+        showBarTip('已添加');
+    } catch (e) {
+        showBarTip('添加失败：' + String(e || '').slice(0, 50));
+    }
+}
+
+/** 退出网格形态：摘类名、把文字横条的成员重新画回来。
+ *
+ *  注意这里**不重建 DOM**：紧接着 qs://show 的正常分支会走它自己那套渲染
+ *  （renderBar），这里只负责把网格留下的痕迹清掉（类名 + 网格变量）。 */
+function exitGridMode() {
+    if (!gridOn) return;
+    gridOn = false;
+    barEl.classList.remove('qs-grid');
+    barEl.classList.remove('qs-gnolabel');
+    barEl.style.removeProperty('--gcols');
+    barEl.style.removeProperty('--grows');
+    barEl.style.removeProperty('--gcw');
+    barEl.style.removeProperty('--gch');
+    /* 头部（网格页 / ⚙）和「添加内容」选板都是**网格专属**的 DOM，
+       它们挂在 #bar 上、不是 #bar 的子 —— 不摘掉，下一次文字横条重画时
+       会莫名其妙多出一颗齿轮。 */
+    const h = barEl.querySelector('.qs-ghead');
+    if (h) h.remove();
+    const p = barEl.querySelector('.qs-gpick');
+    if (p) p.remove();
+    /* 编辑态也跟着退出：不然下一次唤起还是"带 × 的编辑版"，
+     * 用户会以为程序坏了（编辑是临时动作，不该跨次生效）。 */
+    gridEdit = false;
+    barEl.classList.remove('qs-gedit');
+    gridPickAt = -1;
+    gridLast = null;
+    gridPages = [];
+    gridPageIdx = 0;
+    gridApp = '';
+}
+
+/** 画网格页。`g` = { rows, cols, cellW, cellH, items[] } */
+function renderGrid(g) {
+    gridOn = true;
+    // 记住这一次的载荷：往格子里加完内容要按它重画（后端广播只带 config，
+    // 不会重发 grid 载荷），见 gridAddItem。
+    gridLast = g;
+    const rows = Math.max(1, Math.min(10, g.rows | 0 || 3));
+    const cols = Math.max(1, Math.min(10, g.cols | 0 || 3));
+    const cw = Math.max(40, Math.min(260, g.cellW | 0 || 104));
+    const ch = Math.max(40, Math.min(200, g.cellH | 0 || 76));
+    /* 多页：载荷里 `pages` 是整份页列表，`active` 是这次该显示哪一页
+     * （后端按"这个应用绑了哪页"算好）。老载荷没有 pages 时退化成单页。 */
+    gridPages = (Array.isArray(g.pages) && g.pages.length)
+        ? g.pages
+        : [{ id: '', name: '默认', items: Array.isArray(g.items) ? g.items : [] }];
+    const wantIdx = Math.max(0, Math.min(gridPages.length - 1, g.active | 0));
+    // 只有"换了一次唤起"才采纳载荷里的 active；页内重画（编辑/增删）保留用户当前翻到的那页
+    if (g.__fresh !== false) gridPageIdx = wantIdx;
+    if (g.app !== undefined) gridApp = String(g.app || '');
+    const items = Array.isArray(gridPageNow().items) ? gridPageNow().items : [];
+
+    // 间距与格子圆角：和设置页预览取自同一份配置（gap / radius）
+    const gap = Math.max(0, Math.min(24, g.gap | 0 || (g.gap === 0 ? 0 : 8)));
+    const grad = Math.max(0, Math.min(24, g.radius | 0 || (g.radius === 0 ? 0 : 12)));
+    // 点格子行为：auto = 有文字就搜；home = 永远开首页
+    gridClickMode = (g.click === 'home') ? 'home' : 'auto';
+    gridAllowAdd = g.allowAdd !== false;
+
+    barEl.classList.add('qs-grid');
+    /* 「格子文字」：默认显示名称；用户在 设置 → 网格页设置 → 外观 里选"只显示图标"
+     * 时整条藏掉名称（格子会显得更清爽，小尺寸格子也不会被文字挤爆）。 */
+    /* 高度小于 66px 时**自动只显图标**：那时图标 + 名称根本放不下，
+     * 强行并排只会把字裁成半截（用户把格子调矮时的观感）。 */
+    barEl.classList.toggle('qs-gnolabel', g.showLabel === false || ch < 66);
+    barEl.style.setProperty('--gcols', String(cols));
+    barEl.style.setProperty('--grows', String(rows));
+    barEl.style.setProperty('--gcw', cw + 'px');
+    barEl.style.setProperty('--gch', ch + 'px');
+    barEl.style.setProperty('--ggap', gap + 'px');
+    barEl.style.setProperty('--gr', grad + 'px');
+
+    /* 头部：左边一句页码说明，右边一颗 ⚙ 直通设置。
+     * 每帧都复用同一个节点（只建一次），否则反复唤起会叠加监听。 */
+    let head = barEl.querySelector('.qs-ghead');
+    if (!head) {
+        head = document.createElement('div');
+        head.className = 'qs-ghead';
+        const t = document.createElement('span');
+        t.className = 'qs-gtitle';
+        t.textContent = '网格页 · 点空格子添加内容';
+        head.appendChild(t);
+
+        /* 翻页器：‹ 页名 1/3 ›。只有一页时整块隐藏（别让用户以为坏了）。
+         * 滚轮也能翻（见下方 wheel 处理），这两个箭头是给鼠标党/触控板的兜底。 */
+        const pager = document.createElement('span');
+        pager.className = 'qs-gpager';
+        pager.hidden = true;
+        const mk = (dir, label, ch) => {
+            const b = document.createElement('button');
+            b.type = 'button';
+            b.className = 'qs-gpbtn';
+            b.dataset.d = String(dir);
+            b.textContent = ch;
+            b.title = label;
+            b.setAttribute('aria-label', label);
+            b.addEventListener('click', (e) => {
+                e.stopPropagation();
+                switchGridPage(dir);
+            });
+            return b;
+        };
+        pager.appendChild(mk(-1, '上一页', '‹'));
+        const nm = document.createElement('span');
+        nm.className = 'qs-gpname';
+        pager.appendChild(nm);
+        const num = document.createElement('span');
+        num.className = 'qs-gpnum';
+        pager.appendChild(num);
+        pager.appendChild(mk(1, '下一页', '›'));
+        head.appendChild(pager);
+        const gb = document.createElement('button');
+        gb.type = 'button';
+        gb.className = 'qs-gbtn';
+        gb.id = 'qsGridSet';
+        gb.title = '打开设置';
+        gb.setAttribute('aria-label', '打开设置');
+        // 滑块样式的齿轮图标：比放射状齿轮稳，小尺寸下也看得清
+        gb.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"'
+            + ' stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">'
+            + '<path d="M4 8h9M17 8h3M4 16h3M11 16h9"/>'
+            + '<circle cx="15" cy="8" r="2.1"/><circle cx="9" cy="16" r="2.1"/></svg>';
+        gb.addEventListener('click', () => {
+            /* 网格页上的「设置」：直接进设置界面。
+             * 先藏横条再开设置 —— 不然两层浮层叠在一起，设置窗会被挡在下面。
+             * tab 给 grid：网格页的行列/外观/功能/内容现在集中在「网格页设置」里。 */
+            closeGridPicker();
+            invoke('hide_bar').catch(() => {});
+            invoke('open_settings', { focusEngine: null, tab: 'grid' }).catch(() => {});
+        });
+        head.appendChild(gb);
+
+        /* 编辑按钮：进入/退出编辑模式。放在 ⚙ 左边（⚙ 永远是最后一颗，
+         * 位置不变，用户不会点错）。 */
+        const eb = document.createElement('button');
+        eb.type = 'button';
+        eb.className = 'qs-gbtn';
+        eb.id = 'qsGridEdit';
+        eb.title = '编辑格子：进入后才能添加内容、点 × 移出';
+        eb.setAttribute('aria-label', '编辑格子');
+        eb.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"'
+            + ' stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">'
+            + '<path d="M4 20h4l10-10a2.1 2.1 0 0 0-3-3L5 17z"/><path d="M13.5 6.5l3 3"/></svg>';
+        eb.addEventListener('click', () => toggleGridEdit());
+        head.appendChild(eb);
+
+        barEl.insertBefore(head, enginesEl);
+    }
+    /* 标题跟着模式走：只读态明确告诉用户"要改得先进编辑"，
+     * 编辑态告诉用户"现在能加、也能点 × 移出"。每帧都刷，因为
+     * toggleGridEdit 就是靠重画这个网格来切模式的。 */
+    const titleEl = head.querySelector('.qs-gtitle');
+    if (titleEl) {
+        titleEl.textContent = gridEdit
+            ? '编辑模式 · 点空格子添加，点 × 移出'
+            : '网格页 · 只读（点 ✏️ 编辑）';
+    }
+    const editBtn = head.querySelector('#qsGridEdit');
+    if (editBtn) editBtn.setAttribute('aria-pressed', gridEdit ? 'true' : 'false');
+
+    /* 翻页器状态：页名 + n/N；只有一页就整块收起来 */
+    const pagerEl = head.querySelector('.qs-gpager');
+    if (pagerEl) {
+        const multi = gridPages.length > 1;
+        pagerEl.hidden = !multi;
+        if (multi) {
+            const nmEl = pagerEl.querySelector('.qs-gpname');
+            const numEl = pagerEl.querySelector('.qs-gpnum');
+            if (nmEl) nmEl.textContent = gridPageNow().name || '未命名';
+            if (numEl) numEl.textContent = (gridPageIdx + 1) + '/' + gridPages.length;
+            pagerEl.title = '滚轮 / ← → 在网格页之间切换（共 ' + gridPages.length + ' 页）';
+        }
+    }
+
+    enginesEl.textContent = '';
+    const total = rows * cols;
+    for (let i = 0; i < total; i++) {
+        const name = items[i];
+        const cell = document.createElement('button');
+        cell.type = 'button';
+        cell.className = 'qs-gcell';
+        if (!name) {
+            /* 空位：**可点**（用户要求：点空白位置弹出添加面板）。
+             * 原来这里是 disabled 的装饰性占位，用户看到虚框却点不动，
+             * 想加内容只能跑去设置页 —— 现在就地能加。 */
+            cell.classList.add('qs-gempty');
+            const plus = document.createElement('span');
+            plus.className = 'qs-gplus';
+            plus.textContent = '+';
+            cell.appendChild(plus);
+            /* v2.6.2：网格页**默认只读** —— 空位只是占位，点它不弹添加面板；
+             * 只有进了编辑模式（右上角 ✏️）才允许加内容。这样"看一眼网格"
+             * 和"改网格"是两件事，不会手一滑就把内容加进去。
+             * 设置里的「点空白格子可添加」仍然是总闸（关掉就编辑态也不给加）。 */
+            const canAdd = gridEdit && gridAllowAdd;
+            if (canAdd) {
+                cell.title = '点一下添加内容（引擎 / 智能直达 / 收藏夹 / 内置功能）';
+                cell.addEventListener('click', () => openGridPicker(i));
+            } else {
+                cell.title = gridAllowAdd
+                    ? '只读：点右上角 ✏️ 进入编辑后才能添加'
+                    : '空位（「点空白格子可添加」已在设置里关闭）';
+                cell.style.cursor = 'default';
+            }
+            enginesEl.appendChild(cell);
+            continue;
+        }
+        const sent = GRID_SENTINELS[name];
+        if (sent) {
+            cell.dataset.sentinel = name;
+            const inner = document.createElement('span');
+            inner.className = 'qs-gicon';
+            // 图标与横条上那颗**同一套**（翻译就是翻译那张图，OCR 就是 OCR 徽标）
+            inner.appendChild(window.qsFuncIcon ? window.qsFuncIcon(name) : document.createTextNode('•'));
+            cell.appendChild(inner);
+            const lb = document.createElement('span');
+            lb.className = 'qs-glabel';
+            lb.textContent = sent.label;
+            cell.appendChild(lb);
+            cell.title = sent.label;
+            cell.addEventListener('click', () => runGridFunc(name));
+        } else if (typeof name === 'string' && (name.startsWith(window.QS_GO_PREFIX || '@go:') || name.startsWith(QS_APP_PREFIX) || name.startsWith(QS_FAV_PREFIX))) {
+            // 哨兵项（直达 / 外部软件 / 收藏夹）：图标与点击都复用横条那套
+            const inner = document.createElement('span');
+            inner.className = 'qs-gicon';
+            if (name.startsWith(window.QS_GO_PREFIX)) inner.appendChild(window.qsGoIconNode(name));
+            else if (name.startsWith(QS_APP_PREFIX)) inner.appendChild(appIconNode(name));
+            /* 收藏夹格子必须走 favIconNode：buildIconInner 只认搜索引擎，
+             * 给它 `@fav:xxx` 会生成一个 "F" 字母徽标（用户看到的就是这个乱码感）。 */
+            else inner.appendChild(favIconNode(name));
+            cell.appendChild(inner);
+            const lb = document.createElement('span');
+            lb.className = 'qs-glabel';
+            const it = window.qsGoBySentinel(name) || qsAppBySentinel(name) || favGroupBySentinel(name);
+            lb.textContent = (it && it.name)
+                || (window.qsDisplayName ? window.qsDisplayName(name) : name);
+            cell.appendChild(lb);
+            cell.title = lb.textContent;
+            cell.addEventListener('click', () => {
+                if (name.startsWith(window.QS_GO_PREFIX)) {
+                    invoke('shortcut_open', { id: name.slice(window.QS_GO_PREFIX.length) })
+                        .catch((e) => showBarTip('打不开：' + String(e || '').slice(0, 60)));
+                } else if (name.startsWith(QS_APP_PREFIX)) {
+                    invoke('open_app', { id: name.slice(QS_APP_PREFIX.length), text: currentText || null })
+                        .catch((e) => showBarTip('打不开：' + String(e || '').slice(0, 60)));
+                } else {
+                    openFavPanel(name);
+                }
+            });
+        } else {
+            // 普通引擎：图标 + 名字，点一下拿当前文字去搜（没文字就开首页）
+            const icon = buildIconInner(name);
+            const inner = document.createElement('span');
+            inner.className = 'qs-gicon' + (icon.mono ? ' qs-mono' : '');
+            inner.appendChild(icon.node);
+            cell.appendChild(inner);
+            const lb = document.createElement('span');
+            lb.className = 'qs-glabel';
+            // 可读名：普通引擎就是原名；哨兵（@ocr 之类）翻成中文，
+            // 绝不让 "@//ocr/" 这种内部写法露到界面上
+            const label = (window.qsDisplayName ? window.qsDisplayName(name) : name);
+            lb.textContent = label;
+            cell.appendChild(lb);
+            const willSearch = gridClickMode === 'auto' && !!currentText;
+            cell.title = label + (willSearch ? '　（点一下用这段文字搜索）' : '　（点一下打开首页）');
+            cell.dataset.engine = name;
+            cell.addEventListener('click', () => runEngineSearch(name, gridClickMode === 'home' ? null : undefined));
+        }
+        /* 编辑模式：每格右上角挂一个 ×，点它把这格内容移出网格页
+         * （只动 grid_list，不删智能直达/引擎本身 —— 移出 ≠ 删除）*/
+        if (gridEdit) {
+            const del = document.createElement('span');
+            del.className = 'qs-gdel';
+            del.textContent = '×';
+            del.title = '从网格页移出这一项';
+            del.addEventListener('click', (e) => {
+                e.stopPropagation();
+                e.preventDefault();
+                gridRemoveAt(i);
+            });
+            cell.appendChild(del);
+        }
+        enginesEl.appendChild(cell);
+    }
+    // 交给常规的尺寸上报：Rust 会按网格实际大小把窗口撑开
+    pushLayout();
+}
+
+function runEngineSearch(engine, forceText) {
     if (!engine) return;
     const kw = inputQ.value.trim();
-    const text = kw || currentText || '';
+    // forceText === null → 明确要求"不带文字"（网格页的"总是打开首页"模式）
+    const text = forceText === null ? '' : (kw || currentText || '');
     invoke('open_search', { engine, text: text ? text : null }).catch(() => {});
     inputQ.value = '';
 }
@@ -3089,8 +4095,36 @@ if (btnSettings) {
 
 document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
+        /* 包裹菜单开着时 Esc **只收菜单** —— 用户想退出的是菜单，
+         * 顺手把整条横条关掉会让他重新选一次文字。 */
+        if (wrapMenuEl && !wrapMenuEl.hidden) {
+            closeWrapMenu();
+            return;
+        }
         closeMenu();
         invoke('hide_bar').catch(() => {});
+        return;
+    }
+    /* 菜单开着时按 1~9 直接选第 N 组符号：键盘党不用挪鼠标。
+     * 屏幕上排 4 列，序号按"阅读顺序"数（左上起往右）。 */
+    /* 网格页开着、且不止一页时，← → 也能翻页。
+     * 正在输入框里打字时不算（否则光标移动都被吃掉了）。 */
+    if (gridOn && gridPages.length > 1 && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+        const t = e.target;
+        const typing = t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
+        if (!typing) {
+            e.preventDefault();
+            switchGridPage(e.key === 'ArrowRight' ? 1 : -1);
+            return;
+        }
+    }
+    if (wrapMenuEl && !wrapMenuEl.hidden && /^[1-9]$/.test(e.key)) {
+        const items = wrapMenuEl.querySelectorAll('.wm-item');
+        const i = Number(e.key) - 1;
+        if (items[i]) {
+            e.preventDefault();
+            items[i].click();
+        }
     }
 });
 
@@ -3213,6 +4247,45 @@ function replayBarIn() {
 
 listen('qs://show', (ev) => {
     const p = ev.payload || {};
+    /* ── 网格页（Ctrl+C / 自定义快捷键） ────────────────────────────
+     * 后端每次唤起都会带 `grid`：非 null 表示"这次画网格"，null 表示普通文字横条。
+     * 两条路在这里分流，**文字横条那条完全不受影响**（它的 grid 恒为 null）。
+     * 网格没有"选中文字"的概念，但可以把剪贴板里已有的文字带上 —— 点格子在
+     * 有文字时直接搜它，没文字就打开引擎首页（后端 open_search 自己处理）。 */
+    if (p.grid) {
+        // 网格页跟横条内容是两回事：这次不展示横条，覆盖一并作废
+        barOverride = null;
+        barOverrideInfo = null;
+        currentText = p.text || '';
+        currentIsUrl = false;
+        currentUrls = [];
+        viaCopy = false;
+        ocrOnly = false;
+        lastShowSig = null;
+        if (!barVisible) {
+            barVisible = true;
+            replayBarIn();
+        }
+        /* 每一次唤起都是**全新的一次**：上次的编辑态、打开着的选板、
+         * 上次点的是哪一格，全部丢掉。
+         *
+         * 以前这些只在 `exitGridMode()` 里清，而它只在"下一次弹出的是文字横条"
+         * 时才跑 —— 用户连按两下网格快捷键（网格 → 网格），上一次的编辑模式
+         * 就带过来了：格子还带着 ×、空位也还能点。用户口径：
+         * 「网格页不应保留上一次选择过的按钮或功能」。 */
+        resetGridTransient();
+        renderGrid(p.grid);
+        return;
+    }
+    // 普通横条：先把网格态摘干净，防止样式残留把文字条画歪
+    exitGridMode();
+    /* 按应用解析后的横条内容（见 Rust `config::resolve_bar`）。
+     * 只有 `source === 'app'` 才覆盖；否则清空覆盖，沿用默认 `bar_list`。 */
+    barOverrideInfo = (p.bar && typeof p.bar === 'object') ? p.bar : null;
+    barOverride = (barOverrideInfo && barOverrideInfo.source === 'app'
+        && Array.isArray(barOverrideInfo.items) && barOverrideInfo.items.length)
+        ? barOverrideInfo.items.slice()
+        : null;
     /* 「这次弹出」的触发指纹：文字 / 是不是网址 / 是不是复制唤起 / 是不是 OCR 形态。
      *
      * ⚠ 用它来区分「换了一次触发」和「同一次触发的回声」。
@@ -3268,6 +4341,10 @@ listen('qs://show', (ev) => {
     // r54：识图入口跟着配置开关走；文件管理器图标跟着「这段文字像不像路径」走
     syncImgBtn();
     syncPathBtn();
+    syncWrapBtn();
+    /* 换了一段新选中的文字就把包裹菜单收掉 —— 它还指着上一段，
+     * 继续操作会包错东西。同一段文字的重复 show（鼠标挪一下）不动它。 */
+    if (wrapMenuEl && !wrapMenuEl.hidden && currentText !== wrapOrigin) closeWrapMenu();
 
     renderBar(false);
     /* ⚠⚠ **重新弹出必须作废"上次报过的尺寸"** —— 这是"弹得慢"的真正元凶。
@@ -3326,6 +4403,7 @@ listen('qs://text', (ev) => {
     currentUrls = Array.isArray(p.urls) ? p.urls : [];
     viaCopy = !!p.viaCopy;
     syncLinkBtn();
+    syncWrapBtn();
     renderBar(false);
     // 文字换掉后（可能从空变长）横条宽度会变，重新报一次尺寸让后端重新摆位。
     pushLayout();
@@ -3746,8 +4824,16 @@ listen('qs://hidden', () => {
      *  兜底线程才出现 —— qs://show 里也清了一次，两处都清是保险：dismiss_bar 走
      *  set_position 异步挪窗、时机上未必先于 qs://show。） */
     lastLayoutKey = '';
+    barOverride = null;
+    barOverrideInfo = null;
     syncOcrBtn();
     closeMenu();
+    /* 网格会话到此结束：编辑态 / 选板 / 借来的焦点 / 网格 DOM 全部收干净。
+     * 以前要等"下一次弹出的是文字横条"才由 exitGridMode() 清，中间这段时间
+     * `gridOn` 一直是 true —— 配置广播（比如刚在设置里加了/减了横条成员）
+     * 会因为"网格页开着"而跳过重画，横条上该出现/消失的按钮要等下次才生效。 */
+    resetGridTransient();
+    exitGridMode();
     if (!panelEl.hidden) togglePanel(false);
     /* ⚠ 钉住状态随收起复位（后端 dismiss_bar 也会清 FAV_PINNED 并补发
      *   qs://fav-pinned，这里同步一次是为了前端状态**立刻**一致 ——
@@ -3804,10 +4890,44 @@ async function boot() {
     syncImgBtn();
     syncPathBtn();
     setupFavResizeHandles();
+    // 选板里要列出 OCR / 识图 / 翻译的模型（见 GRID_MODELS 的注释）
+    loadGridModels();
 
     // 让 WebView 别弹右键菜单 / 别缩放
     document.addEventListener('contextmenu', (e) => e.preventDefault());
+    /* 滚轮默认被整页关掉（横条不需要滚动）。这里给两处放行：
+     *   ① 引擎面板的列表；
+     *   ② 网格页的「添加内容」选板 —— 它的列表在 .qs-gpick-body 里。
+     * 指针落在选板的标题/搜索框上时，也把滚动**转给**列表，
+     * 否则用户会觉得"这个弹层根本滚不动"（用户报的正是这个）。 */
     document.addEventListener('wheel', (e) => {
+        const pick = e.target instanceof Element ? e.target.closest('.qs-gpick') : null;
+        if (pick) {
+            const body = pick.querySelector('.qs-gpick-body');
+            if (body && !body.contains(e.target)) {
+                body.scrollTop += e.deltaY;
+                e.preventDefault();
+            }
+            return;
+        }
+        /* 网格页：滚轮在**格子区域**上翻页（选板里不算，上面已经 return 了）。
+         *
+         * 节流有两层：① 一次滚动会连发几十条 wheel，攒到 40px 才算"翻一格"；
+         * ② 翻完 180ms 内不再翻 —— 否则一滑就跳好几页，用户根本看不清。
+         * 首尾循环（见 switchGridPage）。 */
+        if (gridOn && gridPages.length > 1) {
+            const now = Date.now();
+            if (now - gridWheelAt > 500) gridWheelAcc = 0;   // 停顿久了重新计数
+            gridWheelAcc += e.deltaY;
+            e.preventDefault();
+            if (Math.abs(gridWheelAcc) >= 40 && now - gridWheelAt > 180) {
+                const dir = gridWheelAcc > 0 ? 1 : -1;
+                gridWheelAcc = 0;
+                gridWheelAt = now;
+                switchGridPage(dir);
+            }
+            return;
+        }
         if (!panelBody.contains(e.target)) e.preventDefault();
     }, { passive: false });
 

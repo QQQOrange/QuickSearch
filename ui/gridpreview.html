@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>网格页预览</title>
+<!--
+  设置页「网格页设置」里的实时预览。
+
+  ⚠ 这个页面**只做一件事**：用**和横条完全相同的 CSS（bar.css）+ 完全相同的
+    DOM 结构**（.stage > .bar.qs-grid > .qs-ghead + .engines > .qs-gcell）把网格
+    画出来。之所以要单独一个 iframe 而不是在设置页里直接摆：
+      bar.css 里有 `*`、`html,body`、`.stage` 这些**全局**规则，直接引进设置页
+      会把整页样式冲掉；用 iframe 天然隔离，又能 100% 复用同一份样式表 ——
+      这比"照着横条抄一份预览样式"靠谱得多（抄的那份必然会慢慢跑偏）。
+
+  数据全部由父页面 postMessage 递进来（iframe 里没有 Tauri IPC）。
+-->
+<link rel="stylesheet" href="bar.css">
+<style>
+    /* 透明的"画布"：设置页那边有卡片底色，这里不要再铺一层白 */
+    html, body {
+        margin: 0;
+        padding: 0;
+        background: transparent;
+        overflow-x: hidden;
+    }
+
+    body {
+        /* ⚠ bar.css 里有 `body { width: max-content }`（真横条窗口靠它自适应宽度）。
+           预览里必须改回 100%，否则 body 只有内容那么宽，`justify-content: center`
+           没有可分配的空隙 —— 网格就永远贴在左边（用户报的"预览没居中"）。 */
+        width: 100%;
+        display: flex;
+        justify-content: center;
+        align-items: flex-start;
+        padding: 12px;
+    }
+
+    /* ⚠ 舞台必须**收缩到内容宽度**，否则它撑满整个 iframe，里面的网格靠左摆
+       就永远贴左边（用户报的"预览没有居中"）。max-content 之后，body 的
+       `justify-content: center` 才真的能把它摆到中间。 */
+    #stage {
+        width: max-content;
+        height: auto;
+    }
+
+    #bar {
+        /* 预览里不做入场动画：设置页每次改参数都重画，一动画就一直在闪 */
+        animation: none !important;
+    }
+
+    #empty-tip {
+        display: none;
+        padding: 18px 10px;
+        font: 12px/1.6 system-ui, "Microsoft YaHei", sans-serif;
+        color: #8A8D95;
+        text-align: center;
+    }
+</style>
+</head>
+<body>
+<div class="stage" id="stage">
+    <div class="bar qs-grid" id="bar">
+        <div class="qs-ghead">
+            <span class="qs-gtitle" id="gt">网格页 · 点空格子添加内容</span>
+            <button type="button" class="qs-gbtn" title="打开设置" aria-label="打开设置">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+                     stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M4 8h9M17 8h3M4 16h3M11 16h9"/>
+                    <circle cx="15" cy="8" r="2.1"/><circle cx="9" cy="16" r="2.1"/>
+                </svg>
+            </button>
+        </div>
+        <div class="engines" id="engines"></div>
+    </div>
+    <div id="empty-tip">网格页已停用 —— 预览仅供调整外观，快捷键不会唤出它。</div>
+</div>
+
+<script>
+(function () {
+    'use strict';
+
+    var stage = document.getElementById('stage');
+    var bar = document.getElementById('bar');
+    var engines = document.getElementById('engines');
+    var tip = document.getElementById('empty-tip');
+
+    /** 画一帧。`p` 由设置页拼好，字段见 settings.js 的 pushGridPreview()。 */
+    function render(p) {
+        p = p || {};
+        var look = p.look || {};
+        var g = p.grid || {};
+
+        // ---- 主题与横条级变量：和 bar.js 的 applyThemePayload / applyLook 同一口径
+        stage.classList.toggle('qs-dark', !!p.dark);
+        stage.classList.toggle('qs-shadow', !!look.shadow);
+        stage.style.setProperty('--qs-radius', (look.radius != null ? look.radius : 9) + 'px');
+        stage.style.setProperty('--qs-bar-pad', (look.pad != null ? look.pad : 5) + 'px');
+        stage.style.setProperty('--qs-alpha', ((look.alpha != null ? look.alpha : 100) / 100).toFixed(2));
+        stage.style.setProperty('--qs-btn', ((look.btn != null ? look.btn : 30) + 6) + 'px');
+
+        // ---- 网格变量（真网格与这里读的是同一组）
+        var rows = clamp(g.rows, 1, 10, 3);
+        var cols = clamp(g.cols, 1, 10, 3);
+        var cw = clamp(g.cellW, 40, 260, 104);
+        var ch = clamp(g.cellH, 40, 200, 76);
+        var gap = clamp(g.gap, 0, 24, 8);
+        var rad = clamp(g.radius, 0, 24, 12);
+
+        bar.style.setProperty('--gcols', String(cols));
+        bar.style.setProperty('--grows', String(rows));
+        bar.style.setProperty('--gcw', cw + 'px');
+        bar.style.setProperty('--gch', ch + 'px');
+        bar.style.setProperty('--ggap', gap + 'px');
+        bar.style.setProperty('--gr', rad + 'px');
+
+        // 停用状态下把整体压暗，一眼看出"现在按快捷键不会弹"
+        // 「格子文字」：false = 只显示图标（和真网格同一个类名，样式也同一份）
+        // 和真网格同一口径：高度 < 66px 自动只显图标（放不下名称）
+        bar.classList.toggle('qs-gnolabel', g.showLabel === false || ch < 66);
+        bar.style.opacity = p.enabled === false ? '0.45' : '';
+        tip.style.display = p.enabled === false ? 'block' : 'none';
+
+        // ---- 格子
+        engines.textContent = '';
+        var items = Array.isArray(g.items) ? g.items : [];
+        var total = rows * cols;
+        for (var i = 0; i < total; i++) {
+            var cell = document.createElement('div');
+            cell.className = 'qs-gcell';
+            var it = items[i];
+            if (!it) {
+                cell.classList.add('qs-gempty');
+                var plus = document.createElement('span');
+                plus.className = 'qs-gplus';
+                plus.textContent = '+';
+                cell.appendChild(plus);
+                engines.appendChild(cell);
+                continue;
+            }
+            var icon = document.createElement('span');
+            icon.className = 'qs-gicon';
+            // 图标是**父页面序列化好的 DOM**（img / svg / 字母徽标）：
+            // 这样预览里的图标和真横条上那张是同一张，不是"再找一张相似的"。
+            if (it.iconHtml) icon.innerHTML = it.iconHtml;
+            cell.appendChild(icon);
+            var lb = document.createElement('span');
+            lb.className = 'qs-glabel';
+            lb.textContent = it.label || '';
+            cell.appendChild(lb);
+            cell.title = it.label || '';
+            engines.appendChild(cell);
+        }
+
+        reportHeight();
+    }
+
+    function clamp(v, min, max, dflt) {
+        var n = Number(v);
+        if (!isFinite(n)) n = dflt;
+        return Math.max(min, Math.min(max, Math.round(n)));
+    }
+
+    /** 把内容高度报给父页面，由它设 iframe 高度 —— 这样预览不会被裁掉半行。 */
+    function reportHeight() {
+        var h = Math.ceil(document.body.getBoundingClientRect().height);
+        // 内容比 iframe 宽时（列数多 / 格子很大），父页面要按内容宽度放大 iframe，
+        // 否则右边几列会被裁在 iframe 外面，怎么看都看不到。
+        var w = Math.ceil(document.body.scrollWidth);
+        try {
+            parent.postMessage({ __qsGridPreviewHeight: h, __qsGridPreviewWidth: w }, '*');
+        } catch (e) { /* 独立打开时没有父页面，忽略 */ }
+    }
+
+    window.addEventListener('message', function (e) {
+        var d = e.data;
+        if (d && d.__qsGridPreview) render(d.payload);
+    });
+
+    // 告诉父页面：我准备好了，把当前配置发过来
+    try {
+        parent.postMessage({ __qsGridPreviewReady: true }, '*');
+    } catch (e) { /* 独立打开时忽略 */ }
+})();
+</script>
+</body>
+</html>

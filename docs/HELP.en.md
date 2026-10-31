@@ -61,10 +61,12 @@ There are **two** surfaces, with separate content, styling and settings:
 
 - **Live preview**: what you see *is* the grid page — it loads the grid's own stylesheet and the
   same markup, so layout, size, spacing, corner radius, colours and shadow match the pop-up
-  **exactly**. Any change below is reflected instantly.
+  **exactly**. Any change below is reflected instantly. The preview frame has a **fixed height**:
+  make cells taller and it scrolls inside the frame instead of stretching the whole settings page.
 - **Appearance**: 1–10 rows × 1–10 columns (3×3, 3×4, 4×4…); cell 40–260 px wide, 40–200 px tall;
   gap 0–24 px; cell radius 0–24 px. Colours, shadow and blur are shared with **Bar appearance** —
-  the grid has no colour settings of its own.
+  the grid has no colour settings of its own. **Tile text**: show *icon + name* or *icon only*
+  (icon-only is tidier and allows shorter cells); applies immediately.
 - **Behaviour**:
   - **Enable grid page** — turn it off and the hotkey stops opening it; content and settings stay;
   - **Clicking an empty tile adds content** — turn it off to make empty tiles inert (avoids misclicks);
@@ -77,8 +79,24 @@ There are **two** surfaces, with separate content, styling and settings:
     paused / current app blacklisted).
 - **Tiles**: a list **separate from the bar**. Add items one by one, or *Import from bar*;
   **drag any row up or down to reorder — released order is saved immediately**. Tiles shown =
-  rows × columns.
+  rows × columns. *Add content* also lists **OCR models / image-search models / translation
+  models** as their own groups (searching "baidu" finds both Baidu search and Baidu OCR), plus
+  **function tiles** such as **Wrap symbols**: tap it to open the symbol menu and **wrap, unwrap
+  or switch** the selected text (same thing as the `[ ]` button on the bar). Which OCR / image /
+  translation provider a function tile uses is the one selected in **Extras** (rows marked
+  *currently in use*).
 - Every change takes effect **immediately** (no restart).
+
+### Bottom-right toast: which feature is running
+
+When you use **the selection bar / the grid page / OCR / translation / image search**, a system
+notification appears in the bottom-right corner:
+
+- Content: title `Quick Search`, body "Using: <feature> · <app you are in>";
+- Timing: only when the feature **actually starts** (blocked by pause / blacklist / disabled = no toast);
+- Dismiss: about 5 s by itself; hover or click ✕ to close it right away;
+- Frequency: the same feature is announced at most once every 4 s;
+- Turn it off in **Settings → General → "Bottom-right feature hint"** (on by default).
 
 **Working directly on the grid page**:
 
@@ -144,9 +162,34 @@ If triggered anyway, you get "select some text first" instead of producing an em
 - **Esc closes the menu only** (the bar stays); selecting different text closes it automatically
   so you cannot wrap the wrong thing.
 
-> **Why not replace the text in place?** The app cannot write back into other programs (that needs
-> simulated typing, which interrupts your work and pollutes the undo stack). It hands you the result
-> via the clipboard instead — one keystroke away, with no collateral damage.
+> **It replaces the text in place** (since v2.6.2): the app hands focus back to the original window
+> and pastes over your selection. The result also stays on the clipboard, so press **Ctrl+Z** to undo.
+> If you already undid it, or that window is gone, it **copies only** and says why — it never edits
+> your document blindly.
+
+---
+
+### Per-app profiles (a different bar / grid page for one app)
+
+Settings → **Per app**.
+
+- Enter a **process name** (Task Manager → Details → Name, e.g. `chrome.exe`), or click
+  "Use current app" to grab the app you were just using; `*` wildcards are allowed (`*chrome*`).
+- The **bar** and the **grid page** are two independent profiles: changing one for Chrome leaves
+  the other untouched.
+- For the bar you save a **full item list** (it replaces the default bar); for the grid page you
+  pick **one page**.
+- Priority: **per-app profile > default profile**. Each of these falls back to the default and the
+  panel explains why in red:
+  - no profile / the process name does not match;
+  - the profile was emptied;
+  - nothing in the profile can be displayed any more (e.g. the engine was deleted);
+  - the bound page was deleted / the bound page is empty.
+- Changes take effect **immediately** — the next time you open the bar inside that app.
+- When several bindings match: **exact beats wildcard; longer wildcard beats shorter; otherwise
+  the one configured first wins**.
+- The "Configured apps" list at the bottom merges both kinds of bindings, with one-click
+  "Configure" / "Clear".
 
 ---
 
@@ -196,7 +239,9 @@ Put frequently used **apps, URLs, and local files** on the bar and open them wit
 
 1. Settings → **🎯 Launch**;
 2. Paste an address into the box and press Enter (or click **Detect and add**);
-3. The app decides which of the three types it is and pre-fills name / note / icon;
+3. The app decides which of the three types it is and pre-fills name / note / icon — for URLs the
+   **page title is fetched into the note** (if it cannot be fetched, the note stays empty and you can
+   press "Fetch title again");
 4. Edit anything in the preview card, then click **Save**.
 
 What you can paste:

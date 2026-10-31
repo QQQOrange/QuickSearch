@@ -267,10 +267,37 @@ input[type=range]::-webkit-slider-thumb {
     color: #fff; font-size: 12px; font-weight: 600;
 }
 
-.item .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* ⚠ 列表行**不许压缩内容**（用户口径："为避免超出总页面宽度而压缩内容，导致内容看不清"）。
+ *
+ * 以前 `.nm` 是 `flex:1 + min-width:0 + nowrap + ellipsis`：操作按钮一多（智能直达一行
+ * 有 9 颗），名字列被挤到只剩几个像素、整行显示"…"。
+ * 现在改成**换行**：名字给一个可读的最小宽度，放不下就把 `.ops` 换到下一行；
+ * 名字本身也允许折行（长网址 `overflow-wrap:anywhere`），一律不缩字号、不加缩放。 */
+.item .nm {
+    flex: 1 1 220px;
+    min-width: 150px;
+    overflow: visible;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+    line-height: 1.45;
+}
 .item .nm em { font-style: normal; font-size: 11px; color: var(--fg-dim); margin-left: 7px; }
 
-.item .ops { display: flex; gap: 4px; flex: none; }
+/* 操作按钮：放不下就整体换到下一行，并靠右 —— 绝不去挤压左边的名字 */
+.item .ops {
+    display: flex;
+    gap: 4px;
+    flex: 0 0 auto;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    margin-left: auto;
+}
+
+/* 行本身允许换行（.ops 掉到第二行时整行变高） */
+.item {
+    flex-wrap: wrap;
+}
 
 .mini {
     height: 26px;
@@ -3828,4 +3855,286 @@ main {
     .help-body > p,
     .help-body > ul,
     .help-body > ol { max-width: 62em; }
+}
+
+/* 网格内容列表的拖拽反馈（顺序调整时给条明显的落点线） */
+.list .item.dragging {
+    opacity: .45;
+}
+.list .item.drop-before {
+    box-shadow: inset 0 2px 0 0 var(--accent, #2563EB);
+}
+.list .item.drop-after {
+    box-shadow: inset 0 -2px 0 0 var(--accent, #2563EB);
+}
+.list .item[draggable="true"] {
+    cursor: grab;
+}
+.list .item[draggable="true"]:active {
+    cursor: grabbing;
+}
+
+/* ------------------------------------------------------------------
+ * 网格页设置 → 实时预览
+ *
+ * 预览是**一个 iframe**（gridpreview.html），里面加载网格页自己的 bar.css
+ * 和同一套 DOM。这样"所见即所弹"是由构造保证的，而不是靠人肉对齐两套样式。
+ * 容器只管画边框和滚动，不要给它加任何会影响内部排版的 padding。
+ * ------------------------------------------------------------------ */
+/* 网格预览外框：**直接复用横条预览那套舞台样式**（.preview-stage 的纹理底、
+   圆角、内边距），保证两块预览看起来是同一个东西。
+   这里只补"装 iframe"需要的几条，不许再改底色 —— 一旦自己写 background
+   就会盖掉舞台的纹理和深浅切换（用户报的"背景纯白"就是这么来的）。 */
+.gprev-wrap {
+    margin: 10px 0 8px;
+    /* 舞台自带 padding（18px 14px），iframe 再自己撑满即可 */
+    border-radius: 10px;
+    /* ⚠ **固定高度**：以前是 min/max-height + 由内容撑开，于是把「格子高」
+     *   从 76 调到 200，预览长高、整张设置页也跟着长高（用户报的"页面长度
+     *   随高度变化"）。固定之后页面布局是稳定的，内容超高就在框内滚动。 */
+    height: 360px;
+    overflow: auto;
+    /* 不用 flex：横向溢出时 flex 的居中会把左边裁掉且滚不过去，
+     * 交给 iframe 自己的 `margin: 0 auto` 更安全（窄则居中、宽则靠左可滚）。 */
+    display: block;
+}
+
+.gprev-wrap iframe {
+    width: 100%;
+    /* 初始高度；iframe 渲染完会把真实内容高度报回来（见 settings.js 的 message 监听） */
+    height: 220px;
+    max-width: none;
+    margin: 0 auto;
+    border: 0;
+    display: block;
+    background: transparent;
+    /* 预览里不滚：让外层 .gprev-wrap 统一滚，视觉上更整齐 */
+    overflow: hidden;
+}
+
+/* 智能直达的内置图标（SVG）：容器多大就多大 —— 设置页列表是 24px 的 .ic */
+.qs-go-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    height: 100%;
+}
+
+.qs-go-icon svg {
+    width: 100%;
+    height: 100%;
+    display: block;
+}
+
+/* 网格预览的 iframe：撑满舞台宽度，内容由 iframe 自己居中
+   （宽度/高度后面都由 settings.js 按内容回传的值覆盖，这里只给初值） */
+.gprev-wrap iframe {
+    width: 100%;
+    height: 220px;
+    max-width: none;
+    margin: 0 auto;
+    border: 0;
+    display: block;
+    background: transparent;
+    overflow: hidden;
+}
+
+/* ------------------------------------------------------------------
+ * 分组导航（附加功能 / 数据 / 关于）
+ * ------------------------------------------------------------------ */
+.subnav-card { padding-bottom: 10px; }
+
+.subnav {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 4px;
+}
+
+.subnav .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 6px 12px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: var(--card);
+    color: var(--fg-dim);
+    font: inherit;
+    font-size: 12.5px;
+    cursor: pointer;
+    transition: background-color .12s ease, border-color .12s ease, color .12s ease;
+}
+
+.subnav .chip:hover {
+    border-color: var(--accent, #3B7DFF);
+    color: var(--fg);
+}
+
+.subnav .chip.on {
+    background: var(--accent, #3B7DFF);
+    border-color: var(--accent, #3B7DFF);
+    color: #fff;
+}
+
+/* ------------------------------------------------------------------
+ * 网格页外观：紧凑数字框（原来两行"标签 + 长输入框"太占地方）
+ * ------------------------------------------------------------------ */
+.gcompact {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px 14px;
+    margin: 6px 0 4px;
+}
+
+.gcompact label {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 12px;
+    color: var(--fg-dim);
+    white-space: nowrap;
+}
+
+.gcompact input.txt {
+    width: 62px;
+    padding: 4px 6px;
+    text-align: center;
+}
+
+/* ------------------------------------------------------------------
+ * 添加内容（选择窗口）
+ * ------------------------------------------------------------------ */
+.pickmodal {
+    position: fixed;
+    inset: 0;
+    z-index: 60;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(10, 12, 18, .45);
+    backdrop-filter: blur(2px);
+}
+
+/* ⚠ 这一条不能删：作者样式里的 `display:flex` **优先于**浏览器默认的
+ *   `[hidden]{display:none}`（UA 样式表永远输给作者样式），少这一条的话
+ *   `hidden` 属性就完全失效 —— 表现是「一进设置页就挂着一个关不掉的弹窗」，
+ *   因为 ✕ 只是把 hidden 设回 true，视觉上一点变化都没有。 */
+.pickmodal[hidden] {
+    display: none !important;
+}
+
+.pickcard {
+    width: min(560px, calc(100vw - 48px));
+    max-height: min(620px, calc(100vh - 80px));
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 16px;
+    border-radius: 14px;
+    background: var(--card);
+    border: 1px solid var(--line);
+    box-shadow: 0 18px 48px rgba(0, 0, 0, .28);
+}
+
+.pickhead {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.pickhead b { flex: 1 1 auto; font-size: 14px; }
+
+.pickx {
+    flex: none;
+    width: 26px;
+    height: 26px;
+    border: none;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--fg-dim);
+    font: inherit;
+    cursor: pointer;
+}
+
+.pickx:hover { background: var(--hover); color: var(--fg); }
+
+.pickbody {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding-right: 4px;
+}
+
+.pickcat {
+    padding: 6px 4px 2px;
+    font-size: 11px;
+    color: var(--fg-dim);
+    letter-spacing: .03em;
+}
+
+.pickrow {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    width: 100%;
+    padding: 6px 8px;
+    border: none;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--fg);
+    font: inherit;
+    font-size: 13px;
+    text-align: left;
+    cursor: pointer;
+}
+
+.pickrow:hover { background: var(--hover); }
+.pickrow.on { opacity: .75; }
+
+.pickic {
+    flex: none;
+    width: 20px;
+    height: 20px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.pickic > img,
+.pickic > svg { width: 100%; height: 100%; object-fit: contain; }
+.pickic .letter { display: flex; align-items: center; justify-content: center; width: 100%; height: 100%; border-radius: 5px; color: #fff; font-size: 11px; font-weight: 600; }
+.pickic .qs-go-icon { width: 100%; height: 100%; }
+
+.picknm {
+    flex: 1 1 auto;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+
+.picktag {
+    flex: none;
+    font-size: 11px;
+    color: var(--fg-dim);
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: 1px 8px;
+}
+
+.picktag.on {
+    color: var(--accent, #3B7DFF);
+    border-color: var(--accent, #3B7DFF);
+}
+
+.pickempty {
+    padding: 18px 6px;
+    text-align: center;
+    font-size: 12px;
+    color: var(--fg-dim);
 }

@@ -61,7 +61,7 @@ keep working (but see the backup password note below).
 ## Getting started
 
 1. **Select text**: select a piece of text in any app — the bar pops up → click an icon to search.
-2. **Hotkeys**: Ctrl + double-click shows the bar; **Ctrl + C opens the grid page** (a tile panel with its own hotkey, rows/columns, cell size and items). The two surfaces are fully independent — see [Help](docs/HELP.en.md#two-different-pop-ups-important).
+2. **Hotkeys**: Ctrl + double-click shows the bar; **Ctrl + C opens the grid page** (a tile panel with its own hotkey, rows/columns, cell size and items). Both support **per-app profiles** (one app gets its own set; everything else uses the default). The two surfaces are fully independent — see [Help](docs/HELP.en.md#two-different-pop-ups-important).
 3. **OCR**: click the OCR button on the bar (it shows your own icon if you customized it) → select a screen region.
 4. **Open Settings**: double-click the tray icon, or right-click it → Settings.
 
@@ -74,6 +74,7 @@ keep working (but see the backup password note below).
 | ⚙️ General | Trigger methods, hotkeys, start with Windows, bar behavior |
 | 🎨 Bar appearance | Theme, colors, corner radius, liquid glass, bar size |
 | 🧩 Grid page | Live preview, rows / cells / gap / radius, enable & click behaviour, tiles |
+| 🪟 Per app | A different bar profile / grid page for one app (independent, falls back to the default) |
 | 🚫 Scope | Windows / apps where the bar should not appear (blacklist and whitelist) |
 | 🔎 Engines | Bar members, ordering, custom engines, icons |
 | ➕ Extras | 8 sub-pages: AI tools, Smart Launch, Matting, OCR, Translation, Image search, Favorites, Wrap symbols |

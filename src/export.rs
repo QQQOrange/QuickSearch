@@ -159,6 +159,15 @@ pub static GROUPS: &[Group] = &[
         default_checked: false,
     },
     Group {
+        id: "shortcuts",
+        name: "智能直达",
+        desc: "直达入口的链接/路径、名称、备注与自定义图标（钉在横条上的格子也在其中）",
+        keys: &["shortcuts"],
+        // 不含凭据，但会暴露本机路径 —— 标私密只是让默认不勾，用户仍可主动导出
+        private: true,
+        default_checked: false,
+    },
+    Group {
         id: "icons",
         name: "自定义图标",
         desc: "给引擎换过的图标图片（内嵌在文件里，不依赖外部图片路径）",
