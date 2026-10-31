@@ -330,7 +330,6 @@ input[type=range]::-webkit-slider-thumb {
 .mini:hover { background: var(--hover); color: var(--fg); border-color: color-mix(in srgb, var(--fg-dim) 45%, transparent); }
 .mini.on { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
 .mini.on:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); }
-.mini.icon-only { width: 26px; padding: 0; font-size: 13px; }
 .mini:disabled { opacity: .35; cursor: default; }
 
 /* ------------------------------ 全部引擎 ------------------------------ */
@@ -2205,6 +2204,50 @@ body.idx-on .to-top { bottom: 56px; }
 @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) .item .nm .kb.hot { color: #FBBF24; background: rgba(251, 191, 36, .16); }
 }
+/* v2.9.0：**这一项是否已在横条**，就贴在类型气泡（搜 / 开 / 快捷键）旁边。
+ *   · `.inbar-add`：还没加 —— 一颗小按钮，点一下直接加进横条；
+ *   · `.inbar-tag`：已加 —— 只留静态标识，不可点（移出在「横条上的引擎」那页）。
+ * 两者都做成和 `.kb` 气泡同高、同圆角，贴在名字后面不会把行高顶起来。 */
+.item .nm .inbar-add {
+    margin-left: 7px;
+    padding: 0 6px;
+    border: 1px solid color-mix(in srgb, var(--accent) 42%, transparent);
+    border-radius: 5px;
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    color: var(--accent);
+    font-family: inherit;
+    font-size: 10.5px;
+    line-height: 16px;
+    vertical-align: 1px;
+    cursor: pointer;
+    transition: background-color .12s ease, border-color .12s ease;
+}
+
+.item .nm .inbar-add:hover {
+    background: color-mix(in srgb, var(--accent) 20%, transparent);
+    border-color: color-mix(in srgb, var(--accent) 62%, transparent);
+}
+
+.item .nm .inbar-add:active { transform: translateY(1px); }
+
+.item .nm .inbar-tag {
+    display: inline-block;
+    margin-left: 7px;
+    padding: 0 6px;
+    border-radius: 5px;
+    font-size: 10.5px;
+    line-height: 16px;
+    color: #0E8A6D;
+    background: rgba(14, 138, 109, .12);
+    vertical-align: 1px;
+}
+
+/* 深色下换成亮一档的青绿（同 .kb.open 的处理，保证 4.5:1 对比度） */
+:root[data-theme="dark"] .item .nm .inbar-tag { color: #3ECFA5; background: rgba(62, 207, 165, .14); }
+@media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) .item .nm .inbar-tag { color: #3ECFA5; background: rgba(62, 207, 165, .14); }
+}
+
 /* 快捷键类的按键序列小字（自定义引擎行里替代 URL 显示） */
 .item .nm .chot {
     display: block;

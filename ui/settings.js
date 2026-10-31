@@ -451,8 +451,8 @@ function renderBarList() {
      * 列表里仍然可能是脏的。脏的那一行会把 `@fav:xxxx` 原文当引擎名显示出来
      * （用户报的"乱码"），图标也会退化成异常造型。
      *
-     * ⚠ **必须保留原始下标**：↑↓ 和拖拽排序都是按下标算的（move_bar_item），
-     *   过滤后重新编号会让"上移"作用到别的行上。
+     * ⚠ **必须保留原始下标**：拖拽排序按下标算（move_bar_item），
+     *   过滤后重新编号会把这一行拖到别的行的位置上。
      */
     const list = (CONF.barList || [])
         .map((name, idx) => ({ name, idx }))
@@ -474,7 +474,7 @@ function renderBarList() {
         const isSep = name === QS_SEP;
         const isOcr = name === QS_OCR;
         /* r72：识图按钮现在是横条成员（`@img`）—— 和普通引擎一样有抓手、
-         * ↑↓、拖拽、换图标 / 编辑 / 恢复默认 / 移出。
+         * 拖拽、换图标 / 编辑 / 恢复默认 / 移出。
          * v1.5.16：翻译按钮（@trans）同一套地位。 */
         const isImg = name === QS_IMG;
         const isTrans = name === QS_TRANS;
@@ -581,27 +581,15 @@ function renderBarList() {
             return b;
         };
 
-        // 上下移动一律走**下标**（move_bar_item），不走名字。
-        // 分隔线可以有好几条、名字全都一样，按名字找位置必然张冠李戴。
-        // 另外 usize 收不下负数，边界必须在 JS 这边挡住。
-        const up = mk('↑', '上移', 'icon-only',
-            () => invoke('move_bar_item', { from: idx, to: idx - 1 }));
-        if (idx === 0) { up.disabled = true; up.title = '已经在最前面了'; }
-        const dn = mk('↓', '下移', 'icon-only',
-            () => invoke('move_bar_item', { from: idx, to: idx + 1 }));
-        /* ⚠ 比的是**原始下标**，不能拿 `list.length - 1`：list 是过滤后的数组
-         *   （脏项 —— 指向已删目录/软件的哨兵 —— 会被滤掉），两个下标空间
-         *   一比就错位，最后一行的「↓」该禁用却没禁用（点了后端直接 return，
-         *   用户看到的是"按了没反应"）。 */
-        if (idx === (list[list.length - 1] || {}).idx) {
-            dn.disabled = true; dn.title = '已经在最后面了';
-        }
+        /* 位置只靠**拖拽**（下面 pointerdown → endDrag → move_bar_item）。
+         * v2.9.0 删掉了每行那对 ↑↓ 按钮：同一件事有两套入口，箭头既占地方
+         * 又和抓手重复；用户口径是「顺序已支持拖拽调整，箭头属多余」。 */
 
         if (isSep) {
             mk('删除', '删掉这条分隔线', '',
                 () => invoke('remove_separator', { index: idx }));
         } else if (isOcr) {
-            // OCR 行：位置用 ↑↓ 或直接拖；图标也能自己换（用户点名要的）。
+            // OCR 行：位置直接拖；图标也能自己换（用户点名要的）。
             // 「去掉」只是把它从横条上拿掉，不影响热键 Ctrl+Alt+O。
             mk('换图标', '给 OCR 按钮挑一张图片', '',
                 () => invoke('pick_icon', { engine: QS_OCR }));
@@ -668,7 +656,7 @@ function renderBarList() {
     });
 
     /* r72：识图按钮现在已经**就是横条成员**（`@img` 哨兵），上面那个 forEach
-     * 会像普通引擎一样把它画出来（抓手 / ↑↓ / 拖拽 / 换图标 / 编辑 / 默认 / 移出）。
+     * 会像普通引擎一样把它画出来（抓手 / 拖拽 / 换图标 / 编辑 / 默认 / 移出）。
      *
      * 用户原话：「识图搜索加入了横条之后，在引擎横条上的引擎这个框架里面，它只有
      * 一个换图标的按钮，应该也要有一个编辑图标，恢复默认图标，移出的按钮，也能
@@ -696,7 +684,7 @@ function renderBarList() {
         nm.className = 'nm';
         nm.textContent = '识图搜索';
         const em = document.createElement('em');
-        em.textContent = '还没加进横条 · 加进来之后就能拖到任意位置、换图标、上下移';
+        em.textContent = '还没加进横条 · 加进来之后就能拖到任意位置、换图标';
         nm.appendChild(em);
 
         const ops = document.createElement('span');
@@ -727,7 +715,7 @@ function renderBarList() {
      *
      * ⚠ 判定必须用 `some((x) => x.name === QS_OCR)`，**不能** `list.includes(QS_OCR)`：
      *    上面的 list 是 `.map((name, idx) => ({ name, idx }))` 之后的**对象数组**
-     *    （下标要保留给 ↑↓/拖拽用），includes 一个字符串永远为 false ——
+     *    （下标要保留给拖拽排序用），includes 一个字符串永远为 false ——
      *    于是 OCR 已经在横条里时，入口行照画不误，用户看到"两行 OCR"，
      *    点那颗「＋ 加进横条」还真的会再加一次哨兵（用户报的重复显示）。 */
     if (!list.some((x) => x.name === QS_OCR)) {
@@ -2238,20 +2226,49 @@ function renderCustomList() {
         nm.appendChild(kb);
         // 快捷键类显示组合键，另两类显示 URL（自定义引擎最容易记不清的就是
         // 「当初填的什么」—— 两类各露各的关键信息）
-        const u = document.createElement('small');
-        u.className = ceK === 'hotkey' ? 'chot' : 'curl';
-        u.textContent = ceK === 'hotkey' ? (ce.hotkey || '') : ce.url;
         /* ⚠ 「空壳」记录：快捷键类没按键序列、其余类没地址 —— 这种定义干什么都不行，
          *   而且**横条上根本画不出来**（前端合并目录时按同一口径跳过它）。
          *   用户报的「设置里显示已在横条、横条里却没有」就是这种记录。
-         *   这里当场标红说清楚，并且不给「加到横条」—— 免得再往横条里塞一颗幽灵
+         *   这里当场标红说清楚，并且不给「添加到横条」—— 免得再往横条里塞一颗幽灵
          *   （后端 `toggle_bar_engine` 也已经按同一口径拦了）。
          *   后端读配置时会把这类记录从横条/最近使用里**摘掉**、定义留着
          *   （config::repair_dead_custom_engines），所以正常情况下这里显示的是
-         *   「可选但用不了」的状态 —— 把地址或按键补上就活。 */
+         *   「可选但用不了」的状态 —— 把地址或按键补上就活。
+         *
+         *   v2.9.0：`usable` / `on` 提前到这里算 —— 紧跟着徽标那颗「是否已在横条」
+         *   要用它们（见下面的状态标识）。 */
         const usable = ceK === 'hotkey'
             ? !!(ce.hotkey || '').trim()
             : !!(ce.url || '').trim();
+        const on = inBar(ce.name);
+
+        /* v2.9.0：**是否已在横条**直接显示在类型气泡（搜 / 开 / 快捷键）旁边 ——
+         * 用户口径：「在『快捷键』气泡旁直接展示该引擎是否已在横条中，不再通过
+         * 图标编辑行或默认图标行来表达这一状态」。
+         *   · 没加：一颗「添加到横条」按钮，点一下立刻加进去（外观随配置广播刷新）；
+         *   · 已加：只留一个静态标识，**不再放可点的按钮**（移出在「横条上的引擎」页）。
+         * 空壳定义（画不出来）两颗都不给：加进去也只是幽灵，红字已经说明了原因。 */
+        if (usable) {
+            if (on) {
+                const tag = document.createElement('span');
+                tag.className = 'inbar-tag';
+                tag.textContent = '已在横条';
+                tag.title = '已经在横条上了（要移出就去「横条上的引擎」那页）';
+                nm.appendChild(tag);
+            } else {
+                const add = document.createElement('button');
+                add.type = 'button';
+                add.className = 'inbar-add';
+                add.textContent = '添加到横条';
+                add.title = '把这颗引擎加到横条上（加到末尾，之后可以拖到任意位置）';
+                add.addEventListener('click', () => invoke('toggle_bar_engine', { engine: ce.name, on: true }));
+                nm.appendChild(add);
+            }
+        }
+
+        const u = document.createElement('small');
+        u.className = ceK === 'hotkey' ? 'chot' : 'curl';
+        u.textContent = ceK === 'hotkey' ? (ce.hotkey || '') : ce.url;
         if (!usable) {
             u.textContent = ceK === 'hotkey'
                 ? '（没填按键序列 —— 这颗在横条上画不出来）'
@@ -2272,7 +2289,6 @@ function renderCustomList() {
             return b;
         };
 
-        const on = inBar(ce.name);
         mk('换图标', '从电脑里挑一张图片当图标', () => invoke('pick_icon', { engine: ce.name }));
         // #143「编辑图标」（和下面读表单的「编辑」区分开：一个是修图，一个是改配置）
         if (hasIconToEdit(ce.name, ce.name)) {
@@ -2282,12 +2298,10 @@ function renderCustomList() {
         if (CONF.overrideIcons[ce.name]) {
             mk('默认图标', '恢复成首字母徽标', () => invoke('reset_icon', { engine: ce.name }));
         }
-        /* 空壳记录不给「加到横条」：加进去也画不出来（见上面 usable 那段）。
-         * 已经在横条里的，仍然给一颗「从横条移除」，让用户能自己把幽灵清掉。 */
-        if (usable) {
-            mk(on ? '已在横条' : '加到横条', on ? '从横条上移除' : '加到横条上',
-                () => invoke('toggle_bar_engine', { engine: ce.name, on: !on }));
-        } else if (on) {
+        /* 「是否已在横条」已经搬到名字旁（徽标后面），这里不再放同一件事的按钮。
+         * 只有空壳定义仍然需要这颗清理入口：它加不进横条（`usable === false`），
+         * 但**历史配置里可能已经挂着引用**，得让用户能自己把幽灵清掉。 */
+        if (!usable && on) {
             mk('从横条移除', '这条定义是空的（没地址/没按键），横条上本来也画不出来 —— 点这里把引用清掉',
                 () => invoke('toggle_bar_engine', { engine: ce.name, on: false }));
         }
