@@ -4058,6 +4058,49 @@ main {
     color: #fff;
 }
 
+/* 子导航 chip 里的图标（v2.11.0）：由 renderSubnavIcons() 填成各功能**自己**
+ * 的图标节点（识别/翻译/识图/包裹/文本处理走 shared.js 那套），只有 AI 工具 /
+ * 智能直达 / 收藏夹这三项还是 emoji（它们是分类，没有"功能图标"）。
+ * 统一 14×14 —— chip 的字号是 12.5px，图标比字略大一点最容易对齐。 */
+.subnav .chip .ci {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 14px;
+    height: 14px;
+    flex: 0 0 auto;
+    font-size: 13px;
+    line-height: 1;
+    /* 不能 hidden：文本处理那张图标右下角有个几 px 的小记号（␣ / ¶ / A…），
+     * 裁掉之后图标看起来是"缺一角"的。1~2px 的溢出落在 chip 的 gap 里，无害。 */
+    overflow: visible;
+}
+.subnav .chip .ci > img,
+.subnav .chip .ci > span,
+.subnav .chip .ci > svg {
+    width: 100%;
+    height: 100%;
+    display: block;
+}
+.subnav .chip .ci img { object-fit: contain; }
+/* 徽标类（OCR / 翻译文字标）在 14px 里要缩一档，否则撑破 chip */
+.subnav .chip .ci .qs-ocr-tag,
+.subnav .chip .ci .ocr-tag,
+.subnav .chip .ci .qs-trans-tag,
+.subnav .chip .ci .trans-tag {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    height: 100%;
+    font-size: 7.5px;
+    letter-spacing: 0;
+    background: none;
+    min-width: 0;
+    padding: 0;
+    color: inherit;
+}
+
 /* ------------------------------------------------------------------
  * 网格页外观：紧凑数字框（原来两行"标签 + 长输入框"太占地方）
  * ------------------------------------------------------------------ */

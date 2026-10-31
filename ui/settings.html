@@ -777,15 +777,22 @@
         <section class="card subnav-card">
             <h2>附加功能 <small>工具类的都收在这里，点一项展开</small></h2>
             <div class="subnav" data-group="extras">
-                <button type="button" class="chip on" data-sub="ai">🤖 AI 工具</button>
-                <button type="button" class="chip" data-sub="go">🎯 智能直达</button>
-                <button type="button" class="chip" data-sub="matte">✂️ 抠图</button>
-                <button type="button" class="chip" data-sub="ocr">🔤 文字识别</button>
-                <button type="button" class="chip" data-sub="trans">🌐 翻译</button>
-                <button type="button" class="chip" data-sub="imgsearch">🖼 识图搜索</button>
-                <button type="button" class="chip" data-sub="fav">⭐ 收藏夹</button>
-                <button type="button" class="chip" data-sub="wrap">🧷 包裹符号</button>
-                <button type="button" class="chip" data-sub="txt">✂️ 文本处理</button>
+                <!-- v2.11.0：图标不再写死 emoji，改由 renderSubnavIcons() 用
+                     每个功能自己的图标节点填充（.ci 是空壳）。
+                     原因有三个，都是用户报的：
+                       · emoji 换不掉 —— 给「翻译」挑的专属图标永远不显示；
+                       · 会撞车 —— 抠图和文本处理原来都是 ✂️；
+                       · 语义错 —— 包裹符号用了 🧷（别针），看着像"附件/链接"。
+                     标签文字进 .cl，i18n 仍按文本节点单独翻。 -->
+                <button type="button" class="chip on" data-sub="ai"><span class="ci" aria-hidden="true"></span><span class="cl">AI 工具</span></button>
+                <button type="button" class="chip" data-sub="go"><span class="ci" aria-hidden="true"></span><span class="cl">智能直达</span></button>
+                <button type="button" class="chip" data-sub="matte"><span class="ci" aria-hidden="true"></span><span class="cl">抠图</span></button>
+                <button type="button" class="chip" data-sub="ocr"><span class="ci" aria-hidden="true"></span><span class="cl">文字识别</span></button>
+                <button type="button" class="chip" data-sub="trans"><span class="ci" aria-hidden="true"></span><span class="cl">翻译</span></button>
+                <button type="button" class="chip" data-sub="imgsearch"><span class="ci" aria-hidden="true"></span><span class="cl">识图搜索</span></button>
+                <button type="button" class="chip" data-sub="fav"><span class="ci" aria-hidden="true"></span><span class="cl">收藏夹</span></button>
+                <button type="button" class="chip" data-sub="wrap"><span class="ci" aria-hidden="true"></span><span class="cl">包裹符号</span></button>
+                <button type="button" class="chip" data-sub="txt"><span class="ci" aria-hidden="true"></span><span class="cl">文本处理</span></button>
             </div>
         </section>
     </div>

@@ -113,13 +113,11 @@ function iconNode(name, size) {
  *  预览、横条列表、全部引擎列表三处都走这一个函数，样子才不会各处一个样。 */
 function barItemIcon(name, size) {
     if (name === QS_OCR) {
-        const custom = CONF.overrideIcons && CONF.overrideIcons[QS_OCR];
-        if (custom) {
-            const img = document.createElement('img');
-            img.src = custom;
-            qsApplyOpticalScale(img, unifyIcons());
-            return img;
-        }
+        /* v2.11.0：收进 shared.js 的 qsOcrIconNode —— 横条、网格、预览、
+         * 设置列表现在共用同一枚「OCR」徽标（换过图标优先）。
+         * 以前这里自己判一次 overrideIcons、自己造 .ocr-tag，和横条的
+         * .qs-ocr-tag 各长各样。 */
+        if (window.qsOcrIconNode) return window.qsOcrIconNode();
         const t = document.createElement('span');
         t.className = 'ocr-tag';
         t.textContent = 'OCR';
@@ -279,6 +277,58 @@ async function openIconEditor(key, engineName, extraSrc) {
 /* 标签页                                                              */
 /* ------------------------------------------------------------------ */
 
+/** 「抠图」在子导航里的图：虚线选区 + 主体剪影 —— "把主体从背景里抠出来"。
+ *  以前它和「文本处理」共用 ✂️，两个页签在小尺寸下完全分不出来。 */
+function matteNavIconNode() {
+    const sp = document.createElement('span');
+    sp.style.cssText = 'display:block;width:100%;height:100%';
+    sp.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"'
+        + ' stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"'
+        + ' style="display:block;width:100%;height:100%">'
+        + '<rect x="3.6" y="4.6" width="16.8" height="14.8" rx="2" stroke-dasharray="3 2.4"/>'
+        + '<circle cx="12" cy="10.1" r="2.1"/>'
+        + '<path d="M8.4 17.2c.7-2.2 2-3.3 3.6-3.3s2.9 1.1 3.6 3.3"/></svg>';
+    return sp;
+}
+
+/** 用**功能自己的图标**填「附加功能」子导航（v2.11.0）。
+ *
+ *  以前这排是写死的 emoji，三条毛病（都来自用户反馈）：
+ *    · 换不掉 —— 给「翻译」挑的专属图标永远不显示（emoji 是死的）；
+ *    · 撞车 —— 抠图和文本处理都是 ✂️；
+ *    · 语义错 —— 包裹符号是 🧷（别针），看着像"附件 / 链接"。
+ *
+ *  现在能拿到真图标的一律走横条/网格同一份实现：
+ *    文字识别 → qsOcrIconNode（OCR 徽标，换过图优先）
+ *    翻译     → qsTransIconNode（翻译.png / 用户换的图）
+ *    识图搜索 → qsImgIconNode（识图键.png / 用户换的图）
+ *    包裹符号 → qsWrapIconNode（包角 + 文字线）
+ *    文本处理 → qsTextIconNode（带横线的纸）
+ *    抠图     → matteNavIconNode（自有 SVG）
+ *  AI 工具 / 智能直达 / 收藏夹是**分类**不是功能，保留 emoji。
+ *
+ *  幂等：每次进附加功能都重画一遍，用户换过图标后回来就能看到新的。 */
+function renderSubnavIcons() {
+    const EMOJI = { ai: '🤖', go: '🎯', fav: '⭐' };
+    for (const chip of document.querySelectorAll('.subnav .chip[data-sub]')) {
+        const sub = chip.dataset.sub;
+        const box = chip.querySelector('.ci');
+        if (!box) continue;
+        box.textContent = '';
+        let node = null;
+        try {
+            if (sub === 'ocr' && window.qsOcrIconNode) node = window.qsOcrIconNode();
+            else if (sub === 'trans' && window.qsTransIconNode) node = window.qsTransIconNode();
+            else if (sub === 'imgsearch' && window.qsImgIconNode) node = window.qsImgIconNode();
+            else if (sub === 'wrap' && window.qsWrapIconNode) node = window.qsWrapIconNode();
+            else if (sub === 'txt' && window.qsTextIconNode) node = window.qsTextIconNode('');
+            else if (sub === 'matte') node = matteNavIconNode();
+        } catch (_) { node = null; }
+        if (!node) node = document.createTextNode(EMOJI[sub] || '•');
+        box.appendChild(node);
+    }
+}
+
 function bindTabs() {
     const tabs = $('tabs');
     for (const b of tabs.querySelectorAll('button')) {
@@ -319,6 +369,9 @@ const lastSub = {};
 /** 这些分组**不记忆**子页，每次进入都回到 `TAB_GROUPS[tab].def`。 */
 const NO_SUB_MEMORY = new Set(['extras']);
 
+/** 上一帧显示的是哪个 pane（v2.11.0：滚动归零用，见 showPane 里那段注释）。 */
+let curPaneName = '';
+
 /** 显示某一页。`tab` 是顶栏按钮的 data-tab，`sub` 只在分组页里有意义。
  *  返回**实际显示的那个 pane 名**（分组页返回子页名）。 */
 function showPane(tab, sub) {
@@ -345,6 +398,26 @@ function showPane(tab, sub) {
     for (const b of document.querySelectorAll('#tabs button')) {
         b.classList.toggle('on', b.dataset.tab === tab);
     }
+    /* v2.11.0：修「切回附加功能时分类回到 AI 工具、页面还停在半截」。
+     *
+     * 根因：子页状态和滚动位置是**两套存储** —— 分类走 `NO_SUB_MEMORY`
+     * （extras 每次进入都回 `def`），滚动位置却由整页唯一的 `main` 容器自己
+     * 留着（切 pane 只改 `hidden`，从不碰 `scrollTop`）。于是出现
+     * "AI 工具的内容 + 上一次滚到的位置"这种半新半旧的画面。
+     *
+     * 口径（用户确认）：附加功能选择「同时重置」—— 既然每次进入都回默认子页，
+     * 滚动就必须一起回顶部。要么都保留、要么都重置，不能一半一半。
+     *
+     * ⚠ 只处理**进入 extras 子页**这一种情况：数据 / 关于 / 顶栏各页沿用老行为
+     *   （切回来还在原处），不在这里改动，避免影响既有体验。 */
+    const nextPane = cur || tab;
+    if (SUB_TO_GROUP[nextPane] === 'extras' && nextPane !== curPaneName) {
+        const m = $('main');
+        if (m) m.scrollTop = 0;
+        // 顺手重画子导航图标：用户刚在别处换过图标的话，回来就能看到新的
+        renderSubnavIcons();
+    }
+    curPaneName = nextPane;
     afterShow(cur || tab);
     return cur || tab;
 }
@@ -11474,6 +11547,14 @@ document.addEventListener('keydown', (e) => {
     // 用户自己的引擎必须在第一次渲染前并进目录，否则它不出现在
     // 「全部引擎」里，也就没法加到横条上。
     qsMergeCustomEngines(CATALOG, BY_NAME, CONF);
+    /* 子导航那排图标要用配置里换过的图（overrideIcons），必须等 CONF 到手再画。
+     * 图标来源见 renderSubnavIcons 的注释。 */
+    renderSubnavIcons();
+    /* 包裹符号表是异步拉的（后端 wrap_pairs 是唯一来源）。拿到之后重画一次横条
+     * 列表 —— 否则 `@wrap:title` 会显示成「包裹符号 · title」而不是「书名号」。 */
+    if (window.qsWrapLoad) {
+        window.qsWrapLoad().then(() => { renderBarList(); }).catch(() => { });
+    }
 
     renderBarList();
     renderAllList();
@@ -12256,10 +12337,23 @@ async function renderWrapPane() {
     if (!wrapPairsUI) {
         try { wrapPairsUI = await invoke('wrap_pairs'); } catch (_) { wrapPairsUI = []; }
     }
+    /* 把符号表登记进 shared.js：`qsDisplayName('@wrap:title')` 要能说出
+     * 「书名号」而不是 key。横条那边也会登记一次（幂等）。 */
+    if (window.qsRegWrapPairs) window.qsRegWrapPairs(wrapPairsUI);
     box.textContent = '';
     for (const p of wrapPairsUI) {
+        /* v2.11.0：每一组都能**单独**放上横条 / 网格页（`@wrap:<key>`），
+         * 和「文本处理」那张清单一个套路：一行 = 一组符号 + 两颗按钮。
+         * 原来的整颗「包裹符号」按钮（弹 12 组菜单）保留在卡片顶部。 */
+        const sent = (window.QS_WRAP || '@wrap') + ':' + p.key;
         const row = document.createElement('div');
         row.className = 'item';
+
+        const ic = document.createElement('span');
+        ic.className = 'ic';
+        ic.appendChild(window.qsFuncIcon ? window.qsFuncIcon(sent) : document.createTextNode('•'));
+        row.appendChild(ic);
+
         const nm = document.createElement('span');
         nm.className = 'nm';
         nm.textContent = p.name;
@@ -12268,6 +12362,44 @@ async function renderWrapPane() {
         sm.textContent = p.left + '文' + p.right;
         nm.appendChild(sm);
         row.appendChild(nm);
+
+        const ops = document.createElement('span');
+        ops.className = 'ops';
+        const mkBtn = (text, on, title, fn, first) => {
+            const b = document.createElement('button');
+            b.type = 'button';
+            b.className = 'mini' + (on ? ' on' : '');
+            b.textContent = on ? (text + '（已加）') : text;
+            b.title = title;
+            b.addEventListener('click', fn);
+            ops.appendChild(b);
+            return b;
+        };
+        const onBar = barHas(sent);
+        const onGrid = gridHasAny(sent);
+        mkBtn(onBar ? '横条' : '加到横条', onBar,
+            onBar ? '已经在横条上了（点一下移除）' : '把这组符号单独放进横条',
+            () => {
+                toggleAddTo('bar', sent);
+                setTimeout(() => {
+                    const b = ops.firstChild;
+                    const on = barHas(sent);
+                    b.textContent = on ? '横条（已加）' : '加到横条';
+                    b.classList.toggle('on', on);
+                }, 260);
+            });
+        mkBtn(onGrid ? '网格页' : '加到网格页', onGrid,
+            onGrid ? '已经在网格页里了（点一下移除）' : '把这组符号单独放进网格页',
+            () => {
+                toggleAddTo('grid', sent);
+                setTimeout(() => {
+                    const b = ops.lastChild;
+                    const on = gridHasAny(sent);
+                    b.textContent = on ? '网格页（已加）' : '加到网格页';
+                    b.classList.toggle('on', on);
+                }, 260);
+            });
+        row.appendChild(ops);
         box.appendChild(row);
     }
     syncWrapButtons();

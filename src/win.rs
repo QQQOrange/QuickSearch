@@ -787,18 +787,35 @@ pub fn caret_pos() -> Option<POINT> {
 /// 判断口径刻意做得粗略：**不比对进程**。目标可能是浏览器、别的软件，
 /// 也可能是我们自己的 OCR / 翻译 / 识图窗口 —— 只要前台不再是这颗横条，
 /// 就说明确实有东西浮到前面来了。返回 false = 等到超时都没看见。
-pub fn wait_foreign_foreground(exclude: HWND, ms: u64) -> bool {
-    let start = std::time::Instant::now();
-    let limit = std::time::Duration::from_millis(ms.max(50));
-    loop {
-        let fg = unsafe { GetForegroundWindow() };
-        if !fg.0.is_null() && fg != exclude && unsafe { IsWindowVisible(fg).as_bool() } {
-            return true;
-        }
-        if start.elapsed() >= limit {
-            return false;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(40));
+/// 网格页"内容就绪"的判据（v2.11.0）——**单次采样**，不循环、不阻塞。
+///
+/// 为什么是"单次"：`wait_*` 那版在命令线程里循环轮询，实测把**它正在等的那个
+/// 窗口**堵住了 —— OCR 的区域窗是在主线程闭包里 build 的，而轮询占着同一条
+/// 线程，于是"等 2.6 秒超时 → 窗口这才 build 出来"，正好走进最坏情况
+/// （网格先收、内容后到，用户看到的就是闪一下没了）。改成前端每 70ms 问一次，
+/// 后端只做一次廉价判断，谁也不挡谁。
+///
+/// 判据：前台窗口可见、不是横条自己、归属符合 `kind`
+/// （`self` = 我们进程，`foreign` = 别的进程，其它 = 都算）。
+/// 返回命中的窗口句柄（0 = 现在还没有）。
+///
+/// ⚠ "稳定"由调用方保证：前端要求**连续两次同一个句柄**才算就绪，
+///   这样输入法候选窗、UAC 提示闪一下不会被当成目标。
+pub fn probe_target_foreground(exclude: HWND, kind: &str) -> isize {
+    let fg = unsafe { GetForegroundWindow() };
+    if fg.0.is_null() || fg == exclude || !unsafe { IsWindowVisible(fg).as_bool() } {
+        return 0;
+    }
+    let ours = window_pid(fg) == std::process::id();
+    let ok = match kind {
+        "self" => ours,
+        "foreign" => !ours,
+        _ => true,
+    };
+    if ok {
+        fg.0 as isize
+    } else {
+        0
     }
 }
 

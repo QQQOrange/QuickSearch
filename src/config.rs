@@ -130,6 +130,21 @@ pub fn is_text_sentinel(n: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// 是不是「单项包裹符号」哨兵（`@wrap:<key>`，v2.11.0）。
+///
+/// 和 [`is_text_sentinel`] 同一套口径：只认「前缀 + 冒号 + 非空 id」，
+/// **不校验 id 是否存在**。为什么不在配置层校验：
+///   · 符号表（12 组）在 `main.rs` 的 `WRAP_PAIRS` 里，配置层不认识它，
+///     抄一份过来必然分叉；
+///   · 更要命的是"校验通过才让存"会让**移出**也被拦 —— 用户就再也删不掉
+///     一条已经失效的哨兵（只能手改 config.json，和文档注释里那条教训一样）。
+/// 真伪由执行端负责：`wrap_text` 遇到不认识的 key 会返回「不认识的符号类型」。
+pub fn is_wrap_sentinel(n: &str) -> bool {
+    n.strip_prefix(BAR_WRAP)
+        .map(|rest| rest.starts_with(':') && rest.len() > 1)
+        .unwrap_or(false)
+}
+
 /// 用户自己加的搜索引擎。
 ///
 /// 只存「名字 + URL 模板 + 分类」几样东西。图标故意不放进这个结构 ——
@@ -620,6 +635,7 @@ fn is_bar_sentinel(n: &str) -> bool {
         || n == BAR_IMG
         || n == BAR_TRANS
         || n == BAR_WRAP
+        || is_wrap_sentinel(n)
         || is_text_sentinel(n)
         || is_app_sentinel(n)
         || is_fav_sentinel(n)
@@ -5899,6 +5915,32 @@ mod sanitize_tests {
         assert!(validate_app_url(&ok).is_ok(), "贴着上限的正当地址被误拦");
         let bad = format!("https://example.com/{}", "a".repeat(2048));
         assert!(validate_app_url(&bad).is_err(), "超过上限的地址必须拦下");
+    }
+
+    /// 单项包裹哨兵（`@wrap:<key>`）：和 `@txt:<op>` 同一套口径。
+    ///
+    /// 这一条守的是"用户加的单项包裹会不会被当成乱码剥掉"：
+    /// `bar_member_defined` / `open_bar_item` 两处都要认它，漏一处就表现为
+    /// 「设置里加上了、横条上没有」。
+    #[test]
+    fn wrap_sentinel_recognizes_pairs_only() {
+        // 12 组符号的 key 全部放行
+        for k in [
+            "double", "single", "corner", "title", "angle", "paren", "square",
+            "curly", "lenticular", "ascii_double", "ascii_single", "backtick",
+        ] {
+            let n = format!("@wrap:{k}");
+            assert!(is_wrap_sentinel(&n), "{n} 应该被认成单项包裹");
+            assert!(is_bar_sentinel(&n), "{n} 应该是合法的横条成员");
+        }
+        // 整颗「包裹符号」当然也合法
+        assert!(is_bar_sentinel(BAR_WRAP));
+        // 冒号后面是空的、只有前缀、别的哨兵都不算
+        for bad in ["@wrap", "@wrap:", "@wraptitle", "@txt:trim", "@ocr", "wrap:title"] {
+            assert!(!is_wrap_sentinel(bad), "{bad} 不该被认成单项包裹");
+        }
+        // 反过来：单项包裹不能被误认成文本处理（两者前缀不同，但这条要钉住）
+        assert!(!is_text_sentinel("@wrap:title"));
     }
 
     /// `clean_app` 是「新建引擎」表单的服务端关卡：名字（空/太长/撞分隔线

@@ -611,7 +611,25 @@ fn dismiss_bar_now() {
         }
     }
     if restore != 0 {
-        win::set_foreground(HWND(restore as *mut c_void));
+        /* v2.11.0：**别把刚打开的内容顶下去**。
+         *
+         * `restore` 是"横条抢走焦点之前那个窗口"。网格页点完一项后，目标窗口
+         * 往往已经在前台了 —— 这时再把 prev_fg 顶上来，用户看到的就是
+         * "点了浏览器，焦点又跳回记事本、浏览器沉到后面"，像是内容没出来。
+         * 所以只在"前台还是我们自己"时才回填；已经是别人了就撒手。
+         * （`wait_ready` 已经确认目标就绪，这一步只是别把它踹下去。） */
+        let fg = win::foreground_addr();
+        let fg_ours = fg == 0
+            || fg == h.0 as isize
+            || fg == restore
+            || win::window_pid(HWND(fg as *mut c_void)) == std::process::id();
+        if fg_ours {
+            win::set_foreground(HWND(restore as *mut c_void));
+        } else {
+            win::log(&format!(
+                "dismiss_bar: 前台已是目标窗口 0x{fg:x}，跳过焦点回填（不抢它的前台）"
+            ));
+        }
     }
     let _ = app().emit_to("bar", "qs://hidden", ());
 }
@@ -650,18 +668,24 @@ fn bar_hold(hold: bool, keep_open: Option<bool>) {
     dismiss_bar_now();
 }
 
-/// 等一个不是横条自己的前台窗口出现（最多 `ms` 毫秒）—— 网格页用它判断
-/// 「点开的东西到底显示出来了没有」。返回 false 表示等超时了。
+/// 「网格页点的那一项，内容真的显示出来了吗」—— v2.11.0 的**单次探测**。
+///
+/// `kind`：
+///   · `self`    —— 我们自己的窗口（文字识别 / 翻译 / 识图）；
+///   · `foreign` —— 别的进程的窗口（浏览器 / 外部软件）；
+///   · 其它      —— 任一。
+///
+/// 返回命中的窗口句柄（0 = 还没有）。**故意不做循环等待**：
+/// 以前在这里 `while` 轮询到超时，实测把"正在等的那个窗口"堵死了 ——
+/// OCR 的区域窗要在主线程闭包里 build，而轮询占着同一条线程，于是
+/// "等 2.6 秒超时 → 这才 build 出来"，正好是最坏的结果（网格先收、内容后到）。
+/// 现在前端每 70ms 问一次、要求连续两次同一个句柄才算就绪（过滤瞬时窗口），
+/// 后端只做一次廉价判断。
 #[crate::t::command]
-fn wait_raised(ms: Option<u32>) -> bool {
+fn probe_ready(kind: Option<String>) -> u64 {
     let h = bar_hwnd();
-    let got = win::wait_foreign_foreground(h, ms.unwrap_or(1500) as u64);
-    win::log(&format!(
-        "wait_raised: {}（{}ms 上限）",
-        if got { "目标已到前台" } else { "等超时" },
-        ms.unwrap_or(1500)
-    ));
-    got
+    let want = kind.unwrap_or_default();
+    win::probe_target_foreground(h, want.as_str()) as u64
 }
 
 /// 横条该落选中文字的哪一侧。返回 `(胶囊左上角 y, 方向名)`。
@@ -2329,12 +2353,27 @@ fn wrap_text(
     fresh: Option<bool>,
 ) -> Result<Value, String> {
     let (out, action) = wrap_apply(&text, &pair)?;
+    /* v2.11.0：**借了剪贴板要还**。
+     *
+     * 以前这里是 `clip::set_text(&out)` 然后直接 Ctrl+V 回写，用完就不管了 ——
+     * 用户原来复制的东西（可能是他刚拷的一段资料）被结果顶掉，且没有任何提示。
+     * 现在照识图那条链的范式来：
+     *   snapshot（先存）→ set_text（借）→ note_our_write（把我们这次写登记成基准）
+     *   → 回写成功后再 restore_if_unchanged（还）。
+     *
+     * ⚠ 回写**没成功**时不能还：结果只在这块剪贴板里，还回去等于把用户唯一能
+     *   手动 Ctrl+V 的东西也抹了。那种情况保持原样（并告诉用户结果已复制）。 */
+    let mut clip_keep = clip::snapshot();
     let copied = clip::set_text(&out);
+    if let Some(s) = clip_keep.as_mut() {
+        s.note_our_write();
+    }
     win::log(&format!(
-        "wrap: {} 用 {pair}，{} 字 → {} 字（复制={copied}）",
+        "wrap: {} 用 {pair}，{} 字 → {} 字（复制={copied} 已备份原剪贴板={}）",
         action,
         text.chars().count(),
-        out.chars().count()
+        out.chars().count(),
+        clip_keep.is_some()
     ));
     let mut applied = false;
     let mut note = String::new();
@@ -2346,6 +2385,19 @@ fn wrap_text(
                 win::log(&format!("wrap: 未回写 —— {note}"));
             }
         }
+    }
+    if apply.unwrap_or(false) {
+        /* 通知只在"真的用了"时发（和 OCR / 翻译 / 文本处理同一口径）。
+         * 文案带上具体是哪一组符号，否则"已使用：包裹符号"等于没说。 */
+        let pair_name = WRAP_PAIRS
+            .iter()
+            .find(|(k, ..)| *k == pair)
+            .map(|(_, _, _, n)| *n)
+            .unwrap_or(pair.as_str());
+        notify_feature_detail("包裹符号", &format!("包裹符号 · {pair_name}"));
+    }
+    if applied {
+        restore_clip_after_paste(clip_keep, "wrap");
     }
     Ok(json!({
         "text": out,
@@ -2535,7 +2587,14 @@ fn text_op(
     if apply.unwrap_or(false) {
         notify_feature(name);
     }
+    /* v2.11.0：和包裹符号同一条修法 —— 借剪贴板之前先备份，回写成功后还回去
+     * （见 `restore_clip_after_paste` 的长注释：为什么必须延迟、为什么用
+     *  restore_if_unchanged 而不是无条件覆盖）。 */
+    let mut clip_keep = clip::snapshot();
     let copied = clip::set_text(&out);
+    if let Some(s) = clip_keep.as_mut() {
+        s.note_our_write();
+    }
     let mut applied = false;
     let mut note = String::new();
     if apply.unwrap_or(false) {
@@ -2546,6 +2605,9 @@ fn text_op(
                 win::log(&format!("text_op({op}): 未回写 —— {note}"));
             }
         }
+    }
+    if applied {
+        restore_clip_after_paste(clip_keep, "text_op");
     }
     win::log(&format!(
         "text_op({op}) {name}: {} 字 → {} 字（复制={copied} 回写={applied}）",
@@ -2712,6 +2774,29 @@ fn wrap_paste_into_target(out: &str, prev: &str, fresh: bool) -> Result<(), Stri
         });
     }
     Ok(())
+}
+
+/// 把"借来的"剪贴板还回去 —— **只在结果已经写进目标软件之后**调用。
+///
+/// # 为什么必须延迟
+///
+/// `win::send_hotkey("ctrl+v")` 走的是 SendInput：投递是**异步**的，返回 true
+/// 只代表"按键已入队"。如果紧接着就 `EmptyClipboard` + 写回旧内容，目标程序
+/// 很可能还没读到剪贴板 —— 粘出来的是**用户原来的内容**，等于用旧剪贴板覆盖了
+/// 刚改好的正文（比不还原糟得多）。150ms 是实测够 RichEdit / 浏览器把一次粘贴
+/// 走完的时间；放后台线程里等，不占命令栈。
+///
+/// # 为什么用 `restore_if_unchanged`
+///
+/// 这 150ms 里用户完全可能自己又 Ctrl+C 了别的东西。那说明剪贴板已经属于他了，
+/// 我们不该再按自己的快照覆盖（见 `clip::restore_if_unchanged` 的注释）。
+fn restore_clip_after_paste(keep: Option<clip::Snapshot>, tag: &'static str) {
+    let Some(snap) = keep else { return };
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(150));
+        clip::restore_if_unchanged(&snap);
+        win::log(&format!("{tag}: 回写成功，已把原剪贴板还原回去"));
+    });
 }
 
 /* ---------------- 网格页：配置读写（设置页用） ---------------- */
@@ -3236,15 +3321,35 @@ fn start_foreground_sampler() {
     });
 }
 
-/// 右下角"正在使用什么功能"通知的节流表：`(上次的功能名, 时间)`。
+/// 右下角"正在使用什么功能"通知的节流表：`(节流键, 软件名, 上次时间)`。
 ///
-/// 为什么要节流：横条会因为**鼠标移动**被反复 `show_bar`（实测一次操作 6 次），
-/// 不节流的话右下角会连弹 6 条一模一样的通知 —— 那比没有通知更烦。
-/// 规则：**同一功能 4 秒内只提示一次**；换功能立刻提示（不同功能是不同信息）。
-/// = (功能, 软件, 上次时间)。v2.6.8 起节流口径是「同一软件里的同一功能」，
-/// 所以软件名也要记 —— 从记事本切到浏览器再用同一个功能，应该照常提示。
+/// 为什么要节流：同一个功能用户可能连着点（OCR 一次没框准再框一次、翻译来回翻），
+/// 每次都弹一条"已使用：文字识别"没有信息量，只有噪音。
+///
+/// 口径（v2.11.0 定稿）：**同一个功能 60 秒内只提示一次**，换功能立刻提示；
+/// 键是**功能名**，不含软件名 —— 从记事本切到浏览器再用同一个功能，**不再**
+/// 重新播报（v2.6.8~v2.10.0 是"同一软件里的同一功能"，实测在两个编辑器之间
+/// 来回用 OCR，每切一次就弹一次，用户嫌吵）。软件名只用于**文案**。
 static NOTIFY_LAST: std::sync::Mutex<(String, String, Option<std::time::Instant>)> =
     std::sync::Mutex::new((String::new(), String::new(), None));
+
+/// 同一功能的提示间隔（见 [`notify_allows`]）。
+const NOTIFY_GAP: Duration = Duration::from_secs(60);
+
+/// 该不该发这条提示 —— **纯判定**，方便单测。
+///
+/// `last` = 上次的（节流键, 距今多久）；`None` 表示还没提示过。
+/// 规则只有一条：键不同 → 发；键相同 → 必须隔满 [`NOTIFY_GAP`]。
+///
+/// 为什么单独拎出来测：这条规则历史上被改过三次（4 秒 → 10 秒 → 60 秒），
+/// 还改错过一次"换软件也算换功能"。"多弹一条 / 少弹一条"在真机上根本没法
+/// 稳定复现，只能靠这里的边界用例钉住。
+fn notify_allows(last: Option<(&str, Duration)>, key: &str) -> bool {
+    match last {
+        None => true,
+        Some((k, ago)) => k != key || ago >= NOTIFY_GAP,
+    }
+}
 
 /// 上一次用户真正在用的那个外部软件（进程名，已去掉 `.exe`）。
 fn last_use_app() -> String {
@@ -3260,19 +3365,23 @@ fn last_use_app() -> String {
 
 /// 在**屏幕右下角**提示"当前正在使用什么功能"。
 ///
-/// ## 触发时机（v2.10.0 收紧）
-/// 只在**用户真的用了一项功能**时弹：开始文字识别、开始翻译、开始识图搜索、
-/// 应用文本处理。被"已暂停 / 黑名单 / 功能已关闭"拦掉的不弹（那是没生效，
-/// 弹了反而误导）。
+/// ## 触发时机（v2.11.0 定稿）
+/// 只在**用户真的用了一项功能**时弹 —— 判定标准是"功能已经过了门禁、开始干活"：
+///   · 文字识别：`ocr_start_flow` 通过「未锁屏 / OCR 已开启」之后；
+///   · 翻译：`trans_start` 通过「未锁屏 / 翻译已开启」之后；
+///   · 识图搜索：`img_start` 通过「未锁屏 / 识图已开启」之后；
+///   · 文本处理：`text_op` 且 `apply = true`（真的改写了文字），只取结果不算；
+///   · 包裹符号：`wrap_text` 且 `apply = true`（v2.11.0 补上，和文本处理同类）。
+/// 被"已暂停 / 黑名单 / 功能已关闭 / 锁屏"拦掉的一律不弹 —— 那是没生效，弹了误导。
 ///
-/// ⚠ **划词横条弹出、网格页弹出不再提示**（v2.10.0）。用户原话：
+/// ⚠ **划词横条弹出、网格页弹出不提示**（v2.10.0 起）。用户原话：
 /// 「不要再针对每个应用中出现划词弹出横条的情况各发一次通知」——
-/// 这两个动作只是"唤出面板"，换个应用就弹一次，实际变成了"我在哪儿打字"的
-/// 播报，非常吵。真正有信息量的是"用了哪项功能"。
+/// 那两个动作只是"唤出面板"，换个应用就弹一次，实际变成"我在哪儿打字"的播报。
 ///
 /// ## 展示内容
-/// 标题固定 `Quick Search`，正文 = `已使用：<功能名>`（拿得到当前软件时
-/// 追加 ` · <软件名>`）。
+/// 标题固定 `Quick Search`，正文 = `已使用：<功能名>`（拿得到当前软件时追加
+/// ` · <软件名>`）。包裹符号这种"功能 + 参数"的，功能名里带上那一组符号
+/// （`包裹符号 · 书名号`），让用户一眼看出刚才干了什么。
 ///
 /// ## 展示方式（v2.6.8 改）
 /// 不再用托盘的系统气泡（`Shell_NotifyIconW` 的 `NIF_INFO`）：那是系统通知，
@@ -3280,12 +3389,24 @@ fn last_use_app() -> String {
 /// **应用自己画的右下角小窗**（见 `toast.rs` / `ui/toast.html`），
 /// 显示秒数由 设置 → 通用 的「显示时长」决定（`notify_seconds`）。
 ///
-/// ## 频率（v2.10.0）
-/// 同一**功能** 60 秒内只提示一次（`NOTIFY_LAST`），**不再按软件分桶** ——
-/// 以前是"同一软件里的同一功能 10 秒一次"，于是在两个编辑器之间来回切着用 OCR，
-/// 每切一次就弹一次。现在不同功能各算各的：OCR 一次、翻译一次，互不影响；
-/// 同一个功能连着用，一分钟内只有第一条会提示。
+/// ## 频率（v2.11.0）
+/// 同一**功能** 60 秒内只提示一次（判定见 [`notify_allows`]），**不按软件分桶**：
+/// 同一个功能在两个软件之间来回用，一分钟内也只提示第一条；不同功能各算各的
+/// （OCR 一次、翻译一次，互不影响）。总开关 `notify_feature` 关掉就一条都不弹。
 fn notify_feature(feature: &str) {
+    notify_show(feature, feature);
+}
+
+/// 同上，但**节流键**与**显示名**分开。
+///
+/// 用在"功能 + 参数"的场合（包裹符号）：节流按功能算（换一组符号不该重新弹），
+/// 文案里却要带上具体那一组（`包裹符号 · 书名号`）。
+fn notify_feature_detail(key: &str, show: &str) {
+    notify_show(key, show);
+}
+
+/// 通知的唯一出口：判开关 → 判节流 → 拼文案 → 交给 toast 小窗。
+fn notify_show(key: &str, show: &str) {
     if !cfg_with(|c| c.notify_feature) {
         return;
     }
@@ -3298,18 +3419,16 @@ fn notify_feature(feature: &str) {
             Ok(g) => g,
             Err(pe) => pe.into_inner(),
         };
-        if let Some(at) = g.2 {
-            // 只比功能名，不再比软件名：换应用不该触发新一轮播报
-            if g.0 == feature && now.duration_since(at) < Duration::from_secs(60) {
-                return;
-            }
+        let allow = notify_allows(g.2.map(|at| (g.0.as_str(), now.duration_since(at))), key);
+        if !allow {
+            return;
         }
-        *g = (feature.to_string(), app.clone(), Some(now));
+        *g = (key.to_string(), app.clone(), Some(now));
     }
     let text = if app.is_empty() {
-        format!("已使用：{feature}")
+        format!("已使用：{show}")
     } else {
-        format!("已使用：{feature} · {app}")
+        format!("已使用：{show} · {app}")
     };
     win::log(&format!("notify: {text}（{secs}s）"));
     if let Some(a) = APP.get() {
@@ -4347,9 +4466,10 @@ fn show_bar_at(
     sel: Option<(i32, i32, i32, i32)>,
 ) -> usize {
     let t0 = std::time::Instant::now();
-    /* 这次是"网格页"还是"文字横条"？在载荷把 GRID_PENDING 吃掉之前先看一眼 ——
-     * 右下角通知要按它说清"刚才用的是哪个功能"（见函数末尾的 notify_feature）。 */
-    let is_grid_show = GRID_PENDING.load(Ordering::SeqCst);
+    /* v2.11.0：这里原来有一个 `let is_grid_show = GRID_PENDING.load(..)`，
+     * 只被函数末尾一个**空的** `if !is_grid_show { }` 用着 —— 那是 v2.10.0
+     * 删掉"横条/网格页一弹出就播报"之后留下的壳。通知现在只在用户**真的用了**
+     * 某功能时发（见 notify_feature），这里不再需要区分弹的是哪块面板。 */
     /* v1.5.13：锁屏期间横条一律不弹。
      *
      * 这是所有弹出路径的**唯一汇合点**（划词钩子 / Ctrl+C / 托盘 / 收藏夹热键
@@ -4597,11 +4717,11 @@ fn show_bar_at(
             },
         }),
     );
-    /* 右下角提示"正在使用：划词搜索 · 记事本"。
-     * 网格页那一路已经在 `show_grid` 里报过"网格页"，这里跳过，避免一次操作两条通知。 */
-    if !is_grid_show {
-
-    }
+    /* v2.11.0：删掉这里那段空的 `if !is_grid_show { }` 与它的注释。
+     * 横条/网格页**弹出**不再播报（v2.10.0 的决定，用户原话：「不要再针对每个
+     * 应用中出现划词弹出横条的情况各发一次通知」）—— 播报点现在全在"功能真的
+     * 跑起来"那一侧：`ocr_start_flow` / `trans_start` / `img_start` / `text_op`
+     * / `wrap_text`，见 `notify_feature` 的文档。 */
     win::log(&format!(
         "show_bar: 前置合计 {}ms → 已发事件，等前端量尺寸",
         t0.elapsed().as_millis()
@@ -15151,6 +15271,7 @@ fn toggle_bar_engine_impl(cfg: &mut Config, engine: &str, on: bool) {
         && engine != config::BAR_IMG
         && engine != config::BAR_TRANS
         && engine != config::BAR_WRAP
+        && !config::is_wrap_sentinel(engine)
         && !config::is_text_sentinel(engine)
         && !config::is_fav_sentinel(engine)
         && !config::is_app_sentinel(engine)
@@ -18864,7 +18985,7 @@ fn main() {
             move_bar_item,
             bar_hold,
             text_op,
-            wait_raised,
+            probe_ready,
             add_separator,
             remove_separator,
             remove_bar_ocr,
@@ -19622,6 +19743,46 @@ mod tests {
         let t = "参考 https://example.com/a 和 www.test.org/b ，还有 index.html 不是链接。";
         assert_eq!(engines::extract_links(t).len(), 2);
         assert!(engines::extract_links("这是一句话，没有任何网址。").is_empty());
+    }
+
+    /* ---------------- 通知节流（v2.11.0） ---------------- */
+
+    /// 通知口径的**边界**：同一个功能 60 秒一条，换功能立刻发。
+    ///
+    /// 这条规则历史上改过三次（4 秒 / 10 秒 / 60 秒），还改错过一次
+    /// "换软件也算换功能"。多弹/少弹在真机上没法稳定复现，只能靠这里钉住。
+    #[test]
+    fn notify_gap_is_per_feature_and_exactly_sixty_seconds() {
+        let gap = NOTIFY_GAP;
+        assert_eq!(gap, Duration::from_secs(60), "间隔就是 60 秒，别偷偷改");
+        // 没提示过 → 当然要发
+        assert!(notify_allows(None, "文字识别"));
+        // 同一个功能：59.9 秒内不发，正好 60 秒开始发
+        assert!(!notify_allows(
+            Some(("文字识别", Duration::from_millis(59_900))),
+            "文字识别"
+        ));
+        assert!(!notify_allows(
+            Some(("文字识别", gap - Duration::from_millis(1))),
+            "文字识别"
+        ), "差 1ms 到 60 秒也不发 —— 边界是「>= 60s」而不是「> 59s」");
+        assert!(notify_allows(Some(("文字识别", gap)), "文字识别"));
+        // 换功能立刻发（不同功能是不同信息，不该被上一个功能压住）
+        assert!(notify_allows(
+            Some(("文字识别", Duration::from_secs(1))),
+            "翻译"
+        ));
+        // 包裹符号同理：整颗与某一组各自独立（节流键都归到"包裹符号"，
+        // 所以换一组符号**不该**重新弹 —— 见 notify_feature_detail 的用法）
+        assert!(!notify_allows(
+            Some(("包裹符号", Duration::from_secs(5))),
+            "包裹符号"
+        ));
+        // 时间倒退（系统时间被改过）不能 panic，按"没到间隔"处理
+        assert!(!notify_allows(
+            Some(("包裹符号", Duration::from_secs(0))),
+            "包裹符号"
+        ));
     }
 
     /* ---------------- 需求 5/7：OCR 文本整理 ---------------- */

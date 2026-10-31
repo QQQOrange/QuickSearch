@@ -176,6 +176,13 @@ window.qsDisplayName = function (name) {
         const meta = window.qsTextOpMeta(bound.id);
         return meta ? meta.label : ('文本处理 · ' + bound.id);
     }
+    if (bound && bound.kind === 'wrap') {
+        /* 单项包裹：和 @txt:<op> 一个口径 —— 只显示那一组符号的名字（「书名号」），
+         * 不写"包裹符号 · 书名号"（格子小，一挤就成省略号）。
+         * 符号表还没到就退回 key，绝不把 `@wrap:title` 原样糊到界面上。 */
+        const meta = window.qsWrapPairMeta(bound.id);
+        return meta ? meta.name : ('包裹符号 · ' + bound.id);
+    }
     if (bound) {
         const baseLabel = window.qsDisplayName('@' + bound.kind);
         const model = window.qsModelName(bound.kind, bound.id);
@@ -239,6 +246,51 @@ window.qsGoBySentinel = function (name) {
 
 /** 包裹符号在横条/网格里的哨兵名。 */
 window.QS_WRAP = '@wrap';
+
+/* ---------------- 包裹符号的「单项」（v2.11.0） ----------------
+ *
+ * `@wrap:<key>` 和 `@wrap` 的关系，等于 `@txt:trim` 和 `@txt`：
+ *   · `@wrap`        —— 点开 12 组符号的菜单（老行为，一格全包）；
+ *   · `@wrap:title`  —— 这一格只管「书名号」，点一下直接套上/拆掉并回写。
+ *
+ * 为什么要有：用户要求「包裹符号中的每一项单独配置到横条或网格页」——
+ * 常用的人只想摆一颗「书名号」，不想每次都先点开菜单再挑。
+ *
+ * ⚠ 符号表**不在 JS 里另抄一份**（后端 `wrap_pairs` 是唯一来源）。这里只缓存
+ *   `key → {left,right,name}`，用来出显示名；缓存没到之前，显示名退回
+ *   `包裹符号 · <key>` —— 只影响标签那一瞬间，不影响功能。
+ */
+window.QS_WRAP_PAIRS = window.QS_WRAP_PAIRS || {};
+/** `@wrap:title` → `'title'`；不是单项包裹就返回 null。 */
+window.qsWrapPairId = function (name) {
+    if (typeof name !== 'string') return null;
+    const p = window.QS_WRAP + ':';
+    if (!name.startsWith(p)) return null;
+    const id = name.slice(p.length).trim();
+    return id || null;
+};
+/** key → 那一组符号的信息（缓存没到 / 不认识的 key 返回 null）。 */
+window.qsWrapPairMeta = function (id) {
+    return (id && window.QS_WRAP_PAIRS[id]) || null;
+};
+/** 把后端 `wrap_pairs` 的结果登记进来（横条与设置页各拉一次，幂等）。 */
+window.qsRegWrapPairs = function (list) {
+    if (!Array.isArray(list)) return;
+    for (const p of list) {
+        if (p && p.key) window.QS_WRAP_PAIRS[p.key] = p;
+    }
+};
+/** 符号表首次需要时自己拉一次（页面没主动登记时兜底）。 */
+window.qsWrapLoad = async function () {
+    if (window.QS_WRAP_LOADED) return window.QS_WRAP_PAIRS;
+    window.QS_WRAP_LOADED = true;
+    try {
+        if (typeof invoke === 'function') {
+            window.qsRegWrapPairs(await invoke('wrap_pairs'));
+        }
+    } catch (_) { /* 拿不到就继续用 key 当名字，不阻断任何操作 */ }
+    return window.QS_WRAP_PAIRS;
+};
 
 /* ---------------- 文本处理（v2.10.0） ---------------- */
 
@@ -336,7 +388,9 @@ window.qsTextIconNode = function (opId) {
  * 三处（横条 / 网格预览 / 设置列表）都要能认这种名字，所以解析放在 shared.js。 */
 window.qsFuncBound = function (name) {
     if (typeof name !== 'string') return null;
-    const m = /^@(ocr|img|trans|txt):(.+)$/.exec(name.trim());
+    /* v2.11.0：`wrap` 也进这张表 —— `@wrap:title` 的 base 是 `@wrap`，
+     * 图标 / 分发 / 显示名都要靠这条归一（和 @txt:trim 完全同构）。 */
+    const m = /^@(ocr|img|trans|txt|wrap):(.+)$/.exec(name.trim());
     return m ? { kind: m[1], id: m[2] } : null;
 };
 
@@ -373,20 +427,26 @@ window.qsFuncIcon = function (name) {
     if (name === window.QS_TRANS && window.qsTransIconNode) {
         return window.qsTransIconNode();
     }
-    // 识图：直接复用横条那颗按钮里的 SVG（同一张图，不用再画一遍）
+    /* 识图：走 qsImgIconNode（用户指定的「识图键.png」+ 换过图标优先）。
+     *
+     * ⚠ v2.11.0 修的真 bug：这里原来是 `document.getElementById('btnImg')`
+     *   clone 那颗按钮里的内联 SVG。两个问题：
+     *     ① 那颗按钮里的图是 **v1.5.19 之前的旧四角框**，默认图早已换成
+     *        「识图键.png」—— 横条上的 @img 格子与固定位按钮长得不一样，
+     *        用户说"识图图标来源不明"；
+     *     ② 设置页 / 网格预览里**根本没有** #btnImg，clone 出来是 null，
+     *        直接掉到函数末尾那个「•」兜底（一格黑点）。 */
     if (name === window.QS_IMG) {
+        if (window.qsImgIconNode) return window.qsImgIconNode();
         const src = document.getElementById('btnImg');
         const svg = src && src.querySelector('svg');
         if (svg) return svg.cloneNode(true);
     }
     if (name === window.QS_OCR) {
-        // OCR 在横条上就是一枚字母徽标，这里保持一致
-        const sp = document.createElement('span');
-        sp.className = 'letter';
-        sp.textContent = 'OCR';
-        sp.style.setProperty('--lt-color', '#B45309');
-        sp.style.fontSize = '8px';
-        return sp;
+        /* 统一走 qsOcrIconNode：横条上那枚「OCR」徽标（.qs-ocr-tag，accent 色
+         * 9.5px）。以前这里另画一枚 .letter 字母方块（8px/#B45309），
+         * 于是同一个 OCR 在横条和网格/设置里两副样子。 */
+        if (window.qsOcrIconNode) return window.qsOcrIconNode();
     }
     if (name === window.QS_TEXT) {
         /* 文本处理：所有 op 共用一张"带横线的纸"，具体是哪一件看格子标签。
@@ -394,19 +454,12 @@ window.qsFuncIcon = function (name) {
         return window.qsTextIconNode(window.qsTextOpId(rawName) || '');
     }
     if (name === window.QS_WRAP) {
-        /* ⚠ 尺寸必须写在**内联样式**里，不能指望各页面的 CSS：
-         *   `.pickic > svg` / `.qs-gicon > svg` 都只认**直接子节点**，而这里
-         *   外面套了一层 span（要和 .letter 那类徽标保持同一种返回形态）。
-         *   以前没写尺寸，结果包裹图标在横条、网格、设置选板里全是 0×0 ——
-         *   按钮在、点得动，但看起来像一格空白（用户只会说"按钮不显示"）。 */
-        const sp = document.createElement('span');
-        sp.style.cssText = 'display:block;width:100%;height:100%';
-        sp.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"'
-            + ' stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"'
-            + ' style="display:block;width:100%;height:100%">'
-            + '<path d="M9.5 4.5H6.5v15h3M14.5 4.5h3v15h-3"/></svg>';
-        return sp;
+        /* 单项（`@wrap:title`）与整颗（`@wrap`）共用同一张图 —— 和 @txt:<op>
+         * 一个口径：图标表达"这是一件包裹符号的事"，具体是哪一组由格子标签说。
+         * 尺寸等细节见 qsWrapIconNode 的注释（内联写死，别指望各页 CSS）。 */
+        if (window.qsWrapIconNode) return window.qsWrapIconNode();
     }
+    /* 最后兜底：一个点。绝不返回空节点 —— 空白格比丑图标更像"坏了"。 */
     const sp = document.createElement('span');
     sp.textContent = '•';
     return sp;
@@ -571,6 +624,82 @@ window.qsTransIconNode = function () {
     span.textContent = '译';
     span.setAttribute('data-i18n-skip', '');
     return span;
+};
+
+/* ------------------------------------------------------------------ */
+/* OCR 按钮（@ocr）的图标                                              */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 横条上那枚「OCR」徽标 —— **横条 / 网格 / 网格预览 / 设置列表四处共用**。
+ *
+ * 为什么要收成一份（v2.11.0）：以前横条画 `.qs-ocr-tag`（accent 色、9.5px，
+ * 见 bar.css），而 `qsFuncIcon('@ocr')` 另画一枚 `.letter` 字母方块
+ * （8px、`#B45309`）—— 同一个「文字识别」在横条和网格里两副样子，用户问
+ * "文本识别的图标是不是用错了"。现在只有这一份。
+ *
+ * 优先级：用户换过的图（`overrideIcons['@ocr']`）→ 文字标。
+ */
+window.qsOcrIconNode = function () {
+    const conf = window.CONF || {};
+    const custom = conf.overrideIcons ? conf.overrideIcons[window.QS_OCR] : null;
+    if (custom) {
+        const img = document.createElement('img');
+        img.src = custom;
+        img.alt = '';
+        img.draggable = false;
+        if (window.qsApplyOpticalScale) {
+            window.qsApplyOpticalScale(img, conf.unifyIcons !== false);
+        }
+        return img;
+    }
+    const sp = document.createElement('span');
+    /* 两个 class 都带上：横条页认 .qs-ocr-tag、设置页认 .ocr-tag，
+     * 两个页面各引各的 css，兜底徽标在哪儿都得有样式（同 qsTransIconNode）。 */
+    sp.className = 'qs-ocr-tag ocr-tag';
+    sp.textContent = 'OCR';
+    sp.setAttribute('data-i18n-skip', '');
+    return sp;
+};
+
+/* ------------------------------------------------------------------ */
+/* 包裹符号（@wrap）的图标                                             */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 包裹符号的图标：**一对包角 + 中间一行字**，表达"把这段文字套起来"。
+ *
+ * 为什么换掉老图（v2.11.0）：老的是一对 `[` `]` 括号（`M9.5 4.5H6.5v15h3…`），
+ * 在 12~24px 下几乎就是两个竖条，和「链接 / 附件」那类图标在小尺寸里分不开
+ * （设置页子导航里原本还用 🧷 别针，更像附件）。现在中间加一条文字线，
+ * 语义变成"文字被符号包住"，不会再被认成链接。
+ *
+ * ⚠ 尺寸必须写在**内联样式**里，不能指望各页面的 CSS：
+ *   `.pickic > svg` / `.qs-gicon > svg` 都只认**直接子节点**，而这里外面套了
+ *   一层 span（要和 .letter 那类徽标保持同一种返回形态）。以前没写尺寸，
+ *   包裹图标在横条、网格、选板里全是 0×0 —— 按钮在、点得动，看着像空白格。
+ */
+window.qsWrapIconNode = function () {
+    const conf = window.CONF || {};
+    const custom = conf.overrideIcons ? conf.overrideIcons[window.QS_WRAP] : null;
+    if (custom) {
+        const img = document.createElement('img');
+        img.src = custom;
+        img.alt = '';
+        img.draggable = false;
+        if (window.qsApplyOpticalScale) {
+            window.qsApplyOpticalScale(img, conf.unifyIcons !== false);
+        }
+        return img;
+    }
+    const sp = document.createElement('span');
+    sp.style.cssText = 'display:block;width:100%;height:100%';
+    sp.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"'
+        + ' stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"'
+        + ' style="display:block;width:100%;height:100%">'
+        + '<path d="M8.2 6.2H5.4v11.6h2.8M15.8 6.2h2.8v11.6h-2.8"/>'
+        + '<path d="M9.9 12h4.2" opacity=".75"/></svg>';
+    return sp;
 };
 
 /* ------------------------------------------------------------------ */

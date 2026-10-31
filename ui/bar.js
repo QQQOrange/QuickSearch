@@ -786,6 +786,9 @@ function barList() {
         // v1.5.16：翻译（@trans）同理。
         if (n === QS_SEP || n === QS_OCR || n === window.QS_IMG
             || n === window.QS_TRANS || n === window.QS_WRAP) return true;
+        /* 单项包裹（`@wrap:<key>`，v2.11.0）：和 @txt:<op> 一样是一等成员。
+         * 不认这里的话，用户刚在设置里加的书名号会被"必须是认识的名字"筛掉。 */
+        if (typeof n === 'string' && window.qsWrapPairId && window.qsWrapPairId(n)) return true;
         if (typeof n === 'string' && n.startsWith(QS_FAV_PREFIX)) {
             return !!favGroupBySentinel(n);
         }
@@ -1169,6 +1172,34 @@ function renderBar(force) {
         }
         /* 包裹符号（@wrap）：和 @trans 同一套地位 —— bar_list 成员、可拖可移出，
          * 点下去打开包裹菜单。设置 → 附加功能 → 包裹符号 里可以加进横条。 */
+        const wrapKeyOf = window.qsWrapPairId ? window.qsWrapPairId(name) : null;
+        if (wrapKeyOf) {
+            /* 单项包裹（`@wrap:title`，v2.11.0）：这一格**只管一组符号**，
+             * 点一下直接套上/拆掉并回写，不再弹 12 组菜单 —— 用户要的是
+             * "常用的那一组就摆一颗，别每次都先点开挑"。 */
+            const wm = window.qsWrapPairMeta ? window.qsWrapPairMeta(wrapKeyOf) : null;
+            if (!wm && window.qsWrapLoad) {
+                /* 符号表还没登记（用户刚在设置里加上、还没打开过包裹菜单）：
+                 * 拉一次再重画，tooltip 才显示「《 》」而不是 key。
+                 * ⚠ 只有真的拿到了才重画 —— 拉失败就放着，否则会自己叫自己重画
+                 *   不停（qsWrapLoad 失败后也标记已加载，meta 仍然是空）。 */
+                window.qsWrapLoad().then(() => {
+                    if (window.qsWrapPairMeta && window.qsWrapPairMeta(wrapKeyOf)) renderBar(true);
+                }).catch(() => { });
+            }
+            const b = document.createElement('button');
+            b.className = 'ico engine qs-wrap-inbar';
+            b.title = '包裹符号：套成 ' + (wm ? wm.left + ' ' + wm.right + '（' + wm.name + '）' : wrapKeyOf);
+            b.dataset.engine = name;
+            b.appendChild(window.qsFuncIcon(name));
+            b.addEventListener('click', (e) => {
+                e.stopPropagation();
+                applyWrapPair(name);
+            });
+            enginesEl.appendChild(b);
+            engines++;
+            continue;
+        }
         if (name === window.QS_WRAP) {
             const b = document.createElement('button');
             b.className = 'ico engine qs-wrap-inbar';
@@ -2692,6 +2723,9 @@ async function renderWrapGrid() {
             wrapPairsCache = [];
         }
     }
+    /* 登记给 shared.js：横条上 `@wrap:<key>` 那一格的 tooltip / 显示名要靠它。
+     * （设置页也会登记一次；两边幂等。） */
+    if (window.qsRegWrapPairs) window.qsRegWrapPairs(wrapPairsCache);
     grid.textContent = '';
     for (const p of wrapPairsCache) {
         const b = document.createElement('button');
@@ -2720,12 +2754,15 @@ let wrapBusy = false;
 let wrapQueued = null;
 
 async function applyWrap(key) {
-    if (wrapBusy) { wrapQueued = key; return; }
+    /* 排队中的第二次点击直接返回"还没做完"—— 网格页的闸门据此保留面板，
+     * 而不是当成成功立刻收掉。 */
+    if (wrapBusy) { wrapQueued = key; return { applied: false, queued: true, note: '上一次还在写' }; }
     wrapBusy = true;
+    let last = { applied: false, note: '' };
     try {
         let k = key;
         for (;;) {
-            await applyWrapOnce(k);
+            last = (await applyWrapOnce(k)) || last;
             if (wrapQueued == null) break;
             k = wrapQueued;
             wrapQueued = null;
@@ -2734,13 +2771,17 @@ async function applyWrap(key) {
         wrapBusy = false;
         wrapQueued = null;
     }
+    return last;
 }
 
-/** 真正干活的那一下（排队逻辑见上面的 applyWrap）。 */
+/** 真正干活的那一下（排队逻辑见上面的 applyWrap）。
+ *
+ *  返回值统一成 `{ applied, note }`：`applied` 才代表"结果真的写进了目标软件"，
+ *  网格页的关闭闸门靠它判断该收还是该留（以前返回 undefined，闸门无从判断）。 */
 async function applyWrapOnce(key) {
     if (!wrapBase || !wrapBase.trim()) {
         showBarTip('先选中一段文字，再来包符号');
-        return;
+        return { applied: false, note: '没有选中文字' };
     }
     try {
         /* apply = 直接把结果输入回原来那个软件（用户要求"不用手动粘贴"）。
@@ -2776,12 +2817,43 @@ async function applyWrapOnce(key) {
         /* 结果变长/变短后菜单可能多一行或少一行 —— 重新量一次，
          * 不然窗口还按上一次的高度算，新多出来那行会被裁在窗口外面。 */
         pushLayout();
+        return { applied: !!r.applied, copied: !!r.copied, note: r.note || '' };
     } catch (e) {
         showBarTip(String(e || '操作失败'));
+        return { applied: false, note: String((e && e.message) || e || '操作失败') };
     }
 }
 
 if ($('btnWrapClose')) $('btnWrapClose').addEventListener('click', closeWrapMenu);
+
+/** 单项包裹格子（`@wrap:<key>`，v2.11.0）点下去：直接把这段文字套成那一组，
+ *  **不弹菜单**。
+ *
+ *  走的是和菜单里点某一组完全相同的那条路（`applyWrap` → `applyWrapOnce`），
+ *  所以排队防并发、回写、失败退回复制、提示文案全都不用再写第二份。
+ *
+ *  返回 `{ applied, note }`：横条上点它 → 写回成功就收条；网格页点它 → 交给
+ *  `gridOpenThenClose` 判断（写回成功才等目标窗口，失败留网格重试）。
+ *
+ *  ⚠ fresh 通过 `wrapPasted = false` 固定成 true：这类格子是一次性动作
+ *    （点完就收），没有"同一轮里换一组"的上下文，所以每次都按"替换当前选区"来做。 */
+async function applyWrapPair(name) {
+    const key = window.qsWrapPairId ? window.qsWrapPairId(name) : null;
+    if (!key) return { applied: false, note: '不认识的符号' };
+    if (!currentText || !currentText.trim()) {
+        showBarTip('先选中一段文字，再来包符号');
+        return { applied: false, note: '没有选中文字' };
+    }
+    wrapBase = currentText;
+    wrapOrigin = currentText;
+    wrapPasted = false;
+    const r = await applyWrap(key);
+    /* 只在**真的写进目标软件**之后才收条；失败留着让用户看见提示并重试。
+     * 网格页那条路会先 hold 住，所以这里的 hide_bar 只记成 pending，
+     * 由闸门在 wait_ready 之后统一放行 —— 两处行为一致。 */
+    if (r && r.applied) invoke('hide_bar').catch(() => { });
+    return r || { applied: false, note: '' };
+}
 
 /** 「打开这个网址」按钮显不显示。口径与 `syncPathBtn` 一致。
  *
@@ -3310,7 +3382,7 @@ async function loadGridModels() {
     }
 }
 
-/** 网格页点完一项后的**统一关闭闸门**（v2.10.0）。
+/** 网格页点完一项后的**统一关闭闸门**（v2.10.0 起，v2.11.0 覆盖到所有格子）。
  *
  *  用户口径：「点击网格页中的任意一项内容后，需等到该项内容真正完成渲染并
  *  显示时，网格页必须立即自动关闭…避免过早关闭导致内容未显示或出现闪烁；
@@ -3318,22 +3390,65 @@ async function loadGridModels() {
  *
  *  做法分三步：
  *    ① 先把后端的 `dismiss_bar` **挂起**（`bar_hold(true)`）—— 命令里那些
- *       "先收起横条再拉起浏览器"的老逻辑就收不动了，网格不会提前消失；
- *    ② 跑真正的动作，等它返回：命令报错 = 没打开成功 → 解除挂起但**保留**
- *       横条（`keepOpen`），顺手弹一句提示，用户可以换一项再点；
- *    ③ 成功之后调 `wait_raised`，等"不是横条自己的前台窗口"出现
- *       （浏览器 / 别的软件 / 我们自己的 OCR、翻译窗口都算），最多 2 秒；
- *       看到了就立刻解除挂起（后端补一次收起），超时也收 —— 不把横条钉死。
+ *       "先收起横条再拉起浏览器"、以及格子自己调的 `hide_bar` 就收不动了，
+ *       只会记成 pending，网格不会提前消失；
+ *    ② 跑真正的动作，等它返回：命令报错 / 没写回 = 没成功 → 解除挂起但
+ *       **保留**横条（`keepOpen`），弹一句提示，用户可以换一项再点；
+ *    ③ 成功之后调 `wait_ready`，等"该出现的那类窗口"稳定到前台：
+ *       `self` = 我们自己的窗口（OCR / 翻译 / 识图）、`foreign` = 浏览器/外部软件；
+ *       判据里带"连续两帧同一窗口"，过滤输入法候选窗这类瞬时窗口。
+ *       看到了立刻解除挂起（后端补一次收起），超时也收 —— 绝不把网格钉在屏幕上。
  *
- *  ⚠ 这个闸门只给"打开外部内容"的格子用。包裹符号 / 收藏夹的产物**就在横条
- *    里**（菜单、面板），走闸门会被当成"目标没出现"，反而把内容一起收掉。
+ *  ⚠ **内容就在横条里**的格子（收藏夹面板、包裹符号菜单）不走闸门：
+ *    它们的产物是横条自己的一部分，收了就什么都没了。这类调用点显式不调用本函数。
+ *
+ *  返回的 Promise 在"闸门彻底放开"后 resolve，方便串行验证。
  */
 let gridOpening = false;
 
-async function gridOpenThenClose(run, label) {
+/** 各类目标愿意等多久（毫秒）。超时后照收 —— 目标迟早会自己出来，
+ *  但网格不该无限期占着屏幕。自绘窗口（self）有 `show_after_ready` 兜底，
+ *  给 2.6 秒足够；外部软件冷启动慢一些，给 3.2 秒。 */
+const GRID_READY_MS = { self: 2600, foreign: 3200, any: 3200 };
+
+/** 等目标内容就绪：每 70ms 问一次后端 `probe_ready`，**连续两次同一个窗口**
+ *  才算数（过滤输入法候选窗、UAC 提示这类一闪而过的窗口）。超时返回 false。
+ *
+ *  为什么在前端轮询、而不是让后端 `while` 等（v2.11.0 踩过的坑）：
+ *  后端在命令里循环会把它**正在等的那个窗口**的创建堵住 —— OCR 的区域窗要在
+ *  主线程闭包里 build，轮询占着同一条线程，于是"等满 2.6 秒超时、窗口这才
+ *  出现"，正好是最坏的结果（网格先收、内容后到）。 */
+async function waitReady(kind, ms) {
+    const t0 = Date.now();
+    let last = 0;
+    let hits = 0;
+    while (Date.now() - t0 < ms) {
+        let hwnd = 0;
+        try {
+            hwnd = await invoke('probe_ready', { kind }) || 0;
+        } catch (_) {
+            return true;        // 命令不可用：别把网格钉死，按"已就绪"处理
+        }
+        if (hwnd && hwnd === last) {
+            hits += 1;
+            if (hits >= 2) return true;
+        } else {
+            last = hwnd;
+            hits = hwnd ? 1 : 0;
+        }
+        await new Promise((r) => setTimeout(r, 70));
+    }
+    return false;
+}
+
+async function gridOpenThenClose(run, label, opts) {
     if (gridOpening) return;            // 连点只认第一下
     gridOpening = true;
+    const o = opts || {};
+    const ready = o.ready || 'foreign';
+    const ms = o.ms || GRID_READY_MS[ready] || 3200;
     let released = false;
+    let keepOpen = false;
     try {
         try { await invoke('bar_hold', { hold: true }); } catch (_) { }
         let err = null;
@@ -3344,21 +3459,24 @@ async function gridOpenThenClose(run, label) {
         }
         if (err) {
             // 没打开成功：把"待收"撤掉，网格留在原处让用户重试
+            keepOpen = true;
             try { await invoke('bar_hold', { hold: false, keepOpen: true }); } catch (_) { }
             released = true;
             const why = String((err && err.message) || err || '').slice(0, 60);
             showBarTip((label ? label + '：' : '') + '没打开成功' + (why ? '（' + why + '）' : ''));
             return;
         }
-        let raised = true;
-        try { raised = await invoke('wait_raised', { ms: 2000 }); } catch (_) { raised = true; }
-        if (!raised) win_log('网格：等了 2 秒没看到目标窗口，仍然收起（可能被系统/浏览器抢了前台）');
+        let got = true;
+        try { got = await waitReady(ready, ms); } catch (_) { got = true; }
+        if (!got) {
+            win_log('网格：' + (label || '') + ' 等了 ' + ms + 'ms 没看到目标窗口，仍然收起（可能被系统抢了前台）');
+        }
         try { await invoke('bar_hold', { hold: false }); } catch (_) { }
         released = true;
     } finally {
         if (!released) {
             // 兜底：中途抛了异常也要把闸门放开，否则后端会挂 20 秒才自解锁
-            invoke('bar_hold', { hold: false }).catch(() => { });
+            invoke('bar_hold', { hold: false, keepOpen }).catch(() => { });
         }
         gridOpening = false;
     }
@@ -3383,22 +3501,37 @@ function runGridFunc(key) {
     const bound = window.qsFuncBound ? window.qsFuncBound(key) : null;
     const base = bound ? ('@' + bound.kind) : key;
     if (base === '@ocr') {
-        gridOpenThenClose(() => invoke('ocr_start', bound ? { engine: bound.id } : {}), '文字识别');
+        // OCR / 识图 / 翻译的产物是**我们自己的窗口**，等 self 那一类
+        gridOpenThenClose(() => invoke('ocr_start', bound ? { engine: bound.id } : {}), '文字识别', { ready: 'self' });
         return;
     }
     if (base === '@img') {
-        gridOpenThenClose(() => invoke('img_start'), '识图搜索');
+        gridOpenThenClose(() => invoke('img_start'), '识图搜索', { ready: 'self' });
         return;
     }
     if (base === '@trans') {
         // 没文字也照发（后端会开一个空翻译窗让用户自己粘贴），与横条一致
         gridOpenThenClose(
             () => invoke('trans_start', { text: t || null, engine: bound ? bound.id : null }),
-            '翻译');
+            '翻译', { ready: 'self' });
         return;
     }
     if (base === '@wrap') {
-        openWrapMenu();
+        /* v2.11.0：绑定到某一组符号的格子（`@wrap:title`）点下去**直接套用**，
+         * 和 @txt:<op> 一致；没绑定的整颗 `@wrap` 才弹 12 组菜单。
+         *
+         * 单项包裹的"内容"落在**目标软件那段文字里**，所以走闸门、等 foreign
+         * （粘贴完焦点已经还给它了，一看到它在前台就收）；没写回就留网格重试。
+         * 整颗的产物是横条自己的菜单 —— 收了菜单就没了，所以不关闭。 */
+        if (bound) {
+            const meta = window.qsWrapPairMeta ? window.qsWrapPairMeta(bound.id) : null;
+            gridOpenThenClose(async () => {
+                const r = await applyWrapPair(key);
+                if (!r || !r.applied) throw new Error((r && r.note) || '没能写回目标软件');
+            }, (meta && meta.name) || '包裹符号', { ready: 'foreign' });
+        } else {
+            openWrapMenu();
+        }
         return;
     }
     if (base === '@txt') {
@@ -3407,18 +3540,16 @@ function runGridFunc(key) {
         const meta = window.qsTextOpMeta ? window.qsTextOpMeta(opId) : null;
         const name = (meta && meta.label) || '文本处理';
         /* 文本处理的结果落在**目标软件原来那段文字上**（后端退格 + 粘贴，
-         * 和包裹符号同一条写回通道），所以不像"打开网页"那样需要等窗口 ——
-         * 写完就收，失败就留在网格里让用户重试。 */
-        invoke('text_op', { op: opId, text: t || null, apply: true })
-            .then(() => {
-                showBarTip(name + ' 已应用');
-                // 前端能调的收起命令是 `hide_bar`（`dismiss_bar` 只在后端内部用）
-                invoke('hide_bar').catch(() => { });
-            })
-            .catch((e) => {
-                const why = String((e && e.message) || e || '').slice(0, 50);
-                showBarTip(name + (!t ? '：先选中一段文字' : '：' + why));
-            });
+         * 和包裹符号同一条写回通道），所以等的是 foreign：写回成功、焦点回到
+         * 那个软件之后才收；失败就留在网格里让用户重试。
+         * v2.11.0 之前这里是"命令一返回就 hide_bar"，粘贴还没落地网格就没了。 */
+        gridOpenThenClose(async () => {
+            const r = await invoke('text_op', { op: opId, text: t || null, apply: true });
+            if (!r || r.applied !== true) {
+                throw new Error(!t ? '先选中一段文字' : ((r && r.note) || '没能写回目标软件'));
+            }
+            showBarTip(name + ' 已应用');
+        }, name, { ready: 'foreign' });
     }
 }
 
