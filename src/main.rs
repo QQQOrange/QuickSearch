@@ -12117,6 +12117,251 @@ fn ocr_cancel() {
     close_window("region");
 }
 
+/* ================================================================== */
+/* v2.12.0：二维码解析                                                  */
+/*                                                                     */
+/* 交互刻意做成和 OCR **一模一样**（冻屏 → 框选 → 结果窗 → 处理动作），   */
+/* 所以这里只复用现成的三段：`open_region_window_mode`（遮罩）、           */
+/* `win::grab_region`（裁图）、`show_after_ready`（首帧后再显示）。        */
+/* 解码本身放在页面里（ui/vendor/jsqr.min.js）：离线、纯前端、换库不动 Rust。 */
+/* ================================================================== */
+
+/// 最近一次框选的二维码截图（PNG 字节）。
+///
+/// 存字节而不是 base64：只有真要发给前端时才编一次，免得每次事件重编一遍。
+static QR_LAST_PNG: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+
+/// 打开二维码结果窗（先隐藏，等页面 `qr_ready` 再显示）。
+///
+/// 规矩和 OCR 结果窗完全一致，连"2.5 秒兜底显示"都一样 —— 页面脚本万一报错，
+/// 也不能让用户点完框选之后什么窗口都等不到。
+fn open_qr_window() {
+    let a = app();
+    if let Some(w) = a.get_webview_window("qr") {
+        let _ = w.show();
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+        /* 已经开着：不重建窗口，只让页面按新图再解一次（「重新框选」走这条）。 */
+        let _ = a.emit_to("qr", "qs://qr-result", json!({}));
+        return;
+    }
+    let a2 = a.clone();
+    /* ⚠ 建窗必须脱开命令调用栈（和 open_ocr_window 同一个坑）：
+     *   同步命令跑在主线程上，`run_on_main_thread` 在主线程是**当场内联**执行的，
+     *   于是 `build()` 跑在 invoke 的栈里 → 死锁。 */
+    std::thread::spawn(move || {
+        let a4 = a2.clone();
+        let _ = a2.run_on_main_thread(move || {
+            let mut b = WebviewWindowBuilder::new(&a4, "qr", WebviewUrl::App("qr.html".into()))
+                .title("二维码解析 —— Quick Search")
+                .inner_size(760.0, 600.0)
+                .min_inner_size(560.0, 420.0)
+                .resizable(true)
+                .center()
+                .visible(false)
+                // 和 qr.html 的 --bg 对齐（浅 #F5F6F8 / 深 #17181C），
+                // 免得"白底页面 + 黑框"这种突兀组合
+                .background_color(if win::apps_use_light_theme().unwrap_or(true) {
+                    crate::t::window::Color(245, 246, 248, 255)
+                } else {
+                    crate::t::window::Color(23, 24, 28, 255)
+                });
+            let wa = wv_args();
+            if !wa.is_empty() {
+                b = b.additional_browser_args(&wa);
+            }
+            match b.build() {
+                Ok(w) => {
+                    win::log("qr win: built (hidden, 等页面 ready)");
+                    let w2 = w.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(Duration::from_millis(2500));
+                        if !w2.is_visible().unwrap_or(false) {
+                            win::log("qr win: ready 超时，兜底显示");
+                            let _ = w2.show();
+                            let _ = w2.set_focus();
+                        }
+                    });
+                }
+                Err(e) => win::log(&format!("qr win: build failed: {e}")),
+            }
+        });
+    });
+}
+
+/// 入口（横条按钮 / 网格格子 / 设置页「试一下」共用）。
+///
+/// 和 `ocr_start` 一样立刻返回、把活交给后台线程：热键连发时不能把命令栈占住。
+#[crate::t::command]
+fn qr_start() {
+    std::thread::spawn(qr_start_flow);
+}
+
+fn qr_start_flow() {
+    if app_locked() {
+        focus_lock_window();
+        return;
+    }
+    notify_feature("二维码解析");
+    // 遮罩用和 OCR 同一个窗口，只是 mode 不同 —— 冻屏、拖框、Esc 取消、
+    // 6 秒看门狗、失焦兜底这些交互全部原样复用。
+    open_region_window_mode("qr");
+}
+
+/// 框选完成：裁图 → 存 → 开结果窗。
+///
+/// 参数语义与 `ocr_region` 完全一致（CSS 坐标 + dpr，物理像素在这里换算）。
+#[crate::t::command]
+fn qr_region(x: f64, y: f64, w: f64, h: f64, dpr: f64) {
+    if !(x.is_finite() && y.is_finite() && w.is_finite() && h.is_finite()) {
+        win::log(&format!("qr_region: 非法坐标 x={x} y={y} w={w} h={h}，已退出框选"));
+        close_window("region");
+        return;
+    }
+    let d = if dpr.is_finite() && dpr > 0.0 { dpr } else { 1.0 };
+    let (vx, vy, _, _) = win::virtual_screen();
+    let px = vx + (x * d).round() as i32;
+    let py = vy + (y * d).round() as i32;
+    let pw = ((w * d).round() as i32).max(1);
+    let ph = ((h * d).round() as i32).max(1);
+    win::log(&format!(
+        "qr_region css=({x:.0},{y:.0},{w:.0},{h:.0}) dpr={d} -> phys=({px},{py},{pw},{ph})"
+    ));
+
+    // 先收遮罩再截图，否则那层压暗会一起被截进去（OCR 那边同样的顺序）
+    close_window("region");
+
+    std::thread::spawn(move || {
+        win::wait_until(1200, || app().get_webview_window("region").is_none());
+        std::thread::sleep(Duration::from_millis(50));
+
+        let Some((cw, ch, pixels)) = win::grab_region(px, py, pw, ph) else {
+            win::log("qr: 截图失败");
+            return;
+        };
+        let Some(img) = image::RgbaImage::from_raw(cw, ch, pixels) else {
+            win::log("qr: 像素数据异常");
+            return;
+        };
+        let mut cur = std::io::Cursor::new(Vec::new());
+        if image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut cur, image::ImageFormat::Png)
+            .is_err()
+        {
+            win::log("qr: PNG 编码失败");
+            return;
+        }
+        let png = cur.into_inner();
+        if let Ok(mut g) = QR_LAST_PNG.lock() {
+            *g = png;
+        }
+        win::log(&format!("qr: 已裁图 {cw}x{ch}，打开结果窗"));
+        open_qr_window();
+    });
+}
+
+/// 结果窗首帧画完了 —— 现在可以显示（和 `ocr_ready` 同一条理由）。
+#[crate::t::command]
+fn qr_ready() {
+    show_after_ready("qr");
+}
+
+/// 取最近一次裁的图（`data:image/png;base64,…`）。没图就回空串。
+///
+/// 和 OCR 一样是「推 + 拉」双通道里的「拉」：页面 boot 之后主动来拿一次，
+/// 就不会因为错过推送而只能等用户再框一遍。
+#[crate::t::command]
+fn qr_take_image() -> String {
+    QR_LAST_PNG
+        .lock()
+        .map(|g| {
+            if g.is_empty() {
+                String::new()
+            } else {
+                ocr_image_data_url(&g)
+            }
+        })
+        .unwrap_or_default()
+}
+
+#[crate::t::command]
+fn close_qr_window() {
+    if let Ok(mut g) = QR_LAST_PNG.lock() {
+        g.clear();
+    }
+    close_window("qr");
+}
+
+/// 「重新框选」：把遮罩再拉起来。结果窗留着，拿到新图后自动重解。
+#[crate::t::command]
+fn qr_restart() {
+    std::thread::spawn(qr_start_flow);
+}
+
+/// 打开解出来的链接。
+#[crate::t::command]
+fn qr_open(text: String) {
+    let raw = text.trim().to_string();
+    if raw.is_empty() {
+        return;
+    }
+    /* 二维码里经常是 `www.xxx.com/a` 这种没写协议的写法，直接交给系统会当本地
+     * 路径打开（甚至弹"找不到文件"）。这里补一次 https，其余原样交给系统。 */
+    let url = if raw.contains("://")
+        || raw.starts_with("mailto:")
+        || raw.starts_with("tel:")
+        || raw.starts_with("weixin:")
+        || raw.to_ascii_lowercase().starts_with("alipay")
+    {
+        raw.clone()
+    } else {
+        format!("https://{raw}")
+    };
+    win::log(&format!(
+        "qr: 打开 {}",
+        url.chars().take(160).collect::<String>()
+    ));
+    std::thread::spawn(move || {
+        if let Err(e) = open::that(&url) {
+            win::log(&format!("qr: 打开失败 {e}"));
+        }
+    });
+}
+
+/// 把二维码内容丢进搜索引擎（默认百度）。
+///
+/// 不走「自定义引擎」那套：这里是"内容不是链接"时的兜底动作，用一条固定、
+/// 一定打得开的地址最稳，不依赖用户那边配了什么。
+#[crate::t::command]
+fn qr_search(text: String) {
+    let q = text.trim().to_string();
+    if q.is_empty() {
+        return;
+    }
+    let url = format!("https://www.baidu.com/s?wd={}", qr_percent_encode(&q));
+    win::log(&format!("qr: 搜索 {}", q.chars().take(80).collect::<String>()));
+    std::thread::spawn(move || {
+        let _ = open::that(url);
+    });
+}
+
+/// 只做 URL 组件用的百分号编码（空格转 %20，保留 `-_.~` 与非 ASCII 的 UTF-8 字节）。
+fn qr_percent_encode(s: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut out = String::with_capacity(s.len() * 3);
+    for b in s.as_bytes() {
+        let c = *b as char;
+        if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~') {
+            out.push(c);
+        } else {
+            out.push('%');
+            out.push(HEX[(b >> 4) as usize] as char);
+            out.push(HEX[(b & 0x0F) as usize] as char);
+        }
+    }
+    out
+}
+
 /// 「识别结果」窗口的首帧画完了 —— 现在可以安全地把它显示出来。
 ///
 /// 为什么要等这一下：`open_ocr_window` 是建完窗就 `hidden` 的，为的是不让用户
@@ -15644,6 +15889,10 @@ fn toggle_bar_engine_impl(cfg: &mut Config, engine: &str, on: bool) {
         && engine != config::BAR_IMG
         && engine != config::BAR_TRANS
         && engine != config::BAR_WRAP
+        /* v2.12.0：二维码解析（@qr）也是"能被摆进横条的一等成员"——
+         * 少了这一行，设置页点「加到横条」会在后端被当成不认识的引擎拒掉，
+         * 表现是"点了没反应、列表也不变"。 */
+        && engine != config::BAR_QR
         && !config::is_wrap_sentinel(engine)
         && !config::is_text_sentinel(engine)
         && !config::is_fav_sentinel(engine)
@@ -19333,6 +19582,15 @@ fn main() {
             ocr_warm,
             ocr_region,
             ocr_cancel,
+            /* v2.12.0：二维码解析（交互与 OCR 同一套） */
+            qr_start,
+            qr_region,
+            qr_ready,
+            qr_take_image,
+            qr_restart,
+            qr_open,
+            qr_search,
+            close_qr_window,
             region_beat,
             ocr_ready,
             // v1.5.16：翻译

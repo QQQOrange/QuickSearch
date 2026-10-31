@@ -785,7 +785,10 @@ function barList() {
         // r72：识图（@img）也是一等成员了，别被后面那条"必须是认识的名字"筛掉。
         // v1.5.16：翻译（@trans）同理。
         if (n === QS_SEP || n === QS_OCR || n === window.QS_IMG
-            || n === window.QS_TRANS || n === window.QS_WRAP) return true;
+            || n === window.QS_TRANS || n === window.QS_WRAP
+            /* v2.12.0：二维码解析（@qr）和上面几颗一样，是横条上的一等成员 ——
+             * 不认这里的话，用户刚加进横条的那格会被"必须是认识的名字"筛掉。 */
+            || n === window.QS_QR) return true;
         /* 单项包裹（`@wrap:<key>`，v2.11.0）：和 @txt:<op> 一样是一等成员。
          * 不认这里的话，用户刚在设置里加的书名号会被"必须是认识的名字"筛掉。 */
         if (typeof n === 'string' && window.qsWrapPairId && window.qsWrapPairId(n)) return true;
@@ -1096,6 +1099,18 @@ function renderBar(force) {
             b.dataset.ocr = '1';
             // 图标走 ocrIconNode：换过就显示那张图，没换就是 OCR 徽标
             b.appendChild(ocrIconNode());
+            enginesEl.appendChild(b);
+            engines++;
+            continue;
+        }
+        /* v2.12.0：二维码解析（@qr）。和 @ocr 一样按 bar_list 的顺序画进引擎区，
+         * 位置/拖拽/移出全由这张表决定；点击走 data-qr 那条分支。 */
+        if (name === window.QS_QR) {
+            const b = document.createElement('button');
+            b.className = 'ico engine qs-qr-inbar';
+            b.title = '解析图片里的二维码（先框选，再出链接）';
+            b.dataset.qr = '1';
+            b.appendChild(window.qsQrIconNode ? window.qsQrIconNode() : document.createTextNode('▦'));
             enginesEl.appendChild(b);
             engines++;
             continue;
@@ -2593,6 +2608,10 @@ barEl.addEventListener('click', (e) => {
         invoke('ocr_start').catch(() => {});
         return;
     }
+    if (btn.dataset.qr === '1') {
+        invoke('qr_start').catch(() => {});
+        return;
+    }
     if (btn.classList.contains('engine')) {
         // ⚠ 还要看 dataset.engine：收藏夹格子（qs-fav-inbar）和外部软件格子
         // （qs-app-inbar）也带 engine 类，但它们的 click 各自处理（弹面板 /
@@ -3348,6 +3367,9 @@ const GRID_SENTINELS = {
     /* 文本处理：具体是哪一件看名字里的 op（`@txt:trim`），标签走 qsDisplayName，
      * 这里只作为"基础哨兵"参与分支判断（和 @ocr:<id> 同一套路）。 */
     '@txt': { label: '文本处理' },
+    /* v2.12.0：二维码解析。点击走 qr_start（先冻屏框选、再出结果窗），
+     * 和 @ocr 一条路 —— 用户要求"入口配置方式和交互与 OCR 一致"。 */
+    '@qr': { label: '二维码解析' },
 };
 
 /** 三类「模型」：文字识别 / 识图 / 翻译各自的引擎清单。
@@ -3505,6 +3527,12 @@ function runGridFunc(key) {
         gridOpenThenClose(() => invoke('ocr_start', bound ? { engine: bound.id } : {}), '文字识别', { ready: 'self' });
         return;
     }
+    if (base === '@qr') {
+        /* 和 OCR 同一条路：先开全屏遮罩冻屏 → 框选 → 结果窗。产物是我们
+         * 自己的窗口，所以等 self（窗口 ready 之后才收网格）。 */
+        gridOpenThenClose(() => invoke('qr_start'), '二维码解析', { ready: 'self' });
+        return;
+    }
     if (base === '@img') {
         gridOpenThenClose(() => invoke('img_start'), '识图搜索', { ready: 'self' });
         return;
@@ -3633,7 +3661,7 @@ function gridPickSections() {
 
     /* ① 软件内置功能 */
     const builtin = [];
-    for (const key of ['@ocr', '@trans', '@img', '@wrap']) {
+    for (const key of ['@ocr', '@trans', '@img', '@qr', '@wrap']) {
         const meta = GRID_SENTINELS[key];
         if (!meta) continue;
         builtin.push({

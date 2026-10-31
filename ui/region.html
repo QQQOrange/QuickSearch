@@ -104,7 +104,10 @@ jlog('page script start, tauri=' + hasTauri + ' dpr=' + (window.devicePixelRatio
 const MODE = (function () {
     try {
         const m = /[?&]mode=([a-z]+)/.exec(window.location.search || '');
-        return (m && m[1] === 'img') ? 'img' : 'ocr';
+        const v = m && m[1];
+        /* v2.12.0：三种用途（ocr / img / qr）。以前这里只认 img，其余一律当 ocr，
+         * 于是 `?mode=qr` 会被悄悄降级成 OCR —— 框完弹出的是文字识别窗。 */
+        return (v === 'img' || v === 'qr') ? v : 'ocr';
     } catch (_) { return 'ocr'; }   // 解析不出来就当 OCR（老行为）
 })();
 jlog('mode=' + MODE);
@@ -273,7 +276,10 @@ document.addEventListener('mouseup', (e) => {
     stopBeat();
     /* r54：按用途分流到 img_region（识图）或 ocr_region（OCR）。
      * 两条命令收同一组坐标（css 坐标 + dpr，物理像素换算在 Rust 侧）。 */
-    const cmd = MODE === 'img' ? 'img_region' : 'ocr_region';
+    /* r54：img_region（识图） / ocr_region（OCR） / qr_region（二维码解析）。
+     * 三条命令收同一组坐标；v2.12.0 起二维码复用这套遮罩，交互一个像素都没变。 */
+    const cmd = MODE === 'img' ? 'img_region'
+        : (MODE === 'qr' ? 'qr_region' : 'ocr_region');
     jlog('mouseup -> ' + cmd + ' ' + JSON.stringify(r));
     // 交给 Rust 去算物理像素：那边知道虚拟屏原点，也知道 dpr
     invoke(cmd, {
@@ -284,7 +290,8 @@ document.addEventListener('mouseup', (e) => {
         dpr: window.devicePixelRatio || 1
     }).catch((e) => {
         jlog(cmd + ' invoke failed: ' + ((e && e.message) || e));
-        bail(MODE === 'img' ? '识图没能开始，已退出框选' : '识别没能开始，已退出框选');
+        bail(MODE === 'img' ? '识图没能开始，已退出框选'
+            : (MODE === 'qr' ? '二维码解析没能开始，已退出框选' : '识别没能开始，已退出框选'));
     });
 
     // 看门狗：正常情况下 Rust 收到命令会立刻关掉这个窗口，页面随之销毁，

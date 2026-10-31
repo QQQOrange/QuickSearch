@@ -327,6 +327,8 @@ function renderSubnavIcons() {
             else if (sub === 'wrap' && window.qsWrapIconNode) node = window.qsWrapIconNode();
             else if (sub === 'txt' && window.qsTextIconNode) node = window.qsTextIconNode('');
             else if (sub === 'matte') node = matteNavIconNode();
+            /* v2.12.0：二维码解析的图标与横条/网格同一份（qsQrIconNode）。 */
+            else if (sub === 'qr' && window.qsQrIconNode) node = window.qsQrIconNode();
         } catch (_) { node = null; }
         if (!node) node = document.createTextNode(EMOJI[sub] || '•');
         box.appendChild(node);
@@ -353,7 +355,7 @@ function bindTabs() {
 const TAB_GROUPS = {
     extras: {
         nav: 'extras',
-        subs: ['ai', 'go', 'matte', 'ocr', 'trans', 'imgsearch', 'fav', 'wrap', 'txt'],
+        subs: ['ai', 'go', 'matte', 'ocr', 'trans', 'imgsearch', 'fav', 'wrap', 'txt', 'qr'],
         def: 'ai',
     },
     data: { nav: 'datanav', subs: ['data', 'backup'], def: 'data' },
@@ -436,6 +438,8 @@ function afterShow(pane) {
     if (pane === 'about') updInit();
     // 直达页：切进来就重画一次（设置页刚打开时那次渲染可能早于配置到达）
     if (pane === 'go') renderGoList();
+    // 二维码解析：两颗「加到哪」的按钮要按当前 barList / gridItems 画状态
+    if (pane === 'qr') renderQrEntry();
     // 包裹符号页：把 12 组符号画出来（同时也是"它能加到哪里"的说明）
     if (pane === 'wrap') renderWrapPane();
     // 文本处理页：按注册表画出功能清单（每行两颗"放到哪里"按钮）
@@ -11663,6 +11667,50 @@ async function removeFromGrid(name) {
 }
 
 /** 一键切换：在就移除、不在就加。`target` = 'bar' | 'grid'。 */
+/** 「二维码解析」页里那两颗入口按钮：加进横条 / 加进网格页。
+ *
+ *  和「智能直达」每行那两颗是同一套语义（`toggleAddTo`），只是这里把它提到
+ *  功能页里 —— 用户不必先去横条外观 / 网格页设置里自己拼名字。
+ *  再次点击就是移除，按钮文案跟着当前状态走，不做"隐藏式切换"。 */
+function renderQrEntry() {
+    const box = $('qrEntryRow');
+    if (!box) return;
+    const sent = window.QS_QR || '@qr';
+    box.textContent = '';
+    const mk = (label, title, on, fn) => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'btn' + (on ? ' on' : '');
+        b.textContent = label;
+        b.title = title;
+        b.addEventListener('click', fn);
+        return b;
+    };
+    const inBar = barHas(sent);
+    const inGrid = gridHas(sent);
+    box.appendChild(mk(
+        inBar ? '− 从横条移除' : '＋ 加到横条',
+        inBar ? '从横条工具栏上移除这一格' : '固定到横条工具栏（点那一格就开始框选）',
+        inBar,
+        () => toggleAddTo('bar', sent),
+    ));
+    box.appendChild(mk(
+        inGrid ? '− 从网格页移除' : '＋ 加到网格页',
+        inGrid ? '从网格页里移除这一格' : '往网格页加一格，点它就开始框选',
+        inGrid,
+        () => toggleAddTo('grid', sent),
+    ));
+    const hint = $('qrEntryHint');
+    if (hint) {
+        hint.textContent = inBar || inGrid
+            ? (inBar ? '横条上已经有这一格了' : '')
+              + (inBar && inGrid ? '，' : '')
+              + (inGrid ? '网格页里也加好了' : '')
+              + ' —— 点它就会冻住画面等你框选。'
+            : '加进横条之后，点那一格就能开始框选；加进网格页同理。';
+    }
+}
+
 async function toggleAddTo(target, name) {
     try {
         if (target === 'bar') {
@@ -11673,6 +11721,7 @@ async function toggleAddTo(target, name) {
         try { renderGridItems(); } catch (_) { }
         try { renderGoList(); } catch (_) { }
         try { syncWrapButtons(); } catch (_) { }
+        try { renderQrEntry(); } catch (_) { }
         pushGridPreview();
     } catch (e) {
         alert(String(e || '操作失败'));

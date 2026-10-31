@@ -116,6 +116,12 @@ pub const BAR_TRANS: &str = "@trans";
 /// 和 `@ocr` / `@trans` 同一套待遇。
 pub const BAR_WRAP: &str = "@wrap";
 
+/// v2.12.0：二维码解析哨兵（前端 `window.QS_QR` 必须与之一致）。
+///
+/// 和 `BAR_OCR` / `BAR_IMG` 完全同一套机制：能进 `bar_list`、能进网格页、
+/// 能换图标、能被移出。点击由前端分发到 `qr_start`。
+pub const BAR_QR: &str = "@qr";
+
 /// 文本处理的前缀：具体功能写在冒号后面（`@txt:trim` / `@txt:case:upper`…）。
 ///
 /// 为什么不做成 `@txt` 一颗 + 设置里再选是哪一件：用户明确要求
@@ -635,6 +641,7 @@ fn is_bar_sentinel(n: &str) -> bool {
         || n == BAR_IMG
         || n == BAR_TRANS
         || n == BAR_WRAP
+        || n == BAR_QR
         || is_wrap_sentinel(n)
         || is_text_sentinel(n)
         || is_app_sentinel(n)

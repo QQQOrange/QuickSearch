@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="color-scheme" content="light dark">
+<title>二维码解析</title>
+<link rel="stylesheet" href="theme.css">
+<style>
+/* 二维码解析结果页：和 ocr.html 同一套骨架（顶部状态条 + 主体 + 底部动作），
+ * 只是主体从"文本框"换成"二维码截图 + 解出来的内容"。 */
+* { box-sizing: border-box; }
+
+html, body {
+    margin: 0;
+    height: 100%;
+    background: var(--bg);
+    color: var(--fg);
+    font: 13px/1.55 "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+body { display: flex; flex-direction: column; overflow: hidden; }
+
+/* ---------------------------------- 顶部 ---------------------------------- */
+.top {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    background: var(--card);
+    border-bottom: 1px solid var(--line);
+}
+.badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 700;
+    color: #0E7490;
+    background: rgba(14, 116, 144, .10);
+}
+.badge.err { color: var(--danger); background: rgba(229, 72, 77, .10); }
+.badge.ok { color: var(--ok); background: var(--ok-bg); }
+.note { color: var(--fg-dim); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ---------------------------------- 主体 ---------------------------------- */
+.main {
+    flex: 1 1 auto;
+    display: flex;
+    gap: 12px;
+    padding: 12px;
+    min-height: 0;
+}
+.shot {
+    flex: 0 0 208px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+.shot-box {
+    flex: 1 1 auto;
+    min-height: 120px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-md);
+    background:
+        linear-gradient(45deg, var(--hover) 25%, transparent 25%) 0 0/12px 12px,
+        linear-gradient(-45deg, var(--hover) 25%, transparent 25%) 0 6px/12px 12px,
+        var(--card);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+}
+.shot-box img { max-width: 100%; max-height: 100%; display: block; image-rendering: pixelated; }
+.shot-cap { color: var(--fg-dim); font-size: 11.5px; text-align: center; }
+
+.result {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+.row { display: flex; align-items: center; gap: 8px; }
+.kind {
+    font-size: 11.5px;
+    font-weight: 700;
+    color: var(--fg-dim);
+    letter-spacing: .02em;
+}
+textarea {
+    flex: 1 1 auto;
+    min-height: 96px;
+    resize: none;
+    padding: 10px 12px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-md);
+    background: var(--card);
+    color: var(--fg);
+    font: 13px/1.6 "Consolas", "Microsoft YaHei", monospace;
+    outline: none;
+    user-select: text;
+    -webkit-user-select: text;
+    word-break: break-all;
+}
+textarea:focus { border-color: var(--accent); }
+textarea::placeholder { color: var(--fg-dim); }
+
+.empty {
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    padding: 18px;
+    border: 1px dashed var(--line);
+    border-radius: var(--radius-md);
+    color: var(--fg-dim);
+    text-align: center;
+}
+.empty b { color: var(--fg); font-size: 13.5px; }
+.empty ul { margin: 4px 0 0; padding-left: 18px; text-align: left; font-size: 12px; line-height: 1.7; }
+
+/* ---------------------------------- 底部 ---------------------------------- */
+.actions {
+    flex: none;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+    background: var(--card);
+    border-top: 1px solid var(--line);
+}
+.spacer { flex: 1 1 auto; }
+button {
+    appearance: none;
+    border: 1px solid var(--line);
+    background: var(--card);
+    color: var(--fg);
+    font: inherit;
+    padding: 6px 12px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition: background .12s var(--ease), border-color .12s var(--ease), transform .06s var(--ease);
+}
+button:hover { background: var(--hover); }
+button:active { transform: translateY(.5px); }
+button.primary {
+    border-color: transparent;
+    background: var(--accent);
+    color: #fff;
+    font-weight: 600;
+}
+button.primary:hover { filter: brightness(1.05); }
+button.ghost { border-color: transparent; color: var(--fg-dim); }
+button.ghost:hover { color: var(--fg); }
+button:disabled { opacity: .45; cursor: default; }
+button:disabled:hover { background: var(--card); }
+</style>
+</head>
+<body>
+
+<div class="top">
+    <span class="badge" id="badge">识别中…</span>
+    <span class="note" id="note"></span>
+</div>
+
+<div class="main">
+    <div class="shot">
+        <div class="shot-box"><img id="shot" alt=""></div>
+        <div class="shot-cap" id="shotCap">框选区域</div>
+    </div>
+    <div class="result">
+        <div class="row">
+            <span class="kind" id="kind">解析结果</span>
+            <span class="spacer"></span>
+        </div>
+        <textarea id="text" spellcheck="false" placeholder="还没解析出内容"></textarea>
+        <div class="empty" id="empty" hidden>
+            <b>没认出二维码</b>
+            <div id="emptyWhy">常见原因：二维码太小、画面模糊、被遮挡，或者这块区域里根本没有二维码。</div>
+            <ul>
+                <li>把二维码放大后再框一次</li>
+                <li>避开反光、阴影和动态模糊</li>
+                <li>框选范围尽量贴紧二维码四周</li>
+            </ul>
+        </div>
+    </div>
+</div>
+
+<div class="actions">
+    <button type="button" class="primary" id="btnOpen">在浏览器打开</button>
+    <button type="button" id="btnCopy">复制链接</button>
+    <button type="button" id="btnSearch">搜索这段内容</button>
+    <span class="spacer"></span>
+    <button type="button" id="btnAgain">重新框选</button>
+    <button type="button" class="ghost" id="btnClose">关闭</button>
+</div>
+
+<script src="vendor/jsqr.min.js"></script>
+<script>
+/* IPC 兼容层：这个窗口和 region.html / ocr.html 一样，`__TAURI__` 是宿主注入的
+ * 全局对象。缺了它就直接给个永远 reject 的桩 —— 绝不能在这里抛错，
+ * 一抛错后面整段脚本都不执行，用户看到的就是"窗口空白、点什么都没反应"。 */
+const _core = window.__TAURI__ && window.__TAURI__.core ? window.__TAURI__.core : null;
+const _evt = window.__TAURI__ && window.__TAURI__.event ? window.__TAURI__.event : null;
+const invoke = _core ? _core.invoke : () => Promise.reject(new Error('tauri global missing'));
+/* ⚠ event.listen 挂在 `__TAURI__.event` 上，**不在 `.core` 里** —— 拿错层级的
+ * 结果就是"监听永远挂不上"：「重新框选」之后页面仍显示上一张图的结果（实测踩到）。 */
+const listen = _evt && typeof _evt.listen === 'function' ? _evt.listen : null;
+window.addEventListener('error', (e) => {
+    try { invoke('log_msg', { msg: '[qr] JS ERROR: ' + e.message + ' @' + e.lineno }); } catch (_) { }
+});
+</script>
+<script>
+/* ------------------------------------------------------------------ */
+/* 二维码解析结果页                                                     */
+/*                                                                     */
+/* 分工：Rust 只负责"框选 → 裁图 → 把 PNG 递过来"，解码全在页面里用     */
+/* jsQR 做（离线、不联网、不依赖任何 OCR 引擎）。这样换识别库 / 加纠错   */
+/* 策略都不用动 Rust，也不给主进程塞一个 C 解码器的维护成本。           */
+/* ------------------------------------------------------------------ */
+const $ = (id) => document.getElementById(id);
+
+let QR_TEXT = '';        // 解出来的内容
+let QR_IS_URL = false;   // 是不是一个能直接打开的链接
+
+/** 后端偶尔会晚一步把图准备好（建窗和裁图是两个线程），拉不到就重试几次。 */
+async function takeImage(tries) {
+    for (let i = 0; i < (tries || 12); i++) {
+        try {
+            const s = await invoke('qr_take_image');
+            if (s && typeof s === 'string' && s.length > 32) return s;
+        } catch (_) { /* 还没好，继续等 */ }
+        await new Promise((r) => setTimeout(r, 120));
+    }
+    return '';
+}
+
+function setBadge(text, cls) {
+    const b = $('badge');
+    b.textContent = text;
+    b.className = 'badge' + (cls ? ' ' + cls : '');
+}
+
+function looksLikeUrl(s) {
+    const t = String(s || '').trim();
+    if (!t) return false;
+    if (/^(https?|ftp|mailto|tel|weixin|alipays?):/i.test(t)) return true;
+    // 没写协议但确实是域名（www. / xxx.com/path）
+    return /^[\w-]+(\.[\w-]+)+(\/\S*)?$/.test(t) && !/\s/.test(t);
+}
+
+/** 把"没协议但有域名"的补成 https，其余原样返回。 */
+function normalizeUrl(s) {
+    const t = String(s || '').trim();
+    if (!t) return '';
+    if (/^[a-z][a-z0-9+.-]*:/i.test(t)) return t;
+    if (looksLikeUrl(t)) return 'https://' + t;
+    return t;
+}
+
+/** 用 jsQR 解一张图；解不出来就换几种预处理再试。
+ *
+ *  为什么要多试几轮：手机拍屏 / 缩放过的截图里，二维码经常"人能看出来、算法
+ *  第一遍解不出"。常见有效手段就三样 —— 放大、灰度对比增强、反色（深底浅码）。 */
+function decodeOnce(canvas, ctx, invert) {
+    const { width: w, height: h } = canvas;
+    const img = ctx.getImageData(0, 0, w, h);
+    const data = img.data;
+    if (invert) {
+        for (let i = 0; i < data.length; i += 4) {
+            data[i] = 255 - data[i];
+            data[i + 1] = 255 - data[i + 1];
+            data[i + 2] = 255 - data[i + 2];
+        }
+    }
+    try {
+        // attemptBoth 让库自己再试一次反色；这里再手动反一次是为了覆盖
+        // "深色底 + 浅色码"的三值图（库的反色只处理二值化阶段）。
+        return jsQR(data, w, h, { inversionAttempts: invert ? 'dontInvert' : 'attemptBoth' });
+    } catch (_) {
+        return null;
+    }
+}
+
+function makeCanvas(img, scale) {
+    const w0 = Math.max(1, Math.round(img.naturalWidth * scale));
+    const h0 = Math.max(1, Math.round(img.naturalHeight * scale));
+    /* ⚠ 必须留**静区**（quiet zone）。
+     *
+     * 二维码规范要求四周至少 4 个模块宽的白边，解码器就靠它把码从背景里"框"出来。
+     * 而用户框选时几乎总是贴边画 —— 截图里一点白边都不剩，jsQR 直接失败，
+     * 表现就是"明明框得很准，却说没认出二维码"（实测就是这么挂的）。
+     * 这里统一在外面补 10%（对 25 模块的码约等于 2.5 个模块），并把背景填白。 */
+    const pad = Math.max(8, Math.round(Math.max(w0, h0) * 0.1));
+    const c = document.createElement('canvas');
+    c.width = w0 + pad * 2;
+    c.height = h0 + pad * 2;
+    const ctx = c.getContext('2d', { willReadFrequently: true });
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, c.width, c.height);
+    ctx.imageSmoothingEnabled = scale !== 1;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(img, pad, pad, w0, h0);
+    return { c, ctx };
+}
+
+function decodeImage(img) {
+    // 由小到大逐档放大：先 1x（原尺寸最省时），不行再 2x / 3x。
+    // 3x 之后还没解出来，基本就是"这张图里确实没有可读的码"。
+    const plans = [
+        [1, false], [2, false], [3, false],
+        [1, true], [2, true],
+    ];
+    for (const [scale, invert] of plans) {
+        const { c, ctx } = makeCanvas(img, scale);
+        const r = decodeOnce(c, ctx, invert);
+        if (r && r.data) return r;
+    }
+    return null;
+}
+
+function showEmpty(why) {
+    $('text').hidden = true;
+    $('empty').hidden = false;
+    if (why) $('emptyWhy').textContent = why;
+    setBadge('未识别到二维码', 'err');
+    $('note').textContent = '可以调整框选范围再试一次';
+    ['btnOpen', 'btnCopy', 'btnSearch'].forEach((id) => { $(id).disabled = true; });
+}
+
+function applyResult(text) {
+    QR_TEXT = text;
+    QR_IS_URL = looksLikeUrl(text);
+    $('text').value = text;
+    $('text').hidden = false;
+    $('empty').hidden = true;
+    $('kind').textContent = QR_IS_URL ? '这是一个链接' : '二维码内容（非链接）';
+    // 非链接时"在浏览器打开"没有意义，换成"用默认程序打开"也不合适 ——
+    // 直接禁用，并让"复制/搜索"顶上（与用户"至少要有打开、复制"的要求一致）。
+    // 链接才给「在浏览器打开」；纯文本（例如一段话、一个电话号）只留复制与搜索
+    $('btnOpen').disabled = !QR_IS_URL;
+    $('btnCopy').textContent = QR_IS_URL ? '复制链接' : '复制内容';
+    $('btnCopy').disabled = false;
+    $('btnSearch').disabled = false;
+    setBadge(QR_IS_URL ? '解析成功' : '解析成功 · 文本', 'ok');
+    $('note').textContent = QR_IS_URL ? normalizeUrl(text) : (text.length + ' 个字符');
+}
+
+async function runOnce() {
+    const url = await takeImage(12);
+    if (!url) {
+        showEmpty('没拿到截图，重新框选一次试试。');
+        return;
+    }
+    const img = $('shot');
+    img.onload = () => {
+        $('shotCap').textContent = img.naturalWidth + ' × ' + img.naturalHeight + ' px';
+        let r = null;
+        try {
+            r = decodeImage(img);
+        } catch (e) {
+            showEmpty('解析出错：' + ((e && e.message) || e));
+            return;
+        }
+        if (!r) {
+            showEmpty();
+            return;
+        }
+        applyResult(r.data);
+    };
+    img.onerror = () => showEmpty('截图读不出来，重新框选一次试试。');
+    img.src = url;
+    // 页面首帧已就绪：让 Rust 把那扇"先隐藏、等 ready 再显示"的窗打开
+    try { await invoke('qr_ready'); } catch (_) { /* 老版本没有这条命令也不影响 */ }
+}
+
+/* ------------------------------ 动作 ------------------------------ */
+
+$('btnOpen').addEventListener('click', () => {
+    if (!QR_TEXT) return;
+    const u = $('text').value.trim() || QR_TEXT;
+    invoke('qr_open', { text: u }).catch((e) => {
+        $('note').textContent = '打不开：' + ((e && e.message) || e);
+    });
+});
+
+$('btnCopy').addEventListener('click', async () => {
+    const t = ($('text').value || QR_TEXT || '').trim();
+    if (!t) return;
+    try {
+        await invoke('copy_text', { text: t });
+        flush('已复制');
+    } catch (e) {
+        flush('复制失败：' + ((e && e.message) || e));
+    }
+});
+
+$('btnSearch').addEventListener('click', () => {
+    const t = ($('text').value || QR_TEXT || '').trim();
+    if (!t) return;
+    invoke('qr_search', { text: t }).catch(() => {});
+});
+
+$('btnAgain').addEventListener('click', () => {
+    invoke('qr_restart').catch(() => {});
+});
+
+$('btnClose').addEventListener('click', () => {
+    invoke('close_qr_window').catch(() => {});
+});
+
+/* 结果框本身就是可编辑的（textarea）：二维码里偶尔带多余空格时，用户可以
+ * 当场改一处再点「在浏览器打开」，不用先把内容复制到别处去改。 */
+
+/* 顶部那条说明是"提示位"，2 秒后回到默认文案，别一直挂着"已复制"。 */
+let flushTimer = 0;
+function flush(msg) {
+    const n = $('note');
+    const before = n.dataset.base || n.textContent;
+    n.dataset.base = before;
+    n.textContent = msg;
+    if (flushTimer) clearTimeout(flushTimer);
+    flushTimer = setTimeout(() => {
+        n.textContent = n.dataset.base || '';
+        flushTimer = 0;
+    }, 1800);
+}
+
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { invoke('close_qr_window').catch(() => { }); }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c' && document.activeElement !== $('text')) {
+        e.preventDefault();
+        $('btnCopy').click();
+    }
+});
+
+/* 新的一张图（用户点了「重新框选」并再次框选）：重置界面从头来一遍。 */
+function onNewShot(fn) {
+    if (typeof listen !== 'function') return;
+    try { listen('qs://qr-result', fn); } catch (_) { /* 挂不上也不影响首帧 */ }
+}
+onNewShot(() => {
+    QR_TEXT = '';
+    QR_IS_URL = false;
+    $('text').value = '';
+    setBadge('识别中…');
+    $('note').textContent = '';
+    ['btnOpen', 'btnCopy', 'btnSearch'].forEach((id) => { $(id).disabled = true; });
+    runOnce();
+});
+
+runOnce();
+</script>
+</body>
+</html>

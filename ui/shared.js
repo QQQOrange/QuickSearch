@@ -32,6 +32,11 @@ window.QS_IMG = '@img';
  *  和 @ocr / @img 同一套地位：bar_list 成员、可拖拽排序、可换图标、可移出。
  *  Rust 侧 config::BAR_TRANS 必须与之保持一致。 */
 window.QS_TRANS = '@trans';
+/** v2.12.0：横条 / 网格上的「二维码解析」哨兵。
+ *  和 @ocr / @img / @trans 同一套地位：bar_list 成员、可拖拽排序、可换图标、可移出；
+ *  网格里也能当一格。点下去走的是**和 OCR 完全一样**的那条路（先冻屏框选，
+ *  再出结果窗），所以入口配置方式、图标规格、点击反馈都沿用现成的一套。 */
+window.QS_QR = '@qr';
 /** 翻译按钮的**内置默认图标**（用户指定的「翻译-copy.png」）。
  *
  *  ⚠ v1.5.19：这张图**内嵌**在这里 —— 整张 PNG 以 base64 data URI 写死，
@@ -226,6 +231,9 @@ window.qsDisplayName = function (name) {
          * 把选中的文字套上 / 拆掉 / 换一对，和横条上那颗 [ ] 是同一件事。 */
         wrap: '包裹符号',
         txt: '文本处理',
+        /* v2.12.0：二维码解析。漏了这一项的话界面上会显示成英文单词「qr」
+         * （同 @wrap 早年那个坑）。 */
+        qr: '二维码解析',
         '|': '分隔线',
     };
     if (Object.prototype.hasOwnProperty.call(FIXED, key)) return FIXED[key];
@@ -465,6 +473,11 @@ window.qsFuncIcon = function (name) {
         /* 文本处理：所有 op 共用一张"带横线的纸"，具体是哪一件看格子标签。
          * 传空 opId → 不带右下角记号（选板里"文本处理"那一整组用的就是它）。 */
         return window.qsTextIconNode(window.qsTextOpId(rawName) || '');
+    }
+    if (name === window.QS_QR) {
+        /* 二维码解析：三只定位角 + 中间的点，靛蓝 + 琥珀双色，
+         * 和抠图 / 包裹 / 文本处理那几张"线稿 + 彩色"保持同一套视觉重量。 */
+        if (window.qsQrIconNode) return window.qsQrIconNode();
     }
     if (name === window.QS_WRAP) {
         /* 单项（`@wrap:title`）与整颗（`@wrap`）共用同一张图 —— 和 @txt:<op>
@@ -718,6 +731,40 @@ window.qsWrapIconNode = function () {
          * 用户报的"包裹符号图标过小"就是这个。 */
         + '<path d="M7.4 3.4H2.6v17.2h4.8M16.6 3.4h4.8v17.2h-4.8" stroke="#0E7490" stroke-width="1.9"/>'
         + '<path d="M8.2 12h7.6" stroke="#F59E0B" stroke-width="2.6"/>'
+        + '</svg>';
+    return sp;
+};
+
+/** 二维码解析（`@qr`）/ 的默认图标：三只定位角 + 中间两个点。
+ *
+ *  为什么不用 emoji：横条那一排用的是线稿 SVG 与真彩色位图，emoji 会被系统
+ *  字体替换成另一套风格（不同 Windows 版本还不一样）。这里沿用包裹符号那条
+ *  口径 —— 内联 SVG、双色、尺寸写死，各页 CSS 不用管。 */
+window.qsQrIconNode = function () {
+    const conf = window.CONF || {};
+    const custom = conf.overrideIcons ? conf.overrideIcons[window.QS_QR] : null;
+    if (custom) {
+        const img = document.createElement('img');
+        img.src = custom;
+        img.alt = '';
+        img.draggable = false;
+        if (window.qsApplyOpticalScale) {
+            window.qsApplyOpticalScale(img, conf.unifyIcons !== false);
+        }
+        return img;
+    }
+    const sp = document.createElement('span');
+    sp.style.cssText = 'display:block;width:100%;height:100%';
+    sp.innerHTML = '<svg viewBox="0 0 24 24" fill="none" '
+        + ' stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"'
+        + ' style="display:block;width:100%;height:100%">'
+        // 左上 / 右上 / 左下 三只定位角（二维码的招牌形状）
+        + '<rect x="2.6" y="2.6" width="7" height="7" rx="1.6" stroke="#0E7490"/>'
+        + '<rect x="14.4" y="2.6" width="7" height="7" rx="1.6" stroke="#0E7490"/>'
+        + '<rect x="2.6" y="14.4" width="7" height="7" rx="1.6" stroke="#0E7490"/>'
+        // 右下角的数据点（琥珀色，和别的功能区分开）
+        + '<path d="M14.6 14.6h3.1v3.1h-3.1zM19.3 19.3h2.3v2.3h-2.3zM14.6 19.6h2.2v1.6h-2.2zM19.4 14.5h2.1v2.2h-2.1z" '
+        + 'fill="#F59E0B" stroke="none"/>'
         + '</svg>';
     return sp;
 };

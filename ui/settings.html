@@ -793,6 +793,9 @@
                 <button type="button" class="chip" data-sub="fav"><span class="ci" aria-hidden="true"></span><span class="cl">收藏夹</span></button>
                 <button type="button" class="chip" data-sub="wrap"><span class="ci" aria-hidden="true"></span><span class="cl">包裹符号</span></button>
                 <button type="button" class="chip" data-sub="txt"><span class="ci" aria-hidden="true"></span><span class="cl">文本处理</span></button>
+                <!-- v2.12.0：二维码解析。交互与「文字识别」一致（冻屏 → 框选 → 结果窗），
+                     入口也一视同仁：能放横条、能放网格。 -->
+                <button type="button" class="chip" data-sub="qr"><span class="ci" aria-hidden="true"></span><span class="cl">二维码解析</span></button>
             </div>
         </section>
     </div>
@@ -1261,6 +1264,32 @@
             两个都加即可。<b>OCR 结果框</b>下方也有同一个菜单，识别完可以直接整理。
         </div>
         <div class="list" id="textOpsList"></div>
+    </section>
+    </div>
+
+    <!-- v2.12.0：二维码解析（交互与文字识别同一套） -->
+    <div class="pane" data-pane="qr" hidden>
+    <section class="card">
+        <h2>二维码解析 <small>框选屏幕上的二维码，直接解出链接</small></h2>
+        <div class="hint">
+            用法和「文字识别」完全一样：<b>先把当前画面冻住</b>，再框住二维码，
+            自动解出里面的内容。识别成功后可以<b>在浏览器打开</b>、<b>复制链接</b>，
+            也可以把整段内容丢进搜索。<br>
+            解码在本机完成（不联网、不上传），所以断网也能用。
+        </div>
+        <div class="row" id="qrEntryRow"></div>
+        <div class="hint" id="qrEntryHint">加进横条之后，点那一格就能开始框选；加进网格页同理。</div>
+    </section>
+    <section class="card">
+        <h2>识别不出来的时候</h2>
+        <div class="hint">
+            二维码对清晰度和大小比较敏感。常见情况与对策：<br>
+            · <b>太小</b>：把二维码放大（或把截图放大）再框；<br>
+            · <b>模糊 / 有反光</b>：换个角度、避开高光再截一次；<br>
+            · <b>只框到一部分</b>：框选范围要完整包住二维码四周的空白边；<br>
+            · 已经框好了还是不行：结果窗里会给出原因，点「重新框选」即可重来，
+            不用关掉窗口。
+        </div>
     </section>
     </div>
 
