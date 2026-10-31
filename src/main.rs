@@ -3831,7 +3831,27 @@ fn __probe_post_copy() -> String {
     "started".into()
 }
 
+/// 「补字这件事正在做」的标记。
+///
+/// 存在的理由（2026-10-31 实测）：`spawn_bar_away_guard` 的判据是"指针离横条
+/// 多远"，用户划完词手一抬常常已经离得很远（日志里 `指针离横条 522px`）——
+/// 横条在补字的**几毫秒之后**就被收掉了，后面的本地识别分支拿到的第一句就是
+/// `is_bar_shown() == false`，于是**一声不响地返回**。用户看到的就是
+/// "微信里划词没反应"，而日志里除了"改看屏幕"什么都没有。
+/// 补字期间（最多两三秒）先别收条，做完再让它照常按距离收。
+static CAPTURE_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+
+/// `CAPTURE_IN_FLIGHT` 的 RAII 守卫：任何一条提前 return 都会清掉标记。
+struct CaptureInFlight;
+impl Drop for CaptureInFlight {
+    fn drop(&mut self) {
+        CAPTURE_IN_FLIGHT.store(false, Ordering::SeqCst);
+    }
+}
+
 fn post_show_copy_fill(gen: usize, fg_pid: u32, drag: (i32, i32, i32, i32)) {
+    CAPTURE_IN_FLIGHT.store(true, Ordering::SeqCst);
+    let _busy = CaptureInFlight;
     /* ⚠ 条件①必须**等横条真的可见**再判，不能直接 `is_bar_shown()`：
      *   `show_bar_at` 只是"发了事件"，`geo.shown` 要等前端量完尺寸回填
      *   （日志里 `after-show: visible=true` 那一行）。直接判会出现
@@ -3892,7 +3912,15 @@ fn post_show_copy_fill(gen: usize, fg_pid: u32, drag: (i32, i32, i32, i32)) {
 ///   · 只认拖选的那块矩形，缩放后交给 Windows 本地 OCR，不发网络请求；
 ///   · 横条此时已经显示，认出来用 `push_late_text` 补进去，弹条不受影响。
 fn post_ocr_fill(gen: usize, fg_pid: u32, drag: (i32, i32, i32, i32)) {
-    if !is_bar_shown() || GEN.load(Ordering::SeqCst) != gen {
+    /* v2.11.7：这里的每一条提前返回**都要留痕**。
+     * 上一版三个分支都是裸 `return`，于是"微信里横条没字"这件事在日志里
+     * 只留下一句"改看屏幕"，看不出到底卡在哪一步 —— 排查全靠猜。 */
+    if !is_bar_shown() {
+        win::log("post-ocr: 横条已经收起了 —— 不补字");
+        return;
+    }
+    if GEN.load(Ordering::SeqCst) != gen {
+        win::log("post-ocr: 横条已经换新的一条 —— 不补字");
         return;
     }
     /* 用户可能已经点到别处去了 —— 那时认出来的字不是他要的，别硬塞。 */
@@ -3912,12 +3940,24 @@ fn post_ocr_fill(gen: usize, fg_pid: u32, drag: (i32, i32, i32, i32)) {
     /* ⚠ 拖选**横着划**时 `y0 == y1`，矩形高度是 0 —— 直接拿去截图只能是空条。
      *   这里给选区补一圈内边距（上下各 10px、左右各 4px），既保证有高度，
      *   也能把文字上下沿的半个字高包进来（本地 OCR 对切了边的字很敏感）。 */
-    const PAD_X: i32 = 4;
-    const PAD_Y: i32 = 10;
+    /* ⚠ v2.11.7：内边距给足。原来上下各 10px，横着拖出来的选区只有 20px 高，
+     *   而一行中文在这个 DPI 下就有 16~18px —— 上下几乎贴边，Windows 本地 OCR
+     *   对"切到字沿"的图非常敏感，实测直接返回"没有识别到文字"。
+     *   现在上下各 16px（≈ 一行字的完整高度，含上下留白），并保底 40px。 */
+    const PAD_X: i32 = 6;
+    const PAD_Y: i32 = 16;
     let x = x0.min(x1) - PAD_X;
-    let y = y0.min(y1) - PAD_Y;
-    let w = (x1 - x0).abs() + PAD_X * 2;
-    let h = (y1 - y0).abs() + PAD_Y * 2;
+    let mut y = y0.min(y1) - PAD_Y;
+    let mut w = (x1 - x0).abs() + PAD_X * 2;
+    let mut h = (y1 - y0).abs() + PAD_Y * 2;
+    if h < 40 {
+        let grow = 40 - h;
+        y -= grow / 2;
+        h = 40;
+    }
+    if w < 40 {
+        w = 40;
+    }
     if w < 8 || h < 8 || w > 3000 || h > 2000 {
         win::log(&format!("post-ocr: 选区尺寸 {w}x{h} 不适合识别 —— 跳过"));
         return;
@@ -3926,6 +3966,9 @@ fn post_ocr_fill(gen: usize, fg_pid: u32, drag: (i32, i32, i32, i32)) {
         win::log("post-ocr: 截取选区失败");
         return;
     };
+    win::log(&format!(
+        "post-ocr: 截取 ({x},{y}) {w}x{h} → {cw}x{ch}"
+    ));
     let Some(img) = image::RgbaImage::from_raw(cw, ch, pixels) else {
         win::log("post-ocr: 像素数据异常");
         return;
@@ -3936,6 +3979,17 @@ fn post_ocr_fill(gen: usize, fg_pid: u32, drag: (i32, i32, i32, i32)) {
         .is_err()
     {
         return;
+    }
+    /* 排障用：`QS_OCR_DEBUG=1` 时把这一块存下来，能直接看出"到底截到了什么"。
+     * 只在这个兜底分支里生效，正式运行不写盘。 */
+    /* 开关：`QS_OCR_DEBUG=1` 环境变量，或数据目录里放一个 `ocr-debug.on`。
+     * 后者是因为提权启动（-Verb RunAs）时环境变量不一定会继承下来。 */
+    if std::env::var("QS_OCR_DEBUG").map(|v| v == "1").unwrap_or(false)
+        || config::data_dir().join("ocr-debug.on").exists()
+    {
+        let p = config::data_dir().join("ocr-debug.png");
+        let _ = std::fs::write(&p, cur.get_ref());
+        win::log(&format!("post-ocr: 调试图已存 {}", p.display()));
     }
     match run_ocr(&cur.into_inner(), "windows") {
         Ok((text, _raw, _label)) if !text.trim().is_empty() => {
@@ -5153,6 +5207,10 @@ fn spawn_bar_away_guard() {
                 if shown { TICK_SHOWN_MS } else { TICK_HIDDEN_MS },
             ));
             let Some((outer, _)) = bar_rects() else { continue };
+            /* 正在补字（复制 / 本地识别）时先别收：见 `CAPTURE_IN_FLIGHT` 的注释。 */
+            if CAPTURE_IN_FLIGHT.load(Ordering::SeqCst) {
+                continue;
+            }
             let away = cfg_with(|cf| cf.bar_away_px);
             if away <= 0 {
                 continue;   // 用户把这条关了
@@ -8138,6 +8196,40 @@ fn webdav_sync_on_start() {
     webdav_sync_on_start_inner();
 }
 
+/// 云端恢复之后，把**只属于这台机器**的两项按本机的选择写回去。
+///
+/// 为什么单独抽出来：`restore_from_text` 是"整份覆盖"语义（云端那份怎么写就
+/// 怎么用），而 `autoElevate` / `autoStart` 描述的是**这台机器**的状态，
+/// 不该跟着账号走 —— 用户在 B 机器勾了管理员，不该把 A 机器也改掉；
+/// 反过来，A 机器刚勾好，也不该被 B 机器的旧备份翻回 false。
+///
+/// 只动这两项、只在真的不一致时才落盘，避免每次启动都白写一次配置文件
+/// （写盘会刷新 mtime，进而影响下次"云端较新"的判定）。
+fn restore_local_only_settings(elevate: bool, autostart: bool) {
+    let mut changed = Vec::new();
+    {
+        let Ok(mut c) = st().cfg.lock() else {
+            return;
+        };
+        if c.auto_elevate != elevate {
+            c.auto_elevate = elevate;
+            changed.push(format!("autoElevate={elevate}"));
+        }
+        if c.auto_start != autostart {
+            c.auto_start = autostart;
+            changed.push(format!("autoStart={autostart}"));
+        }
+        if changed.is_empty() {
+            return;
+        }
+        config::save(&c);
+    }
+    win::log(&format!(
+        "webdav: 恢复后按本机选择写回（云端那份不能决定这台机器的权限/自启）：{}",
+        changed.join(" ")
+    ));
+}
+
 fn webdav_sync_on_start_inner() {
     let cfg = cfg_snapshot();
     if !cfg.webdav_on_start {
@@ -8192,9 +8284,26 @@ fn webdav_sync_on_start_inner() {
         (None, _) => push(),
         // 云端更新 → 先留副本再恢复
         (Some((name, rt)), Some(lt)) if rt > lt + 2 => {
+            /* ⚠ v2.11.7：**机器本地**的设置不能被云端整份覆盖。
+             *
+             * 事故（2026-10-31）：用户勾了「默认以管理员身份运行」，下一次启动
+             * 被这条"云端较新就整份恢复"改回 false —— 进程降成普通权限，
+             * 而微信是管理员权限，UIPI 让钩子收不到它的任何输入，
+             * 于是"划词不弹条、快捷键不弹网格"**一起**哑掉。
+             * 用户看到的是"上个版本还能在微信用，这个版本就不行了"，
+             * 而真正变的只是这一项被云端翻回去了。
+             *
+             * 这两项描述的是**这台机器**（有没有管理员、要不要开机自启），
+             * 换台机器本来就不该照搬，所以恢复之后把它们按本机的选择写回去。
+             */
+            let keep_elevate = cfg_with(|c| c.auto_elevate);
+            let keep_autostart = cfg_with(|c| c.auto_start);
             stash_local_config();
             match webdav::download_named(&o, &name).and_then(|t| restore_from_text(&t)) {
-                Ok(note) => wd_toast(format!("启动同步：云端「{name}」较新，已恢复到本机{note}")),
+                Ok(note) => {
+                    restore_local_only_settings(keep_elevate, keep_autostart);
+                    wd_toast(format!("启动同步：云端「{name}」较新，已恢复到本机{note}"));
+                }
                 Err(e) => wd_toast(format!("启动同步失败：{e}")),
             }
         }
