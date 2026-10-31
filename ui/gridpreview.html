@@ -48,8 +48,11 @@
         position: relative;
         width: max-content;
         height: auto;
-        /* 抓手要伸到面板外面一点，别被裁掉 */
-        padding: 0 8px 8px 0;
+        /* 抓手要伸到面板外面一点，别被裁掉。
+         * ⚠ 四边必须等值（v2.9.2）：原来是 `0 8px 8px 0`，只有右、下留了 8px，
+         *   于是 stage 虽然被居中，里面的面板却**整体左偏 4px、上偏 4px** ——
+         *   用户报的"水平方向没居中"就是这个（垂直那 4px 被行高吸收，看不出）。 */
+        padding: 8px;
     }
 
     #bar {
@@ -260,12 +263,18 @@
         return Math.max(min, Math.min(max, Math.round(n)));
     }
 
-    /** 把内容尺寸报给父页面，由它设 iframe 高度/宽度 —— 这样预览不会被裁掉半行。 */
+    /** 把内容尺寸报给父页面，由它把 iframe 调成"正好这么大"。
+     *
+     *  父页面拿到宽高后把 iframe 设成内容尺寸、再用 `margin:auto` 摆到舞台正中，
+     *  所以这里报的必须是**内容本身的尺寸**，不能是 body 的 scrollWidth ——
+     *  body 是 flex + width:100%，它永远等于 iframe 宽度，报上去等于"跟没说一样"，
+     *  父页面也就没法把 iframe 缩到内容大小（一缩不了，水平居中就无从谈起）。
+     *  +24 是 body 自己的 12px 内边距（上下各 12），stage 的 padding 已经算在
+     *  stage 的 border-box 里了。 */
     function reportSize() {
-        var h = Math.ceil(document.body.getBoundingClientRect().height);
-        // 内容比 iframe 宽时（列数多 / 格子很大），父页面要按内容宽度放大 iframe，
-        // 否则右边几列会被裁在 iframe 外面，怎么看都看不到。
-        var w = Math.ceil(document.body.scrollWidth);
+        var r = stage.getBoundingClientRect();
+        var h = Math.ceil(r.height) + 24;
+        var w = Math.ceil(r.width) + 24;
         post({ __qsGridPreviewHeight: h, __qsGridPreviewWidth: w });
     }
 

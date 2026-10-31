@@ -598,7 +598,13 @@ function renderBarList() {
                 mk('编辑图标', '编辑这颗图标：一键消除背景、前后对比', () => openIconEditor(QS_OCR, QS_OCR));
             }
             if (CONF.overrideIcons[QS_OCR]) {
-                mk('默认', '恢复默认的 OCR 徽标', () => invoke('reset_icon', { engine: QS_OCR }));
+                /* 「默认图标」是**同级独立按钮**（不是「编辑图标」的附属动作）：
+                 * 换图标 / 编辑图标 / 默认图标 / 去掉 四颗一字排开，各管一件事。
+                 * 点它 → `reset_icon` 把图标换回内置那张 → 配置广播回来时
+                 * `overrideIcons[QS_OCR]` 已经没了，这颗按钮**随即消失**
+                 * （没有自定义图标可恢复了，留着只会是个点了没反应的死按钮）。 */
+                mk('默认图标', '恢复默认的 OCR 徽标',
+                    () => invoke('reset_icon', { engine: QS_OCR }));
             }
             mk('去掉', '把 OCR 从横条上拿掉（不影响热键 Ctrl+Alt+O）', () => invoke('remove_bar_ocr'));
         } else {
@@ -626,8 +632,11 @@ function renderBarList() {
                 });
             }
             if (CONF.overrideIcons[name]) {
-                // 外部软件没有「内置图标」可言，恢复的是首字徽标
-                mk('默认', isApp ? '恢复成首字徽标' : '恢复内置图标',
+                /* 同 OCR 行：**同级独立按钮**，固定排在「编辑图标」右边。
+                 * 以前它只叫「默认」，而自定义引擎 / 外部软件那两页叫「默认图标」，
+                 * 同一个动作两种叫法，看着像两个不同的东西 —— 现在统一成
+                 * 「默认图标」。点完图标回内置图，这颗按钮随之消失。 */
+                mk('默认图标', isApp ? '恢复成首字徽标' : '恢复内置图标',
                     () => invoke('reset_icon', { engine: name }));
             }
             mk('移出', '从横条上移除', () => invoke('toggle_bar_engine', { engine: name, on: false }));
@@ -4437,17 +4446,21 @@ window.addEventListener('message', (e) => {
     }
     if (d.__qsGridPreviewHeight) {
         const fr = $('gridPreview');
-        const wrap = $('gridPreviewWrap');
         if (!fr) return;
-        /* 高度按内容走（外层舞台是**固定高度 + 内部滚动**，所以 iframe 长高
-         * 不会再把整张设置页顶长 —— 用户报的"改高度整页跟着变"就是这么来的）。 */
+        /* 宽高都设成**内容本身的尺寸**（iframe 里 reportSize() 按 stage 外框报的）。
+         *
+         * 为什么不再"能塞满就 100%"：iframe 一旦撑满舞台，横向就没有剩余空间，
+         * 里面再怎么写 justify-content:center 也看不出居中 —— 这正是用户报的
+         * "只有垂直居中"。改成内容尺寸后，外层 .gprev-wrap（flex）用子元素的
+         * `margin:auto` 把它同时摆到水平和垂直正中；内容比舞台大时 auto 外边距
+         * 退化为 0，仍然从左上开始、可滚动，right/bottom 不会被裁。
+         *
+         * 高度上限只是防止极端值把滚动区拉爆（舞台本身就是固定高度 + 内部滚动，
+         * 所以 iframe 长高不会顶长整张设置页）。 */
         const h = Math.max(120, Math.min(6000, Number(d.__qsGridPreviewHeight) || 200));
         fr.style.height = h + 'px';
-        /* 宽度：内容比舞台宽（列多 / 格子大）时把 iframe 撑到内容宽度，由外层横向
-         * 滚动；否则回到 100%。不这么做右边几列会被裁在 iframe 外面。 */
         const w = Number(d.__qsGridPreviewWidth) || 0;
-        const avail = wrap ? (wrap.clientWidth - 28) : 0;   // 减掉舞台左右 padding
-        fr.style.width = (avail > 0 && w > avail) ? (w + 'px') : '100%';
+        fr.style.width = w > 0 ? Math.min(w, 6000) + 'px' : '100%';
     }
 });
 
