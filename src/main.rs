@@ -6,6 +6,7 @@
 
 mod t;
 mod trayhost;
+mod toast;
 
 /// 前端资源目录：exe 同级的 ui/，开发期回退到源码目录。
 /// 便携测试版的硬开关。
@@ -2945,8 +2946,10 @@ fn start_foreground_sampler() {
 /// 为什么要节流：横条会因为**鼠标移动**被反复 `show_bar`（实测一次操作 6 次），
 /// 不节流的话右下角会连弹 6 条一模一样的通知 —— 那比没有通知更烦。
 /// 规则：**同一功能 4 秒内只提示一次**；换功能立刻提示（不同功能是不同信息）。
-static NOTIFY_LAST: std::sync::Mutex<(String, Option<std::time::Instant>)> =
-    std::sync::Mutex::new((String::new(), None));
+/// = (功能, 软件, 上次时间)。v2.6.8 起节流口径是「同一软件里的同一功能」，
+/// 所以软件名也要记 —— 从记事本切到浏览器再用同一个功能，应该照常提示。
+static NOTIFY_LAST: std::sync::Mutex<(String, String, Option<std::time::Instant>)> =
+    std::sync::Mutex::new((String::new(), String::new(), None));
 
 /// 上一次用户真正在用的那个外部软件（进程名，已去掉 `.exe`）。
 fn last_use_app() -> String {
@@ -2970,34 +2973,60 @@ fn last_use_app() -> String {
 /// 标题固定 `Quick Search`，正文 = `正在使用：<功能名> · <软件名>`；
 /// 拿不到软件名就只写功能名。
 ///
-/// ## 消失规则
-/// 由系统通知中心接管（Win10/11 约 5 秒自动消失，可点 ✕ 立即关闭）；
-/// 同一功能 4 秒内只弹一次（见 `NOTIFY_LAST`）。设置 → 通用 可整体关闭。
+/// ## 展示方式（v2.6.8 改）
+/// 不再用托盘的系统气泡（`Shell_NotifyIconW` 的 `NIF_INFO`）：那是系统通知，
+/// 时长和样式都由系统说了算，用户明确说"太频繁、还调用系统通知"。现在走
+/// **应用自己画的右下角小窗**（见 `toast.rs` / `ui/toast.html`），
+/// 显示秒数由 设置 → 通用 的「显示时长」决定（`notify_seconds`）。
+///
+/// ## 频率
+/// 同一**软件**里的同一**功能** 10 秒内只提示一次（`NOTIFY_LAST`）：
+/// 划词横条会因鼠标移动被反复唤起，不节流会连着弹一串。换了功能或换了软件
+/// 立刻提示 —— 那才是"我现在的操作真的换了个东西"。
 fn notify_feature(feature: &str) {
     if !cfg_with(|c| c.notify_feature) {
         return;
     }
+    // 秒数在设置里配（1~15），后端再兜一次区间，防止配置文件被手改成 0 或 999
+    let secs = cfg_with(|c| c.notify_seconds).clamp(1, 15);
+    let app = last_use_app();
     let now = std::time::Instant::now();
     {
         let mut g = match NOTIFY_LAST.lock() {
             Ok(g) => g,
             Err(pe) => pe.into_inner(),
         };
-        if let Some(at) = g.1 {
-            if g.0 == feature && now.duration_since(at) < Duration::from_secs(4) {
+        if let Some(at) = g.2 {
+            if g.0 == feature && g.1 == app && now.duration_since(at) < Duration::from_secs(10) {
                 return;
             }
         }
-        *g = (feature.to_string(), Some(now));
+        *g = (feature.to_string(), app.clone(), Some(now));
     }
-    let app = last_use_app();
     let text = if app.is_empty() {
         format!("正在使用：{feature}")
     } else {
         format!("正在使用：{feature} · {app}")
     };
-    win::log(&format!("notify: {text}"));
-    crate::trayhost::balloon("Quick Search", &text);
+    win::log(&format!("notify: {text}（{secs}s）"));
+    if let Some(a) = APP.get() {
+        crate::toast::show(a, &text, (secs as u64) * 1000);
+    }
+}
+
+/// 提示页首帧加载完来拉一次"最近一次提示内容"（见 toast.rs 的 PENDING 说明）。
+#[crate::t::command]
+fn toast_pull() -> Value {
+    match crate::toast::pending() {
+        Some((text, ms)) => serde_json::json!({ "text": text, "ms": ms }),
+        None => Value::Null,
+    }
+}
+
+/// 提示页播完退场动画后把自己藏起来（窗口留着下次复用）。
+#[crate::t::command]
+fn toast_hide() {
+    crate::toast::hide();
 }
 
 /// 「取当前应用」/ 通知共用的"刚才在用的软件"判定：见 `last_use_app`。
@@ -5098,6 +5127,8 @@ fn config_view() -> Value {
         "triggerSelect": cfg.trigger_select,
         "triggerCopy": cfg.trigger_copy,
         "notifyFeature": cfg.notify_feature,
+        // 右下角提示显示几秒（v2.6.8：内置提示，时长自己做主）
+        "notifySeconds": cfg.notify_seconds,
         // 网格页（Ctrl+C）：快捷键、行列、单元格尺寸、内容项
         "gridHotkey": cfg.grid_hotkey,
         "gridRows": cfg.grid_rows.clamp(1, 10),
@@ -5791,6 +5822,10 @@ fn apply_one_setting(cfg: &mut config::Config, key: &str, value: Value) -> Resul
         "triggerCopy" => cfg.trigger_copy = value.as_bool().unwrap_or(false),
         // 右下角"正在使用什么功能"的通知（默认开）
         "notifyFeature" => cfg.notify_feature = value.as_bool().unwrap_or(true),
+        // 提示显示几秒（1~15，默认 3）
+        "notifySeconds" => {
+            cfg.notify_seconds = value.as_u64().unwrap_or(3).clamp(1, 15) as u32;
+        }
         /* 2026-10-23：横条"自己收起来"的两条阈值 + 误弹开关。
          * 数值一律夹在合法区间（界面是滑块，但 IPC 也可能来自探针/手改配置）。 */
         "barIdleSec" => {
@@ -18282,6 +18317,9 @@ fn main() {
             get_config,
             set_setting,
             set_settings,
+            // v2.6.8：右下角内置提示（toast.html 用）
+            toast_pull,
+            toast_hide,
             // r70：内部唤起入口（探针/自动化驱真流程用；见 show_bar 的文档）
             show_bar,
             // v1.5.6：Ctrl+C 真路径（探针用，模拟"按了 Ctrl+C 但没复制到东西"）

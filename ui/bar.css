@@ -1706,10 +1706,20 @@ button.fav-grp-head:focus-visible {
     flex-direction: column;
     align-items: stretch;
     gap: 8px;
-    /* 四边**同值**：原来是 `7px 10px 10px`（上 7 / 下 10），
-     * 网格页四边留白本来就不对称 —— 用户把宽高都调到最小时看得最明显。
-     * 现在统一 10px，横竖都严格对称。 */
-    padding: 10px;
+    /* 四边**同值** 8px（v2.6.8 从 10px 再收一点）：
+     * 用户要的是"图标紧贴边缘、左右与下边距一致"的紧凑观感。 */
+    padding: 8px;
+    /* ⚠ 面板宽度**必须由格子网格决定**，不能被头部（标题 + 翻页器 + 两颗按钮）
+     * 撑宽 —— 那正是用户报的"左右边距比下边距大得多"的根因：
+     *   格子小的时候（比如 2 列 40px = 88px 宽），头部有 170 多 px，
+     *   面板被撑到 190px，网格 `justify-content:center` 一居中，两边各空 50px，
+     *   而下边距只有 10px，看起来就是"左右空一大片、图标离边缘很远"。
+     * 现在头部用 `width:0; min-width:100%` 退出固有宽度计算（见下面的 .qs-ghead），
+     * 面板宽度 = 网格宽度 + 16，四边留白自然相等。
+     * min-width 兜底：太窄时头部会溢出面板，120px 是"翻页器还能收缩"的下限。 */
+    min-width: 120px;
+    /* 网格比面板窄（被 min-width 兜住）时左右均分，保持对称 */
+    align-items: center;
     border-radius: max(14px, var(--qs-bar-r, 14px));
     /* 高度交给内容决定（横条默认是固定高度的那一套，这里要覆盖掉） */
     height: auto;
@@ -1739,9 +1749,12 @@ button.fav-grp-head:focus-visible {
          · 高度调小（< 62）时内容溢出到下一行，**上下两格叠在一起**。
        网格里必须让格子**撑满整行**（stretch），高度和间距才真的由 --gch / --ggap 决定。 */
     align-items: stretch;
-    /* 网格比横条窄时（格子很小 / 列数少，而头部标题+按钮更宽），
-     * 剩下的宽度要**均分到左右两侧**；不加这一条会全堆在右边，
-     * 左右边距就不对称了（用户把宽高都调到最小时报的那个现象）。 */
+    /* ⚠ 宽度取 max-content（v2.6.8）：`.engines` 是 flex 子项，默认会被
+     * align-items:stretch 拉成"面板内容宽度"，于是**格子其实排在一条比网格更宽的
+     * 容器里**，再由 justify-content:center 居中 —— 面板一宽，格子两边就空出
+     * 一大片。改成 max-content 后容器宽度 = 网格真实宽度，居中也就没有余量可分了。
+     * （只在被 min-width 兜住、面板确实比网格宽时，居中的效果才是需要的。） */
+    width: max-content;
     justify-content: center;
 }
 
@@ -1752,13 +1765,19 @@ button.fav-grp-head:focus-visible {
     display: flex;
     align-items: center;
     gap: 6px;
-    width: 100%;
+    /* ⚠ `width:0; min-width:100%`：让头部**不参与**面板的固有宽度计算，
+     * 只在排完版后撑满面板可用宽度。少了这一条，标题一长就把面板撑宽，
+     * 网格居中后左右留白一大片（见 .bar.qs-grid 的 padding 注释）。
+     * 百分比 min-width 在固有尺寸计算阶段会被忽略，所以不会反过来把面板撑大。 */
+    width: 0;
+    min-width: 100%;
     padding: 0 2px;
     user-select: none;
 }
 
 .qs-ghead .qs-gtitle {
     flex: 1 1 auto;
+    min-width: 0;   /* 面板被 min-width 兜窄时，标题先让位（省略号） */
     font-size: 10.5px;
     letter-spacing: .04em;
     color: var(--qs-fg-dim);
@@ -1772,13 +1791,18 @@ button.fav-grp-head:focus-visible {
  * 只有一页时整块 hidden（全局 `[hidden]{display:none!important}` 兜着）。
  * 刻意做得很轻：它是"出口"级别的小控件，不该抢格子的视觉重心。 */
 .qs-gpager {
-    flex: none;
+    /* v2.6.8：允许收缩（原来 flex:none）。面板宽度改成"由网格决定"之后，
+     * 窄网格（3 列 40px）下面板只有 152px，翻页器顶着 88px 的页名会把头部撑爆。
+     * 页名自己带省略号，缩到只剩 ‹ › 也不会难看。 */
+    flex: 0 1 auto;
+    min-width: 0;
     display: inline-flex;
     align-items: center;
     gap: 1px;
     padding: 0 2px;
     border-radius: 7px;
     background: var(--qs-hover);
+    overflow: hidden;
 }
 
 .qs-gpager .qs-gpbtn {
@@ -1806,6 +1830,8 @@ button.fav-grp-head:focus-visible {
 
 .qs-gpager .qs-gpname {
     max-width: 88px;
+    min-width: 0;
+    flex: 0 1 auto;
     padding: 0 3px;
     font-size: 10.5px;
     font-weight: 600;
@@ -1950,41 +1976,69 @@ button.fav-grp-head:focus-visible {
     color: var(--qs-accent, #2563EB);
 }
 
-/* ---------------- 添加内容面板（点空格子弹出） ---------------- */
+/* ---------------- 添加内容面板（点空格子弹出） ----------------
+ *
+ * v2.6.8 重做，用户三条要求：① 尺寸太小 → 放大；② 分类要像「更多引擎」那样细；
+ * ③ 长宽要能用鼠标拖。
+ *
+ * 实现方式：**把整个面板临时变成选板窗口** —— `.bar.qs-gpicking` 时网格和头部
+ * 都收起，`.qs-gpick` 铺满面板（`inset:0`），宽高由 JS 内联写在 `.bar` 上
+ * （见 applyPickSize），所以窗口是靠既有的 `pushLayout()` 长大的，不用新开窗口、
+ * 也不用改 Rust。拖动右下角抓手改的就是这两个内联宽高。 */
+.bar.qs-grid.qs-gpicking {
+    /* 尺寸由 JS 内联给（applyPickSize）；这里只保证是块状、铺满、不被网格的
+       `align-items:center` 影响 */
+    align-items: stretch;
+    justify-content: flex-start;
+    /* 抓手探出去的那一点点不能被裁掉；列表滚动由 .qs-gpick-body 自己管 */
+    overflow: hidden;
+}
+
+/* 选板盖住网格与头部 —— 它们不参与这一屏 */
+.bar.qs-grid.qs-gpicking > .engines,
+.bar.qs-grid.qs-gpicking > .qs-ghead {
+    display: none !important;
+}
+
 .bar.qs-grid .qs-gpick {
     position: absolute;
     inset: 0;
     z-index: 20;
     display: flex;
     flex-direction: column;
-    gap: 6px;
-    padding: 8px 9px 9px;
+    gap: 8px;
+    padding: 10px 12px 8px;
     border-radius: inherit;
     /* 必须实色：面板盖在格子上面，半透明会把下面的格子透出来，读不清 */
     background: var(--qs-bg-fill, var(--qs-bg));
     animation: qs-pick-in .12s ease;
+    box-sizing: border-box;
 }
 
 @keyframes qs-pick-in {
-    from { opacity: 0; transform: scale(.985); }
+    from { opacity: 0; transform: scale(.99); }
     to { opacity: 1; transform: none; }
 }
 
 .qs-gpick-head {
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 8px;
     flex: none;
 }
 
 .qs-gpick-head .qs-gpick-title {
-    flex: 1 1 auto;
-    font-size: 11.5px;
+    flex: 0 0 auto;
+    font-size: 13px;
     font-weight: 600;
     color: var(--qs-fg);
-    overflow: hidden;
-    white-space: nowrap;
-    text-overflow: ellipsis;
+}
+
+.qs-gpick-head .qs-gpick-count {
+    flex: 1 1 auto;
+    font-size: 11px;
+    color: var(--qs-fg-dim);
+    opacity: .85;
 }
 
 .qs-gpick-head .qs-gbtn {
@@ -1992,8 +2046,8 @@ button.fav-grp-head:focus-visible {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 20px;
-    height: 20px;
+    width: 22px;
+    height: 22px;
     padding: 0;
     border: none;
     border-radius: 6px;
@@ -2013,18 +2067,50 @@ button.fav-grp-head:focus-visible {
     flex: none;
     width: 100%;
     box-sizing: border-box;
-    padding: 4px 8px;
+    padding: 6px 10px;
     border: 1px solid var(--qs-border);
-    border-radius: 7px;
+    border-radius: 9px;
     background: var(--qs-field, rgba(15, 20, 40, .05));
     color: var(--qs-fg);
     font: inherit;
-    font-size: 11.5px;
+    font-size: 12.5px;
     outline: none;
 }
 
 .qs-gpick-search:focus {
     border-color: var(--qs-accent, #2563EB);
+}
+
+/* 过滤胶囊：全部 / 内置功能 / 智能直达 / 收藏夹 / 模型 / 网页引擎 / 软件引擎 / 快捷键 */
+.qs-gpick-filters {
+    flex: none;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+}
+
+.qs-gpick-filt {
+    flex: none;
+    padding: 3px 10px;
+    border: 1px solid var(--qs-border);
+    border-radius: 999px;
+    background: transparent;
+    color: var(--qs-fg-dim);
+    font: inherit;
+    font-size: 11.5px;
+    line-height: 1.5;
+    cursor: pointer;
+}
+
+.qs-gpick-filt:hover {
+    background: var(--qs-hover);
+    color: var(--qs-fg);
+}
+
+.qs-gpick-filt.on {
+    background: var(--qs-accent, #2563EB);
+    border-color: var(--qs-accent, #2563EB);
+    color: #fff;
 }
 
 .qs-gpick-body {
@@ -2035,66 +2121,174 @@ button.fav-grp-head:focus-visible {
     display: flex;
     flex-direction: column;
     gap: 2px;
-    padding-right: 2px;
+    padding-right: 4px;
 }
 
-.qs-gpick-cat {
+/* 一级：大类标题（网页引擎 / 软件引擎 / 内置功能 …） */
+.qs-gpick-block {
+    display: flex;
+    align-items: baseline;
+    gap: 7px;
+    padding: 10px 2px 2px;
+    border-bottom: 1px solid var(--qs-sep);
+    margin-bottom: 4px;
+}
+
+.qs-gpick-block-t {
     flex: none;
-    padding: 4px 2px 2px;
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--qs-fg);
+}
+
+.qs-gpick-block-n {
+    flex: none;
+    padding: 0 5px;
+    border-radius: 999px;
+    background: var(--qs-hover);
     font-size: 10px;
-    letter-spacing: .04em;
+    color: var(--qs-fg-dim);
+    line-height: 15px;
+}
+
+.qs-gpick-block-d {
+    flex: 1 1 auto;
+    min-width: 0;
+    font-size: 10.5px;
     color: var(--qs-fg-dim);
     opacity: .8;
-}
-
-.qs-gpick-item {
-    flex: none;
-    display: flex;
-    align-items: center;
-    gap: 7px;
-    width: 100%;
-    padding: 4px 6px;
-    border: none;
-    border-radius: 7px;
-    background: transparent;
-    color: var(--qs-fg);
-    font: inherit;
-    font-size: 11.5px;
-    text-align: left;
-    cursor: pointer;
-}
-
-.qs-gpick-item:hover {
-    background: var(--qs-hover);
-}
-
-.qs-gpick-item .qs-gpick-ic {
-    flex: none;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 18px;
-    height: 18px;
-    font-size: 13px;
-}
-
-.qs-gpick-item .qs-gpick-ic img,
-.qs-gpick-item .qs-gpick-ic svg {
-    width: 100%;
-    height: 100%;
-    object-fit: contain;
-}
-
-.qs-gpick-item .qs-gpick-nm {
-    flex: 1 1 auto;
     overflow: hidden;
     white-space: nowrap;
     text-overflow: ellipsis;
 }
 
-.qs-gpick-empty {
-    padding: 10px 6px;
+/* 二级：主题组（搜索与 AI / 知识教育 / 影音娱乐 …）—— 和「更多引擎」面板同一套分类 */
+.qs-gpick-theme {
+    padding: 8px 2px 3px;
     font-size: 11px;
+    font-weight: 600;
+    letter-spacing: .04em;
+    color: var(--qs-fg-dim);
+    opacity: .9;
+}
+
+/* 三级：分类名（搜索 / 视频 / 购物 …） */
+.qs-gpick-cat {
+    padding: 6px 2px 3px;
+    font-size: 10.5px;
+    color: var(--qs-fg-dim);
+    opacity: .75;
+}
+
+.qs-gpick-cat i {
+    margin-left: 5px;
+    font-style: normal;
+    opacity: .7;
+}
+
+/* 条目：一格一格的胶囊块（一行铺多个，比"一行一条"省一半滚动） */
+.qs-gpick-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(126px, 1fr));
+    gap: 6px;
+    padding: 2px 0 4px;
+}
+
+.qs-gpick-chip {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    min-width: 0;
+    padding: 6px 8px;
+    border: 1px solid var(--qs-border);
+    border-radius: 9px;
+    background: var(--qs-field, rgba(15, 20, 40, .04));
+    color: var(--qs-fg);
+    font: inherit;
+    font-size: 12px;
+    text-align: left;
+    cursor: pointer;
+    transition: background-color .1s ease, border-color .1s ease;
+}
+
+.qs-gpick-chip:hover {
+    background: var(--qs-hover);
+    border-color: var(--qs-accent, #2563EB);
+}
+
+.qs-gpick-chip.is-added {
+    opacity: .5;
+    cursor: default;
+}
+
+.qs-gpick-chip.is-added:hover {
+    background: var(--qs-field, rgba(15, 20, 40, .04));
+    border-color: var(--qs-border);
+}
+
+.qs-gpick-chip .qs-gpick-ic {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    font-size: 14px;
+}
+
+.qs-gpick-chip .qs-gpick-ic img,
+.qs-gpick-chip .qs-gpick-ic svg {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+}
+
+.qs-gpick-chip .qs-gpick-nm {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+}
+
+.qs-gpick-chip.is-added .qs-gpick-nm::after {
+    content: ' ✓';
+    color: var(--qs-accent, #2563EB);
+}
+
+.qs-gpick-foot {
+    flex: none;
+    padding: 0 2px;
+    font-size: 10.5px;
+    color: var(--qs-fg-dim);
+    opacity: .7;
+    user-select: none;
+}
+
+/* 右下角缩放抓手 */
+.qs-gpick-grip {
+    position: absolute;
+    right: 2px;
+    bottom: 2px;
+    width: 17px;
+    height: 17px;
+    border-radius: 5px;
+    cursor: nwse-resize;
+    opacity: .45;
+    background:
+        linear-gradient(135deg, transparent 42%, currentColor 42%, currentColor 50%, transparent 50%),
+        linear-gradient(135deg, transparent 62%, currentColor 62%, currentColor 70%, transparent 70%);
+    color: var(--qs-fg-dim);
+}
+
+.qs-gpick-grip:hover {
+    opacity: .9;
+    background-color: var(--qs-hover);
+}
+
+.qs-gpick-empty {
+    padding: 16px 6px;
+    font-size: 12px;
     color: var(--qs-fg-dim);
     text-align: center;
 }
@@ -2281,6 +2475,23 @@ button.fav-grp-head:focus-visible {
 .bar.qs-grid.qs-gedit .qs-gcell {
     /* 用虚线圈出"现在能改"，和正常态区分开 */
     border-style: dashed;
+    /* 有 × 的格子必须是定位上下文 */
+    position: relative;
+    /* ⚠ 编辑态**必须允许溢出**：× 角标是 `top:-6px; right:-6px` 探出格子边框的，
+     * 而正常态的 `.qs-gcell{overflow:hidden}` 是为了裁掉过大的图标/文字。
+     * 两者冲突的结果就是用户报的「叉号只露出一部分、被功能框裁切」。
+     * 编辑态是临时状态（下次唤起自动退出），这里优先保证 × 完整可见；
+     * 图标本身已经按格子尺寸收缩（见 .qs-gicon），不会因此溢出到哪里去。 */
+    overflow: visible;
+    /* 探出去的圆点要压在**相邻格子**之上：网格项按 DOM 顺序绘制，后画的盖先画的，
+     * 不给 z-index 的话左边格子的 × 会被右边格子的背景压掉一半。 */
+    z-index: 1;
+}
+
+/* 悬停/正在点的格子再抬一层，× 永远不会被邻居盖住 */
+.bar.qs-grid.qs-gedit .qs-gcell:hover,
+.bar.qs-grid.qs-gedit .qs-gcell:focus-visible {
+    z-index: 4;
 }
 
 .bar.qs-grid .qs-gdel {
@@ -2299,7 +2510,8 @@ button.fav-grp-head:focus-visible {
     line-height: 1;
     font-weight: 600;
     cursor: pointer;
-    box-shadow: 0 1px 3px rgba(0, 0, 0, .28);
+    /* 一圈面板底色 + 一层投影：× 探在格子外，压到相邻格子/边框上时还能分得清 */
+    box-shadow: 0 0 0 2px var(--qs-bg-fill, var(--qs-bg, #fff)), 0 1px 3px rgba(0, 0, 0, .28);
     /* 点击热区比视觉大一圈，小格子也好点 */
     padding: 0;
     z-index: 3;
@@ -2310,10 +2522,7 @@ button.fav-grp-head:focus-visible {
     transform: scale(1.08);
 }
 
-/* 有 × 的格子必须是定位上下文 */
-.bar.qs-grid.qs-gedit .qs-gcell {
-    position: relative;
-}
+/* 有 × 的格子必须是定位上下文 —— 见上面 .qs-gedit .qs-gcell 那段 */
 
 /* 编辑按钮的"已开启"态：和悬停同一套强调色，一眼看出正在编辑 */
 .qs-ghead .qs-gbtn.on {
@@ -2324,7 +2533,7 @@ button.fav-grp-head:focus-visible {
 
 /* 功能图标进到格子/选板里要撑满容器（qsFuncIcon 产出的是 svg 或字母徽标） */
 .bar.qs-grid .qs-gicon > svg,
-.qs-gpick-item .qs-gpick-ic > svg {
+.qs-gpick-chip .qs-gpick-ic > svg {
     width: 100%;
     height: 100%;
     display: block;
@@ -2332,7 +2541,7 @@ button.fav-grp-head:focus-visible {
 }
 
 .bar.qs-grid .qs-gicon > .letter,
-.qs-gpick-item .qs-gpick-ic > .letter {
+.qs-gpick-chip .qs-gpick-ic > .letter {
     display: flex;
     align-items: center;
     justify-content: center;

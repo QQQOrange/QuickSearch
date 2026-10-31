@@ -3188,6 +3188,8 @@ const SLIDERS = [
     // 2026-10-23：横条自己收起来的两条阈值（0 = 不收起）
     ['s-barIdle', 's-barIdleVal', 'barIdleSec', 5],
     ['s-barAway', 's-barAwayVal', 'barAwayPx', 400],
+    // v2.6.8：右下角内置提示的显示时长（1~15 秒，后端 apply_one_setting 再夹一次）
+    ['s-notifySeconds', 's-notifySecondsVal', 'notifySeconds', 3],
     ['s-barBlur', 's-barBlurVal', 'barBlur', 0],
     // 液态玻璃一组（单位见 SLIDER_LABEL：折射/厚度是‰，磨砂是 px）
     // 缺省值与 GLASS_PRESETS 的 standard 档一致（#133）
@@ -3212,6 +3214,7 @@ const SLIDER_LABEL = {
     barIdleSec: (v) => (Number(v) === 0 ? '不收起' : v + ' 秒'),
     barAwayPx: (v) => (Number(v) === 0 ? '不收起' : v + ' px'),
     barDimDelayMs: (v) => (Number(v) === 0 ? '立即' : (Number(v) / 1000) + ' 秒'),
+    notifySeconds: (v) => v + ' 秒',
     barGlassFrost: (v) => (v === 0 ? '关' : v + ' px'),
     barGlassRefraction: (v) => v + ' ‰',
     barGlassBevel: (v) => v + ' ‰',

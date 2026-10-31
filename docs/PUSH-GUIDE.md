@@ -234,11 +234,17 @@ git push origin main
 
 ## 发布新版本 Release
 
-### 1. 改版本号（**四处**，必须一致）
+### 1. 改版本号（**一处**）
 
 ```powershell
-# Cargo.toml / tauri.conf.json / package.json / package-lock.json（前两处）里的 version
+# 只剩 Cargo.toml 一处：tauri.conf.json / package.json / package-lock.json
+# 已经在 v2.6.8 连同 Tauri 时代的 capabilities/、gen/ 一起删掉了
+# （原生宿主不读它们，exe 的版本资源来自 app.rc + Cargo.toml）。
 ```
+
+> ⚠ `src/main.rs` 的 `get_config.version` 与更新检查都读 `CARGO_PKG_VERSION`，
+> 所以**只改 Cargo.toml 就够**；改完 `cargo build --release` 会让 exe 属性里的
+> 版本号一起变。
 
 > ⚠ v1.2.0 起多了一条约束：**程序版本与模型资产版本是两回事**。
 > 模型（4.4/42/84/168 MB）与 `onnxruntime.dll` **不随每个版本重传** ——
@@ -296,8 +302,7 @@ Invoke-WebRequest -Method Post -Uri "https://api.github.com/repos/QQQOrange/Quic
 
 - [ ] `cargo test` 全过、`cargo clippy` 0 warning
 - [ ] 真机探针全过
-- [ ] 四处版本号一致（`Cargo.toml` / `tauri.conf.json` / `package.json` / `package-lock.json`）
-      —— ⚠ `package.json` 最容易漏（v1.5.4~v1.5.9 就一直停在 1.5.3 没动）
+- [ ] 版本号已改（**只有 `Cargo.toml` 一处**；Tauri 那三处配置文件已删）
 - [ ] `docs/RELEASE-v<版本>.md` 已写，校验值与实际产物一致
 - [ ] **发布说明里有一行 `SHA256: <64 位十六进制>`**（自动更新靠它校验更新包）
 - [ ] **push 前先 `git fetch` 比较本地与远端**（远端若是 API 建的会 rejected，见坑 1）

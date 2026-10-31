@@ -1,9 +1,0 @@
-{
-  "$schema": "../gen/schemas/desktop-schema.json",
-  "identifier": "trans-win",
-  "description": "v1.5.16 翻译窗：只放行事件通道（窗口已经开着时，横条/OCR 再点翻译要能把新文本推进来）。自定义命令（trans_run / trans_session 等）不受 capability 管控。",
-  "windows": ["trans"],
-  "permissions": [
-    "core:event:default"
-  ]
-}

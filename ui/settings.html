@@ -74,13 +74,17 @@
             <div class="rt"><b>按快捷键弹出网格页</b><small>默认 Ctrl+C；快捷键可在下面「网格页」里改。关掉它 = 按这个键什么都不弹</small></div>
             <label class="sw"><input type="checkbox" id="s-triggerCopy"><i></i></label>
         </div>
-        <!-- 右下角"正在使用什么功能"的通知（v2.6.7） -->
+        <!-- 右下角"正在使用什么功能"的提示（v2.6.7 起；v2.6.8 改成应用内置提示） -->
         <div class="row">
             <div class="rt"><b>右下角提示当前功能</b>
-                <small>用划词横条 / 网格页 / 文字识别 / 翻译 / 识图时，在屏幕右下角弹一条系统通知，
-                    写明「正在使用：功能 · 软件」，约 5 秒自动消失；同一功能 4 秒内只提示一次</small>
+                <small>用划词横条 / 网格页 / 文字识别 / 翻译 / 识图时，在屏幕右下角弹一条应用内置的小提示，
+                    写明「正在使用：功能 · 软件」；同一软件里的同一功能 10 秒内只提示一次</small>
             </div>
             <label class="sw"><input type="checkbox" id="s-notifyFeature"><i></i></label>
+        </div>
+        <div class="row col">
+            <div class="rt"><b>提示显示时长</b><small>右下角提示显示多久后自动消失 · 当前 <span id="s-notifySecondsVal">3 秒</span></small></div>
+            <input type="range" id="s-notifySeconds" min="1" max="15" step="1">
         </div>
         <div class="row col">
             <div class="rt"><b>出现延迟</b><small>松手后等这么久才弹，调大可避免还在拖选时就冒出来 · 当前 <span id="s-delayVal">0</span> ms</small></div>

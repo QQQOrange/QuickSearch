@@ -2576,6 +2576,16 @@ pub fn make_overlay(hwnd: HWND) {
     );
 }
 
+/// 右下角提示用的窗口：不抢焦点、不进 Alt+Tab、**鼠标穿透**
+/// （点下去落到下面的程序上 —— 提示只是"扫一眼"，不该挡任何操作）。
+pub fn make_click_through(hwnd: HWND) {
+    let cur = window_ex_style(hwnd);
+    set_ex_style(
+        hwnd,
+        cur | WS_EX_NOACTIVATE.0 | WS_EX_TOOLWINDOW.0 | WS_EX_TRANSPARENT.0,
+    );
+}
+
 pub fn set_noactivate(hwnd: HWND, no_activate: bool) {
     let cur = window_ex_style(hwnd);
     let next = if no_activate {

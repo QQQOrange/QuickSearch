@@ -1289,6 +1289,12 @@ pub struct Config {
     /// 嫌吵可以在 设置 → 通用 里关掉（关掉之后不再产生任何通知）。
     #[serde(default = "default_true")]
     pub notify_feature: bool,
+    /// 右下角提示**显示几秒**（1~15，默认 3）。
+    ///
+    /// v2.6.8：提示从"系统通知"换成应用自己画的小窗，时长终于能自己定 ——
+    /// 系统通知的时长是操作系统说了算的，用户当时抱怨的正是"弹得频繁、还关不掉"。
+    #[serde(default = "default_notify_seconds")]
+    pub notify_seconds: u32,
     /// Ctrl+C 也弹
     pub trigger_copy: bool,
     /// 开机自启
@@ -1995,6 +2001,7 @@ impl Default for Config {
         Self {
             trigger_select: true,
             notify_feature: true,
+            notify_seconds: 3,
             trigger_copy: true,
             auto_start: false,
             icon_size: 30,
@@ -3083,6 +3090,12 @@ fn default_dim_delay_ms() -> u32 {
 /// 目前只有 `ocr_stay_default` / `img_enable` / `img_add_to_bar` / `bar_need_text` 用它。
 fn default_true() -> bool {
     true
+}
+
+/// 右下角提示的默认显示秒数（3 秒）：够看清"正在使用：划词搜索 · 记事本"，
+/// 又不至于在屏幕上赖着。配置缺失/被手改成 0 时都走这里。
+fn default_notify_seconds() -> u32 {
+    3
 }
 
 /// 横条无操作自动收起的默认秒数（5 秒 —— 用户指定的那个数）。

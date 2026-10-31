@@ -307,6 +307,11 @@ pub fn install(def: TrayDef, icon_png: &[u8], on_menu: MenuFn, on_event: EventFn
 ///   · 托盘图标本来就在，复用它是系统原生观感，且**不需要**额外的 WebView 进程；
 ///   · 唯一代价是时长由系统决定（`uTimeout` 只有 XP 时代才认），所以调用方
 ///     自己做节流（见 main.rs 的 `notify_feature`）。
+/// ⚠ **v2.6.8 起不再用于"正在使用什么功能"的提示** —— 那条改成了应用自己画的
+/// 右下角小窗（见 `toast.rs` / `ui/toast.html`），因为系统气泡的时长和样式
+/// 都由 Windows 说了算，用户要求"内置提示 + 时长可配"。
+/// 保留这个函数是为了托盘菜单里的系统级提示还有路可走，别再往业务上用。
+#[allow(dead_code)]
 pub fn balloon(title: &str, text: &str) {
     let Some(hwnd) = ensure_msg_window() else { return };
     let (hicon, tip) = {

@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="color-scheme" content="light dark">
+<title>Quick Search 提示</title>
+<style>
+/* 右下角内置提示（v2.6.8）。
+ * 独立小窗（336×88 逻辑像素、无边框、透明、置顶、不抢焦点、鼠标穿透），
+ * 所以样式全写在这里，不引 bar.css / settings.css（那两个一个 2500 行、
+ * 一个 3800 行，为了这么一张小卡片去解析它们只会拖慢首帧）。 */
+* { box-sizing: border-box; }
+
+:root {
+    --card: rgba(32, 34, 40, .96);
+    --fg: #eceef3;
+    --dim: #9aa1af;
+    --line: rgba(255, 255, 255, .10);
+    --accent: #4E6EF2;
+    --shadow: 0 8px 26px rgba(0, 0, 0, .42);
+}
+
+@media (prefers-color-scheme: light) {
+    :root {
+        --card: rgba(252, 252, 254, .98);
+        --fg: #1b1c20;
+        --dim: #6b7280;
+        --line: rgba(15, 20, 40, .12);
+        --accent: #2563EB;
+        --shadow: 0 8px 24px rgba(15, 20, 40, .18);
+    }
+}
+
+html, body {
+    margin: 0;
+    height: 100%;
+    background: transparent;
+    overflow: hidden;
+    /* 窗口本身就是这张卡片，留 6px 给投影，别让它贴边被裁 */
+    padding: 6px;
+    font-family: "Microsoft YaHei UI", "Segoe UI", system-ui, sans-serif;
+    color: var(--fg);
+    user-select: none;
+    cursor: default;
+}
+
+#card {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    height: 100%;
+    padding: 10px 12px;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: var(--card);
+    box-shadow: var(--shadow);
+    /* 进场：从下方 10px 滑上来 + 淡入；退场反过来 */
+    opacity: 0;
+    transform: translateY(10px);
+    transition: opacity .16s ease, transform .16s cubic-bezier(.22, 1, .36, 1);
+}
+
+#card.in {
+    opacity: 1;
+    transform: none;
+}
+
+#card.out {
+    opacity: 0;
+    transform: translateY(6px);
+}
+
+/* 左侧一条强调色，比整块彩色低调，又能一眼看出"这是 Quick Search 在说话" */
+#bar {
+    flex: none;
+    width: 3px;
+    height: 30px;
+    border-radius: 2px;
+    background: var(--accent);
+}
+
+#txt {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+#title {
+    font-size: 10.5px;
+    letter-spacing: .05em;
+    color: var(--dim);
+    line-height: 1.35;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+#msg {
+    margin-top: 2px;
+    font-size: 13px;
+    line-height: 1.45;
+    color: var(--fg);
+    /* 最多两行：正文是"正在使用：划词搜索 · 某某软件"，软件名一长会换行 */
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    overflow-wrap: anywhere;
+}
+</style>
+</head>
+<body>
+<div id="card">
+    <div id="bar"></div>
+    <div id="txt">
+        <div id="title">Quick Search</div>
+        <div id="msg"></div>
+    </div>
+</div>
+<script>
+(function () {
+    const invoke = window.__TAURI__.core.invoke;
+    const listen = window.__TAURI__.event.listen;
+    const card = document.getElementById('card');
+    const msg = document.getElementById('msg');
+    let timer = 0;
+
+    function hide() {
+        if (card.classList.contains('out')) return;
+        card.classList.remove('in');
+        card.classList.add('out');
+        // 等退场动画播完再让 Rust 把窗口藏起来（180ms 比 .16s 略长，稳一点）
+        setTimeout(() => { invoke('toast_hide').catch(() => { }); }, 190);
+    }
+
+    function render(p) {
+        const text = (p && p.text) ? String(p.text) : '';
+        if (!text) return;
+        // 下限 800ms：再短用户根本来不及看清
+        const ms = Math.max(800, Number((p && p.ms) || 3000));
+        msg.textContent = text;
+        msg.title = text;
+        card.classList.remove('out');
+        // 先摘掉 in 再挂回去，保证连续两次提示都能重新播进场动画
+        card.classList.remove('in');
+        void card.offsetWidth;
+        card.classList.add('in');
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(hide, ms);
+    }
+
+    listen('qs://hint', (ev) => render(ev.payload));
+
+    /* 首帧可能比 Rust 的第一次 emit 晚到（新窗口正在加载 WebView2），
+       所以主动拉一次"最近一次提示内容"。 */
+    invoke('toast_pull').then((p) => { if (p && p.text) render(p); }).catch(() => { });
+})();
+</script>
+</body>
+</html>

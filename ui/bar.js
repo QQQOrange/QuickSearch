@@ -3344,110 +3344,197 @@ let gridEdit = false;
 /** 正在给第几个空位选内容；-1 = 没在选。 */
 let gridPickAt = -1;
 
-/** 能往网格里加的东西，按用户要求分三组：内置功能 / 智能直达 / 引擎。 */
-function gridPickGroups() {
-    const inGrid = new Set((gridLast && Array.isArray(gridLast.items)) ? gridLast.items : []);
-    const groups = [];
+/** 选板的过滤胶囊：all / builtin / go / fav / model / web / app / hotkey */
+let gridPickFilter = 'all';
 
-    // ① 软件内置功能（文字识别 / 翻译 / 识图）—— 即"当前软件内置的功能"
+/** 选板默认尺寸、下限，以及记忆下来的上次尺寸（拖动右下角改，见 startPickResize）。 */
+const PICK_W0 = 560, PICK_H0 = 470, PICK_MIN_W = 400, PICK_MIN_H = 300;
+let pickSize = { w: PICK_W0, h: PICK_H0 };
+
+/** 选板里能加进网格的内容，按「更多引擎」面板那套分类组织（v2.6.8）。
+ *
+ *  用户口径：「参照横条更多引擎页面的分类方式，提供同样细致的分类，完整展现
+ *  所有可添加功能，便于查找和添加」。原来这里是"一张平表 + 几个分组标题"，
+ *  几百个引擎挤成一列，找「哔哩哔哩」要滚半天。现在和面板同源：
+ *
+ *      大类（网页 / 软件 / 快捷键）→ 主题组（搜索与 AI / 知识教育 …）→ 分类（搜索 / 视频 …）
+ *
+ *  两种形状：
+ *    { key, title, desc, items: [item] }                          —— 内置 / 直达 / 收藏夹 / 模型
+ *    { key, title, desc, themes: [{ title, cats: [{ title, items }] }] }  —— 引擎
+ *  item = { name, label, added, node() }；added = 已经在网格里（照样列出来，点不动）。
+ *
+ *  ⚠ 分类层级直接来自 `qsCatalogGroups(CATALOG)`（面板、设置页、这里三处共用），
+ *    不要在这里另写一套归类规则 —— 三处口径一旦分叉，用户会发现"面板里有、
+ *    网格里找不到"。
+ */
+function gridPickSections() {
+    const inGrid = new Set((gridLast && Array.isArray(gridLast.items)) ? gridLast.items : []);
+    const out = [];
+
+    /* ① 软件内置功能 */
     const builtin = [];
     for (const key of ['@ocr', '@trans', '@img', '@wrap']) {
         const meta = GRID_SENTINELS[key];
-        if (!meta || inGrid.has(key)) continue;
+        if (!meta) continue;
         builtin.push({
             name: key,
             label: meta.label,
-            // 图标与横条上那颗同一套（以前这里是 emoji，和设置里对不上）
+            added: inGrid.has(key),
             node: () => (window.qsFuncIcon ? window.qsFuncIcon(key) : document.createTextNode('•')),
         });
     }
-    if (builtin.length) groups.push({ title: '内置功能', items: builtin });
+    if (builtin.length) out.push({ key: 'builtin', title: '内置功能', desc: '软件自带的功能按钮', items: builtin });
 
-    // ② 智能直达（图标走统一的内置图 / 用户自定义图）
+    /* ② 智能直达（备注优先，和横条/格子上的叫法一致） */
     const goItems = [];
     for (const it of ((window.CONF && window.CONF.shortcuts) || [])) {
         if (!it || !it.id) continue;
         const sentinel = window.QS_GO_PREFIX + it.id;
-        if (inGrid.has(sentinel)) continue;
         goItems.push({
             name: sentinel,
-            // 备注优先（备注 = 自动抓来的网页标题，比域名好认）
             label: (it.note || '').trim() || it.name || it.target,
-            node: () => window.qsGoIconNode(sentinel),
+            added: inGrid.has(sentinel),
+            node: () => (window.qsGoIconNode ? window.qsGoIconNode(sentinel) : document.createTextNode('•')),
         });
     }
-    if (goItems.length) groups.push({ title: '智能直达', items: goItems });
+    if (goItems.length) out.push({ key: 'go', title: '智能直达', desc: '网址、软件与自定义目标', items: goItems });
 
-    /* ②-b 收藏夹（v2.6.2）：一格 = 一个目录，加进去的是 `@fav:<id>` 哨兵。
-     * 点格子会像横条上那颗收藏夹按钮一样展开这个目录（见 renderGrid 的哨兵分支），
-     * 目录里的条目再点一下就是复制/注入到原软件。 */
+    /* ③ 收藏夹：一格 = 一个目录（`@fav:<id>` 哨兵），子目录用缩进表示层级 */
     const favItems = [];
     const walkFav = (g, lv) => {
         if (!g || !g.id) return;
         const sent = QS_FAV_PREFIX + g.id;
-        if (!inGrid.has(sent)) {
-            favItems.push({
-                name: sent,
-                label: (lv ? '\u3000'.repeat(lv) + '└ ' : '') + (g.name || '收藏夹'),
-                node: () => (window.qsFavIconNode ? window.qsFavIconNode(sent) : document.createTextNode('★')),
-            });
-        }
+        favItems.push({
+            name: sent,
+            label: (lv ? '　'.repeat(lv) + '└ ' : '') + (g.name || '收藏夹'),
+            added: inGrid.has(sent),
+            node: () => (window.qsFavIconNode ? window.qsFavIconNode(sent) : document.createTextNode('★')),
+        });
         for (const sub of (g.children || [])) walkFav(sub, lv + 1);
     };
     for (const g of window.qsFavGroups()) walkFav(g, 0);
-    if (favItems.length) groups.push({ title: '收藏夹', items: favItems });
+    if (favItems.length) out.push({ key: 'fav', title: '收藏夹', desc: '按目录整组加进格子', items: favItems });
 
-    // ③ 引擎（工具栏 + 全部分类，按名字去重；同样的名字在网格里只该出现一次）
-    const seen = new Set();
-    const engItems = [];
-    const pushEng = (n) => {
-        if (!n || seen.has(n) || inGrid.has(n)) return;
-        seen.add(n);
-        engItems.push({ name: n, label: n, eng: true });
-    };
-    try {
-        for (const c of (CATALOG.categories || [])) for (const e of (c.engines || [])) pushEng(e.name);
-        for (const e of (CATALOG.toolbar || [])) pushEng(e.name);
-    } catch (_) { /* 目录还没加载出来就只显示前两组 */ }
-    /* ②-c 三类「模型」：文字识别 / 识图 / 翻译，**各自成组**。
-     *
-     *  用户口径：「OCR 模型、图片识别模型、翻译模型等应能被搜索到并分别展示」——
-     *  以前这里只有「内置功能 / 智能直达 / 收藏夹 / 引擎」，搜「百度」只能搜到
-     *  搜索引擎，搜「翻译」只看得到那颗通用按钮，看不出有哪些模型可用。 */
-    const addModelGroup = (title, list, sentinel, activeIds) => {
-        if (!list.length || inGrid.has(sentinel)) return;
+    /* ④ 三类模型：列出来是为了"能被搜到、能看清有哪些"；加进网格的仍然是那颗
+     *    功能格子本身（`@ocr` / `@img` / `@trans`），具体用哪家由设置决定。 */
+    const addModel = (title, list, sentinel, activeIds) => {
+        if (!list.length) return;
         const items = list.map((m) => ({
             name: sentinel,
             label: (m.name || m.id) + (activeIds.has(String(m.id)) ? '（当前使用）' : ''),
-            /* 每行都用**功能自己的图标**：这三组的条目最终加进网格的就是那颗功能格子，
-             * 用各家模型自己的 logo 反而会让人以为"这一格单独绑了那一家"。 */
+            added: inGrid.has(sentinel),
             node: () => (window.qsFuncIcon ? window.qsFuncIcon(sentinel) : document.createTextNode('•')),
         }));
-        if (items.length) groups.push({ title, items });
+        if (items.length) out.push({ key: 'model', title, desc: '当前可用的模型', items });
     };
     const imgOn = new Set(((window.CONF && window.CONF.imgEngines) || []).map(String));
-    addModelGroup('文字识别模型', GRID_MODELS.ocr, '@ocr',
+    addModel('文字识别模型', GRID_MODELS.ocr, '@ocr',
         new Set([String((window.CONF && window.CONF.ocrEngine) || '')]));
-    addModelGroup('识图模型', GRID_MODELS.img, '@img', imgOn);
-    addModelGroup('翻译模型', GRID_MODELS.trans, '@trans',
+    addModel('识图模型', GRID_MODELS.img, '@img', imgOn);
+    addModel('翻译模型', GRID_MODELS.trans, '@trans',
         new Set([String((window.CONF && window.CONF.transEngine) || '')]));
 
-    if (engItems.length) groups.push({ title: '引擎', items: engItems });
+    /* ⑤ 引擎：大类 → 主题组 → 分类（和「更多引擎」面板同一套） */
+    let tree = [];
+    try {
+        if (CATALOG && typeof window.qsCatalogGroups === 'function') tree = window.qsCatalogGroups(CATALOG);
+    } catch (_) { tree = []; }
+    const KIND_TITLE = { web: '网页引擎', app: '软件引擎', hotkey: '快捷键引擎' };
+    const KIND_DESC = {
+        web: '浏览器里的搜索引擎与网页直达',
+        app: '本机软件与系统工具：搜索、直达',
+        hotkey: '把组合键发给前台软件',
+    };
+    const seen = new Set();
+    const mkEng = (name) => ({
+        name,
+        label: name,
+        added: inGrid.has(name),
+        eng: true,
+        node: () => {
+            try { return buildIconInner(name).node; } catch (_) { return document.createTextNode('🔎'); }
+        },
+    });
+    for (const g of tree) {
+        const themes = new Map();
+        for (const sub of (g.subs || [])) {
+            const kinds = Array.isArray(sub.kinds) ? sub.kinds : [];
+            for (const cat of (sub.cats || [])) {
+                for (const e of (cat.engines || [])) {
+                    const name = e && e.name;
+                    if (!name || seen.has(name)) continue;
+                    // sub.kinds 空 = 这个分类没标 search/open，两种都算
+                    if (kinds.length && kinds.indexOf(window.qsEngineKind(e)) < 0) continue;
+                    seen.add(name);
+                    const th = (cat.theme && cat.theme.title) ? cat.theme.title : '其他';
+                    const ct = String(cat.title || '未分类');
+                    if (!themes.has(th)) themes.set(th, new Map());
+                    const cats = themes.get(th);
+                    if (!cats.has(ct)) cats.set(ct, []);
+                    cats.get(ct).push(mkEng(name));
+                }
+            }
+        }
+        if (!themes.size) continue;
+        out.push({
+            key: g.key,
+            title: KIND_TITLE[g.key] || g.title || '引擎',
+            desc: KIND_DESC[g.key] || '',
+            themes: Array.from(themes.entries()).map(([title, cats]) => ({
+                title,
+                cats: Array.from(cats.entries()).map(([t, items]) => ({ title: t, items })),
+            })),
+        });
+    }
 
-    return groups;
+    /* ⑥ 工具栏里没进任何分类的（用户自定义 + 老数据）：补一个"其他引擎"，
+     *    否则这些引擎在面板里有、在选板里搜不到 —— 用户会以为丢东西了。 */
+    const left = [];
+    try {
+        for (const e of (CATALOG.toolbar || [])) {
+            const name = e && e.name;
+            if (name && !seen.has(name)) { seen.add(name); left.push(mkEng(name)); }
+        }
+    } catch (_) { /* 目录没加载出来就算了 */ }
+    if (left.length) {
+        out.push({
+            key: 'web',
+            title: '其他引擎',
+            desc: '工具栏里但没归类的引擎',
+            themes: [{ title: '未分类', cats: [{ title: '工具栏', items: left }] }],
+        });
+    }
+
+    return out;
 }
 
-/** 关掉选板（顺带把借来的焦点还回去）。 */
+/** 一个分组里有多少项（两种形状都算）。 */
+function pickSectionCount(sec) {
+    if (Array.isArray(sec.items)) return sec.items.length;
+    let n = 0;
+    for (const th of (sec.themes || [])) for (const c of (th.cats || [])) n += c.items.length;
+    return n;
+}
+/** 关掉选板（顺带把借来的焦点还回去，并把临时撑大的窗口还给网格）。 */
 function closeGridPicker() {
     const p = barEl.querySelector('.qs-gpick');
     if (p) p.remove();
     gridPickAt = -1;
+    gridPickFilter = 'all';
+    /* 选板模式给 .bar 写过内联宽高（applyPickSize），必须在这里还回去 ——
+     * 否则关掉选板后网格会被留在 560×470 的大框里。 */
+    if (barEl.classList.contains('qs-gpicking')) {
+        barEl.classList.remove('qs-gpicking');
+        barEl.style.removeProperty('width');
+        barEl.style.removeProperty('height');
+        pushLayout();
+    }
     if (gridPickFocusHeld) {
         gridPickFocusHeld = false;
         invoke('focus_bar', { enable: false }).catch(() => { });
     }
 }
-
 /** 进入 / 退出编辑模式。只切 UI，不动配置。 */
 function toggleGridEdit() {
     gridEdit = !gridEdit;
@@ -3545,10 +3632,19 @@ function resetGridTransient() {
     if (gridPersistTimer) { clearTimeout(gridPersistTimer); gridPersistTimer = 0; }
 }
 
-/** 打开选板。`index` = 被点的空位下标（新内容插到这个位置）。 */
+/** 打开选板。`index` = 被点的空位下标（新内容插到这个位置）。
+ *
+ *  v2.6.8：选板不再"挤在格子里"，而是把整个面板临时换成选板窗口
+ *  （`.qs-gpicking` + 内联宽高），所以打开时要先摆尺寸再画内容，
+ *  最后 `pushLayout()` 让 Rust 把窗口撑到新尺寸 —— 否则面板还是网格那么小，
+ *  右边和下边的列表会被窗口裁掉。 */
 async function openGridPicker(index) {
     gridPickAt = typeof index === 'number' ? index : -1;
+    gridPickFilter = 'all';
+    barEl.classList.add('qs-gpicking');
+    applyPickSize();
     renderGridPicker();
+    pushLayout();
     /* 横条默认是"不抢焦点"的浮层（WS_EX_NOACTIVATE）：鼠标点得动，但键盘
      * 永远进不来 —— 表现就是选板里的搜索框点了也没法打字（用户报的）。
      * 引擎面板打开时做的是同一件事（focus_bar(true)），这里照抄。
@@ -3560,6 +3656,46 @@ async function openGridPicker(index) {
     focusGridPickSearch();
 }
 
+/** 把选板的尺寸写进 .bar（内联样式，怕被 .qs-grid 的 width:max-content 盖掉）。
+ *  上限按屏幕走，免得拖到比工作区还大、按钮跑到屏幕外。 */
+function applyPickSize() {
+    const maxW = Math.round(((window.screen && screen.availWidth) || 1200) * 0.92);
+    const maxH = Math.round(((window.screen && screen.availHeight) || 800) * 0.86);
+    const w = Math.max(PICK_MIN_W, Math.min(pickSize.w, maxW));
+    const h = Math.max(PICK_MIN_H, Math.min(pickSize.h, maxH));
+    barEl.style.width = w + 'px';
+    barEl.style.height = h + 'px';
+}
+
+/** 右下角抓手拖动改尺寸。用户要求「弹窗长宽支持鼠标拖动自定义调节」。
+ *
+ *  为什么直接改 .bar 的内联宽高、而不是给 .qs-gpick 加 CSS resize：
+ *  窗口大小是 `pushLayout()` 量出来回填给 Rust 的，改 .qs-gpick 只会让它溢出
+ *  面板、被窗口裁掉；改 .bar 才是"窗口真的变大"。拖拽过程中节流 40ms，
+ *  松手再补一次，避免每移动一像素就同步一次窗口尺寸。 */
+function startPickResize(e) {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const r = barEl.getBoundingClientRect();
+    const x0 = e.clientX, y0 = e.clientY;
+    const w0 = r.width, h0 = r.height;
+    let last = 0;
+    const onMove = (ev) => {
+        pickSize.w = Math.round(w0 + (ev.clientX - x0));
+        pickSize.h = Math.round(h0 + (ev.clientY - y0));
+        applyPickSize();
+        const now = performance.now();
+        if (now - last > 40) { last = now; pushLayout(); }
+    };
+    const onUp = () => {
+        window.removeEventListener('pointermove', onMove, true);
+        window.removeEventListener('pointerup', onUp, true);
+        pushLayout();
+    };
+    window.addEventListener('pointermove', onMove, true);
+    window.addEventListener('pointerup', onUp, true);
+}
 /** 把光标送进选板的搜索框（刚建出来时元素还没完成布局，聚焦可能落空，
  *  所以补一次延时重试 —— 和设置页那个弹窗同一个坑）。 */
 function focusGridPickSearch() {
@@ -3570,7 +3706,19 @@ function focusGridPickSearch() {
     setTimeout(() => { if (document.contains(q)) q.focus(); }, 80);
 }
 
-/** 画选板。外壳只建一次，之后换搜索词只重画列表 —— 否则每敲一个字
+/** 选板的过滤胶囊（顺序 = 展示顺序）。key 和 gridPickSections 的 key 对应。 */
+const PICK_FILTERS = [
+    ['all', '全部'],
+    ['builtin', '内置功能'],
+    ['go', '智能直达'],
+    ['fav', '收藏夹'],
+    ['model', '模型'],
+    ['web', '网页引擎'],
+    ['app', '软件引擎'],
+    ['hotkey', '快捷键'],
+];
+
+/** 画选板。外壳只建一次，之后换搜索词/过滤只重画列表 —— 否则每敲一个字
  *  输入框都会被重建，焦点直接丢掉。 */
 function renderGridPicker(query) {
     let box = barEl.querySelector('.qs-gpick');
@@ -3584,10 +3732,13 @@ function renderGridPicker(query) {
         ti.className = 'qs-gpick-title';
         ti.textContent = '添加到这一格';
         head.appendChild(ti);
+        const cnt = document.createElement('span');
+        cnt.className = 'qs-gpick-count';
+        head.appendChild(cnt);
         const x = document.createElement('button');
         x.type = 'button';
         x.className = 'qs-gbtn';
-        x.title = '关闭';
+        x.title = '关闭（Esc）';
         x.textContent = '✕';
         x.addEventListener('click', closeGridPicker);
         head.appendChild(x);
@@ -3597,7 +3748,7 @@ function renderGridPicker(query) {
         q.className = 'qs-gpick-search';
         q.type = 'text';
         q.spellcheck = false;
-        q.placeholder = '搜索引擎 / 智能直达 / 收藏夹 / 识别·识图·翻译模型';
+        q.placeholder = '搜索：引擎 / 智能直达 / 收藏夹 / 内置功能 / 模型';
         q.addEventListener('input', () => renderGridPicker());
         // 选板里打字不应该被横条的按键处理截走（Esc 留给全局关闭）
         q.addEventListener('keydown', (e) => {
@@ -3605,68 +3756,188 @@ function renderGridPicker(query) {
         });
         box.appendChild(q);
 
+        const fil = document.createElement('div');
+        fil.className = 'qs-gpick-filters';
+        box.appendChild(fil);
+
         const body = document.createElement('div');
         body.className = 'qs-gpick-body';
         box.appendChild(body);
+
+        const foot = document.createElement('div');
+        foot.className = 'qs-gpick-foot';
+        foot.textContent = '拖动右下角可调整窗口大小 · 已在网格里的项会打勾';
+        box.appendChild(foot);
+
+        /* 右下角缩放抓手（见 startPickResize） */
+        const grip = document.createElement('div');
+        grip.className = 'qs-gpick-grip';
+        grip.title = '拖动调整窗口大小';
+        grip.addEventListener('pointerdown', startPickResize);
+        box.appendChild(grip);
 
         barEl.appendChild(box);
         q.focus();
     }
     const q = box.querySelector('.qs-gpick-search');
     if (typeof query === 'string' && q.value !== query) q.value = query;
-    renderGridPickBody(box.querySelector('.qs-gpick-body'), (q.value || '').trim().toLowerCase());
+
+    // 目录/配置可能刚加载完，每次都现算（qsCatalogGroups 本身很轻）
+    const secs = gridPickSections();
+    renderPickFilters(box, secs);
+    const kw = (q.value || '').trim().toLowerCase();
+    const n = renderGridPickBody(box.querySelector('.qs-gpick-body'), kw, secs);
+    const c = box.querySelector('.qs-gpick-count');
+    if (c) c.textContent = n ? n + ' 项可添加' : '';
 }
 
-/** 选板里的列表主体。 */
-function renderGridPickBody(body, kw) {
-    if (!body) return;
+/** 顶部过滤胶囊。只显示真的有内容的大类（比如没收藏夹就不出现「收藏夹」）。 */
+function renderPickFilters(box, secs) {
+    const bar = box.querySelector('.qs-gpick-filters');
+    if (!bar) return;
+    const has = new Set(secs.map((s) => s.key));
+    // 过滤项已经不在数据里了（比如刚把最后一颗收藏夹删掉）→ 回落到「全部」
+    if (gridPickFilter !== 'all' && !has.has(gridPickFilter)) gridPickFilter = 'all';
+    bar.textContent = '';
+    for (const [k, label] of PICK_FILTERS) {
+        if (k !== 'all' && !has.has(k)) continue;
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'qs-gpick-filt' + (gridPickFilter === k ? ' on' : '');
+        b.textContent = label;
+        b.addEventListener('click', () => {
+            gridPickFilter = k;
+            renderGridPicker();
+            focusGridPickSearch();
+        });
+        bar.appendChild(b);
+    }
+}
+
+/** 分组标题（大类）：标题 + 描述 + 条数 */
+function pickBlockHead(title, desc, n) {
+    const h = document.createElement('div');
+    h.className = 'qs-gpick-block';
+    const t = document.createElement('span');
+    t.className = 'qs-gpick-block-t';
+    t.textContent = title;
+    h.appendChild(t);
+    if (n) {
+        const c = document.createElement('span');
+        c.className = 'qs-gpick-block-n';
+        c.textContent = String(n);
+        h.appendChild(c);
+    }
+    if (desc) {
+        const d = document.createElement('span');
+        d.className = 'qs-gpick-block-d';
+        d.textContent = desc;
+        h.appendChild(d);
+    }
+    return h;
+}
+
+/** 二级标题（分类名） */
+function pickCatTitle(title, n) {
+    const c = document.createElement('div');
+    c.className = 'qs-gpick-cat';
+    c.textContent = title;
+    if (n) {
+        const s = document.createElement('i');
+        s.textContent = String(n);
+        c.appendChild(s);
+    }
+    return c;
+}
+
+/** 一颗可添加的条目 */
+function pickChip(it) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'qs-gpick-chip' + (it.added ? ' is-added' : '');
+    const ic = document.createElement('span');
+    ic.className = 'qs-gpick-ic';
+    try {
+        if (it.node) ic.appendChild(it.node());
+        else ic.textContent = '•';
+    } catch (_) {
+        ic.textContent = '•';
+    }
+    b.appendChild(ic);
+    const nm = document.createElement('span');
+    nm.className = 'qs-gpick-nm';
+    nm.textContent = it.label || it.name;
+    b.appendChild(nm);
+    b.title = (it.label || it.name) + (it.added ? '　（已在网格里）' : '');
+    b.addEventListener('click', () => {
+        if (it.added) { showBarTip('这一项已经在网格里了'); return; }
+        gridAddItem(it.name);
+    });
+    return b;
+}
+
+/** 一把条目铺成一格一格的小块（比原来"一行一条"省一半滚动） */
+function pickChipGrid(items) {
+    const g = document.createElement('div');
+    g.className = 'qs-gpick-grid';
+    for (const it of items) g.appendChild(pickChip(it));
+    return g;
+}
+
+/** 选板里的列表主体。返回真正画出来的条数（给标题旁的"N 项"用）。 */
+function renderGridPickBody(body, kw, secs) {
+    if (!body) return 0;
     body.textContent = '';
     let shown = 0;
-    for (const g of gridPickGroups()) {
-        const items = kw
-            ? g.items.filter((it) => String(it.label || it.name).toLowerCase().includes(kw))
-            : g.items;
-        if (!items.length) continue;
-        const ct = document.createElement('div');
-        ct.className = 'qs-gpick-cat';
-        ct.textContent = g.title;
-        body.appendChild(ct);
-        for (const it of items) {
-            const b = document.createElement('button');
-            b.type = 'button';
-            b.className = 'qs-gpick-item';
-            const ic = document.createElement('span');
-            ic.className = 'qs-gpick-ic';
-            if (it.node) {
-                ic.appendChild(it.node());
-            } else if (it.eng) {
-                try {
-                    ic.appendChild(buildIconInner(it.name).node);
-                } catch (_) {
-                    ic.textContent = '🔎';
-                }
-            } else {
-                ic.textContent = it.icon || '•';
-            }
-            b.appendChild(ic);
-            const nm = document.createElement('span');
-            nm.className = 'qs-gpick-nm';
-            nm.textContent = it.label || it.name;
-            b.appendChild(nm);
-            b.title = String(it.label || it.name);
-            b.addEventListener('click', () => gridAddItem(it.name));
-            body.appendChild(b);
-            shown++;
+    const hit = (it) => !kw || String(it.label || it.name).toLowerCase().includes(kw);
+
+    for (const sec of secs) {
+        if (gridPickFilter !== 'all' && gridPickFilter !== sec.key) continue;
+
+        /* —— 简单分组：内置功能 / 智能直达 / 收藏夹 / 各类模型 —— */
+        if (Array.isArray(sec.items)) {
+            const items = sec.items.filter(hit);
+            if (!items.length) continue;
+            body.appendChild(pickBlockHead(sec.title, sec.desc, items.length));
+            body.appendChild(pickChipGrid(items));
+            shown += items.length;
+            continue;
         }
+
+        /* —— 引擎：主题组 → 分类 → 条目 —— */
+        const themes = [];
+        for (const th of (sec.themes || [])) {
+            const cats = [];
+            for (const c of (th.cats || [])) {
+                const items = c.items.filter(hit);
+                if (items.length) cats.push({ title: c.title, items });
+            }
+            if (cats.length) themes.push({ title: th.title, cats });
+        }
+        if (!themes.length) continue;
+        const total = themes.reduce((n, th) => n + th.cats.reduce((m, c) => m + c.items.length, 0), 0);
+        body.appendChild(pickBlockHead(sec.title, sec.desc, total));
+        for (const th of themes) {
+            const el = document.createElement('div');
+            el.className = 'qs-gpick-theme';
+            el.textContent = th.title;
+            body.appendChild(el);
+            for (const c of th.cats) {
+                body.appendChild(pickCatTitle(c.title, c.items.length));
+                body.appendChild(pickChipGrid(c.items));
+            }
+        }
+        shown += total;
     }
+
     if (!shown) {
         const e = document.createElement('div');
         e.className = 'qs-gpick-empty';
         e.textContent = kw ? '没找到匹配的内容' : '没有可添加的内容了（都已在网格里）';
         body.appendChild(e);
     }
+    return shown;
 }
-
 /** 把 `name` 加到被点的那一格。落库走 `set_grid_items`，和其它改动同一套。 */
 async function gridAddItem(name) {
     if (!name) return;

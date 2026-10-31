@@ -89,14 +89,17 @@ There are **two** surfaces, with separate content, styling and settings:
 
 ### Bottom-right toast: which feature is running
 
-When you use **the selection bar / the grid page / OCR / translation / image search**, a system
-notification appears in the bottom-right corner:
+When you use **the selection bar / the grid page / OCR / translation / image search**, a small
+**built-in** toast appears in the bottom-right corner:
 
-- Content: title `Quick Search`, body "Using: <feature> · <app you are in>";
+- Content: "Using: <feature> · <app you are in>";
 - Timing: only when the feature **actually starts** (blocked by pause / blacklist / disabled = no toast);
-- Dismiss: about 5 s by itself; hover or click ✕ to close it right away;
-- Frequency: the same feature is announced at most once every 4 s;
+- Duration: **Settings → General → "Toast duration"** (1–15 s, 3 s by default);
+- Frequency: the same feature in the same app is announced at most once every 10 s;
 - Turn it off in **Settings → General → "Bottom-right feature hint"** (on by default).
+
+> This is not a Windows system notification but the app's own small window: rounded, follows the
+> light/dark theme, never steals focus, stays out of the taskbar and is **click-through**.
 
 **Working directly on the grid page**:
 
