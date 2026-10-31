@@ -393,10 +393,97 @@ pub fn set_text(s: &str) -> bool {
     ok
 }
 
+/* ---------------- 「复制前」的剪贴板（v2.11.1） ---------------- */
+
+/// Ctrl+C 按下那一刻抢到的原剪贴板文本：(内容, 抓取时刻)。
+static PRE_COPY: std::sync::Mutex<Option<(String, std::time::Instant)>> =
+    std::sync::Mutex::new(None);
+
+/// 在 Ctrl+C **进入目标程序之前**抢一份剪贴板文本（钩子回调里调）。
+///
+/// # 为什么必须抢在复制之前
+///
+/// 网格页 / 横条就是用 Ctrl+C 唤出的，而 Ctrl+C 本身已经把剪贴板改成了选区内容。
+/// 包裹符号、文本处理里那句 `snapshot()` 抓到的是**复制之后**的值，"还原"等于
+/// 把选区又放回去 —— 用户看到的就是「剪贴板根本没回退」。
+///
+/// # 为什么只读文本、只开一次
+///
+/// 钩子回调有 300ms 上限（`LowLevelHooksTimeout`），绝不能在这里读全盘格式
+/// （一张截图可能几十 MB）。单次 `OpenClipboard` 失败就放弃 —— 那说明别的程序
+/// 正握着剪贴板，此刻硬抢会把它的复制搞坏。读不到就什么都不记，
+/// 后面退回原来的 snapshot 行为（等于不还原），不会更糟。
+pub fn capture_precopy() {
+    // 2 秒内已经抓过就别重复：按住 Ctrl+C / 连按时会被叫很多次
+    if let Ok(g) = PRE_COPY.lock() {
+        if let Some((_, at)) = g.as_ref() {
+            if at.elapsed() < Duration::from_secs(2) {
+                return;
+            }
+        }
+    }
+    let Some(t) = read_text_quick() else { return };
+    if let Ok(mut g) = PRE_COPY.lock() {
+        *g = Some((t, std::time::Instant::now()));
+    }
+}
+
+/// 单次尝试读 CF_UNICODETEXT（不重试 —— 钩子线程里不能等）。
+fn read_text_quick() -> Option<String> {
+    if unsafe { OpenClipboard(None) }.is_err() {
+        return None;
+    }
+    let mut out = None;
+    unsafe {
+        if let Ok(h) = GetClipboardData(CF_UNICODETEXT) {
+            let hg = HGLOBAL(h.0);
+            let p = GlobalLock(hg) as *const u16;
+            if !p.is_null() {
+                // 自己数长度：GlobalSize 含对齐填充，不能用它当字符数
+                let mut n = 0usize;
+                while n < 4_000_000 && *p.add(n) != 0 {
+                    n += 1;
+                }
+                if n < 4_000_000 {
+                    out = Some(String::from_utf16_lossy(std::slice::from_raw_parts(p, n)));
+                }
+                let _ = GlobalUnlock(hg);
+            }
+        }
+        let _ = CloseClipboard();
+    }
+    out
+}
+
+/// 取走「复制前」的那份文本（**一次性**，超过 `ttl` 视为过期）。
+pub fn take_precopy(ttl: Duration) -> Option<String> {
+    let mut g = PRE_COPY.lock().ok()?;
+    let taken = g.take()?;
+    if taken.1.elapsed() <= ttl {
+        Some(taken.0)
+    } else {
+        None
+    }
+}
+
+/// 用一段文本造一个"最小快照"（只含 CF_UNICODETEXT）。
+///
+/// 用于把剪贴板还原成「复制之前」的内容：正常 `snapshot()` 是在复制**之后**
+/// 抓的，抓到的就是选区本身。只带文本是有意的 —— 复制前如果放的是图片，
+/// 我们根本没抓到像素，就不该假装能还原（那种情况走原来的 snapshot 分支）。
+pub fn text_snapshot(text: &str) -> Snapshot {
+    let mut wide: Vec<u16> = text.encode_utf16().collect();
+    wide.push(0);
+    let bytes: Vec<u8> = wide.iter().flat_map(|u| u.to_le_bytes()).collect();
+    Snapshot {
+        items: vec![(CF_UNICODETEXT, bytes)],
+        seq: seq(),
+    }
+}
+
 /// 把一段字节按指定剪贴板格式写进去。**调用方须已打开并清空剪贴板**。
 /// 成功时 HGLOBAL 所有权移交给系统，不能再 free；失败返回 false。
-unsafe fn put_format(fmt: u32, bytes: &[u8]) -> bool {
-    if bytes.is_empty() {
+unsafe fn put_format(fmt: u32, bytes: &[u8]) -> bool {    if bytes.is_empty() {
         return false;
     }
     let Ok(h) = GlobalAlloc(GMEM_MOVEABLE, bytes.len()) else {
@@ -1059,5 +1146,37 @@ mod tests {
                 let _ = CloseClipboard();
             }
         }
+    }
+
+    /// 「复制前」快照：只带 CF_UNICODETEXT，文本要能原样读回来。
+    ///
+    /// 这条守的是"Ctrl+C 唤出网格后剪贴板能不能真回退"：
+    /// 正常 `snapshot()` 抓的是复制**之后**的选区，还原等于没还原；
+    /// `text_snapshot` 才是"复制之前"那份的替身。
+    #[test]
+    fn text_snapshot_round_trips_utf16() {
+        let s = text_snapshot("你好 ABC");
+        assert_eq!(s.items.len(), 1, "只该带一项文本格式");
+        assert_eq!(s.text().as_deref(), Some("你好 ABC"));
+        // 空串也要能造（用户复制前剪贴板就是空的）
+        assert_eq!(text_snapshot("").text().as_deref(), Some(""));
+    }
+
+    /// 「复制前」缓存是**一次性**的，且超过 TTL 就不再认。
+    ///
+    /// 一次性：同一个 Ctrl+C 只该服务一次回写，否则第二次包裹会还原成
+    /// 更久以前的内容。TTL：隔很久才点格子时，还原一份陈年剪贴板比不还原更吓人。
+    #[test]
+    fn precopy_is_one_shot_and_expires() {
+        *PRE_COPY.lock().unwrap() = Some(("A".to_string(), std::time::Instant::now()));
+        assert_eq!(take_precopy(Duration::from_secs(60)).as_deref(), Some("A"));
+        assert!(take_precopy(Duration::from_secs(60)).is_none(), "取过一次就没了");
+
+        *PRE_COPY.lock().unwrap() =
+            Some(("B".to_string(), std::time::Instant::now() - Duration::from_secs(120)));
+        assert!(
+            take_precopy(Duration::from_secs(60)).is_none(),
+            "过期的不能再拿来还原"
+        );
     }
 }

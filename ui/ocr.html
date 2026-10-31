@@ -1058,8 +1058,23 @@ function pullEngineNames() {
         .catch(() => {});
 }
 
-/** 这一轮真正参与识别的引擎名单（默认引擎在前，其余跟设置里勾的那份顺序）。 */
+/** 这一轮**真实**参与了识别的引擎名单（来自后端推来的 parts，见下方 syncPlanFromParts）。
+ *  非空时优先于"按设置猜"的那份 —— 见 runPlan 的注释。 */
+let planReal = null;
+
+/** 这一轮真正参与识别的引擎名单（默认引擎在前，其余跟设置里勾的那份顺序）。
+ *
+ *  v2.11.1：**先看后端推来的 parts**。
+ *
+ *  以前这里纯粹按配置猜（默认引擎 + 同时识别名单）。从网格页点一颗绑定模型的
+ *  格子（`@ocr:windows` = 只跑本地识别）时，后端确实只跑了本地那一家，可页面
+ *  仍按配置画成"默认引擎那一档"：标题、文本区、底部段控全是默认引擎的名字，
+ *  用户看到的就还是「默认的文本识别界面」。
+ *
+ *  parts 里每一项都带 `eng`，它只包含**这一轮真的返回了结果**的引擎，所以拿它
+ *  当名单和实际一致；parts 还没到时（首帧）才退回按配置猜。 */
 function runPlan() {
+    if (Array.isArray(planReal) && planReal.length) return planReal.slice();
     const cur = (CONF && CONF.ocrEngine) || 'baidu';
     const extra = CONF && Array.isArray(CONF.ocrMulti) ? CONF.ocrMulti : [];
     const plan = [cur];
@@ -1067,6 +1082,18 @@ function runPlan() {
         if (e && plan.indexOf(e) < 0) plan.push(e);
     }
     return plan;
+}
+
+/** 从 parts 更新"真实参与名单"（去重保序）。parts 为空时保留上一次的值：
+ *  识别是分批回来的，先到的那一家不该把后面的挤掉。 */
+function syncPlanFromParts(parts) {
+    if (!Array.isArray(parts) || !parts.length) return;
+    const out = [];
+    for (const p of parts) {
+        const id = p && p.eng;
+        if (id && out.indexOf(id) < 0) out.push(id);
+    }
+    if (out.length) planReal = out;
 }
 
 /** 按**参与名单**重建底部「显示」段控：每家一颗 + 「都看」。
@@ -1330,6 +1357,7 @@ function setShowMode(m) {
         invoke('ocr_take_parts').then((parts) => {
             if (Array.isArray(parts) && parts.length) {
                 ocrParts = parts;
+                syncPlanFromParts(parts);
                 renderResultText();
             }
         }).catch(() => {});
@@ -1483,6 +1511,9 @@ function setImage(src) {
      * `openDetectedLinks` 会连隐藏段一起扫，于是"打开链接"打开的是
      * **上一张图里的网址**。 */
     for (const k in lastPart) delete lastPart[k];
+    /* v2.11.1：新的一张图 = 新的一轮，「真实参与名单」也必须忘掉 ——
+     * 否则上一轮从网格里点的"只跑本地识别"，会一直把这一轮也画成本地那一档。 */
+    planReal = null;
     /* r49：新的一张图 = 新的一轮 —— 把"用户手动选过档位"这件事也一并清掉，
      * 于是这一轮仍然从**默认引擎**那一档开始（用户口径：每次先看我配的那家）。
      * ⚠ 不清的话：上一次点了「本地」，之后每张图都会停在本地，默认引擎反而不露面。 */
@@ -1538,7 +1569,10 @@ async function pull() {
         invoke('ocr_take_note').catch(() => ''),
         invoke('ocr_take_parts').catch(() => null),
     ]);
-    if (Array.isArray(parts) && parts.length) ocrParts = parts;
+    if (Array.isArray(parts) && parts.length) {
+        ocrParts = parts;
+        syncPlanFromParts(parts);
+    }
     ocrCombined = String(t || '');
     setImage(img);
     renderResultText();
@@ -1550,7 +1584,10 @@ async function pull() {
 // 文字与图片一起到（新通道）
 listen('qs://ocr-result', (ev) => {
     const p = (ev && ev.payload) || {};
-    if (Array.isArray(p.parts)) ocrParts = p.parts;
+    if (Array.isArray(p.parts)) {
+        ocrParts = p.parts;
+        syncPlanFromParts(p.parts);
+    }
     ocrCombined = String(p.text || '');
     setImage(String(p.image || ''));
     renderResultText();

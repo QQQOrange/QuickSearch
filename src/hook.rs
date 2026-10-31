@@ -174,6 +174,15 @@ unsafe extern "system" fn keyboard_proc(code: i32, w: WPARAM, l: LPARAM) -> LRES
                 // 放在钩子回调里完全安全（不会撞 LowLevelHooksTimeout）。
                 // GetAsyncKeyState 同样是极轻的查询，且**此刻**读到的修饰键状态
                 // 才是"用户按下这个键时"的状态（见 Ev::KeyDown 的注释）。
+                /* v2.11.1：Ctrl+C 是"把剪贴板借出去"的那一下 —— 在它**进入目标
+                 * 程序之前**（本回调早于键进目标线程队列）抢一份原内容。
+                 * 不抢的话，网格/包裹里那次 snapshot 抓到的是复制**之后**的值，
+                 * 还原等于把选区又放回去，用户看到的就是"剪贴板没回退"。
+                 * 只读文本、单次开剪贴板，失败就放弃（见 clip::capture_precopy）。 */
+                if info.vkCode == 0x43 && win::ctrl_down() && info.dwExtraInfo != win::SELF_INJECT_TAG
+                {
+                    clip::capture_precopy();
+                }
                 send(Ev::KeyDown(
                     info.vkCode,
                     clip::seq(),

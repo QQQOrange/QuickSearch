@@ -3846,6 +3846,16 @@ function resetGridTransient() {
     gridWheelAcc = 0;
     gridWheelAt = 0;
     if (gridPersistTimer) { clearTimeout(gridPersistTimer); gridPersistTimer = 0; }
+    /* v2.11.1：**二级内容每次唤起都收起**。
+     *
+     * 用户口径：「通过快捷键唤出网格页时会保留上次展开的二级菜单（如包裹符号），
+     * 请修复为每次唤出均为默认收起状态」。
+     *
+     * 以前这里只清编辑态与选板 —— 包裹菜单、右键菜单、引擎/收藏面板都是独立
+     * 浮层，隐藏后再唤起会原样留在屏幕上（还叠在网格上面）。 */
+    closeWrapMenu();
+    closeMenu();
+    if (panelEl && !panelEl.hidden) togglePanel(false);
 }
 
 /** 打开选板。`index` = 被点的空位下标（新内容插到这个位置）。

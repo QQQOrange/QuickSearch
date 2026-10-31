@@ -278,16 +278,18 @@ async function openIconEditor(key, engineName, extraSrc) {
 /* ------------------------------------------------------------------ */
 
 /** 「抠图」在子导航里的图：虚线选区 + 主体剪影 —— "把主体从背景里抠出来"。
- *  以前它和「文本处理」共用 ✂️，两个页签在小尺寸下完全分不出来。 */
+ *  以前它和「文本处理」共用 ✂️，两个页签在小尺寸下完全分不出来。
+ *  v2.11.1 起用**双色**（选区紫 + 主体琥珀），和翻译/识图那些彩色图标一个调门。 */
 function matteNavIconNode() {
     const sp = document.createElement('span');
     sp.style.cssText = 'display:block;width:100%;height:100%';
-    sp.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"'
+    sp.innerHTML = '<svg viewBox="0 0 24 24" fill="none" '
         + ' stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"'
         + ' style="display:block;width:100%;height:100%">'
-        + '<rect x="3.6" y="4.6" width="16.8" height="14.8" rx="2" stroke-dasharray="3 2.4"/>'
-        + '<circle cx="12" cy="10.1" r="2.1"/>'
-        + '<path d="M8.4 17.2c.7-2.2 2-3.3 3.6-3.3s2.9 1.1 3.6 3.3"/></svg>';
+        + '<rect x="3.6" y="4.6" width="16.8" height="14.8" rx="2" stroke="#7C3AED" stroke-dasharray="3 2.4"/>'
+        + '<circle cx="12" cy="10.1" r="2.1" stroke="#F59E0B"/>'
+        + '<path d="M8.4 17.2c.7-2.2 2-3.3 3.6-3.3s2.9 1.1 3.6 3.3" stroke="#F59E0B"/>'
+        + '</svg>';
     return sp;
 }
 

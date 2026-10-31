@@ -184,9 +184,16 @@ window.qsDisplayName = function (name) {
         return meta ? meta.name : ('包裹符号 · ' + bound.id);
     }
     if (bound) {
-        const baseLabel = window.qsDisplayName('@' + bound.kind);
-        const model = window.qsModelName(bound.kind, bound.id);
-        return baseLabel ? (baseLabel + ' · ' + model) : model;
+        /* 绑定到具体模型的格子（`@ocr:windows` / `@img:<id>` / `@trans:<id>`）：
+         * **只显示模型自己的名字**（用户口径：「文字识别-本地识别」只显示
+         * 「本地识别」，其他同类功能一并统一）。
+         *
+         * 为什么不再带主功能名前缀：格子本来就小，"文字识别 · 本地识别" 一挤
+         * 就成省略号，反而看不出是哪一家；而图标已经表达了"这是文字识别"，
+         * 前缀是冗余信息。模型名还没登记回来时退回主功能名，绝不显示 id。 */
+        const key = String(bound.kind) + ':' + String(bound.id);
+        const nm = (window.QS_MODEL_NAMES || {})[key];
+        return nm || window.qsDisplayName('@' + bound.kind) || String(bound.id);
     }
     // ① 带 id 的哨兵：去查真实名字
     try {
@@ -350,19 +357,24 @@ window.qsTextOpMeta = function (id) {
     return window.QS_TEXT_OPS.find((o) => o.id === id) || null;
 };
 
-/** 横条/网格/设置三处共用的图标：一张带横线的纸，中间写着这个 op 的记号。 */
+/** 横条/网格/设置三处共用的图标：一张带横线的纸，中间写着这个 op 的记号。
+ *
+ *  ⚠ v2.11.1：改成**彩色**（纸 = 蓝、文字线 = 浅蓝、记号 = 琥珀）。
+ *    以前整枚走 `currentColor`，在设置页那排里显得比翻译/识图（真彩色位图）
+ *    灰一档，用户看着像"没做完的图标"。 */
 window.qsTextIconNode = function (opId) {
     const meta = window.qsTextOpMeta(opId);
     const glyph = (meta && meta.glyph) || '≡';
     const sp = document.createElement('span');
     sp.style.cssText = 'display:block;width:100%;height:100%;position:relative';
-    sp.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"'
+    sp.innerHTML = '<svg viewBox="0 0 24 24" fill="none" '
         + ' stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"'
-        + ' style="display:block;width:100%;height:100%;opacity:.85">'
-        + '<path d="M5.5 3.5h9l4 4v13h-13z" fill="none"/>'
-        + '<path d="M8.5 12h7M8.5 15.5h7M8.5 8.5h3"/></svg>'
+        + ' style="display:block;width:100%;height:100%">'
+        + '<path d="M5.5 3.5h9l4 4v13h-13z" fill="none" stroke="#2563EB"/>'
+        + '<path d="M8.5 12h7M8.5 15.5h7M8.5 8.5h3" stroke="#93C5FD"/>'
+        + '</svg>'
         + '<span style="position:absolute;right:-1px;bottom:-1px;font-size:7.5px;'
-        + 'line-height:1;font-weight:700;color:currentColor;background:var(--qs-bg,#fff);'
+        + 'line-height:1;font-weight:700;color:#F59E0B;background:var(--qs-bg,#fff);'
         + 'border-radius:2px;padding:0 1px"></span>';
     // 右下角那个小记号单独写（上面用 innerHTML 拼字符串，文本要转义）
     const tag = sp.lastChild;
@@ -694,11 +706,15 @@ window.qsWrapIconNode = function () {
     }
     const sp = document.createElement('span');
     sp.style.cssText = 'display:block;width:100%;height:100%';
-    sp.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"'
+    /* v2.11.1：从单色（currentColor）改成**双色** —— 一对包角是青色，
+     * 中间那行文字是琥珀色。设置页那排图标里，单色的一眼就看出来和
+     * 翻译 / 识图（真彩色位图）不是一套。 */
+    sp.innerHTML = '<svg viewBox="0 0 24 24" fill="none" '
         + ' stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"'
         + ' style="display:block;width:100%;height:100%">'
-        + '<path d="M8.2 6.2H5.4v11.6h2.8M15.8 6.2h2.8v11.6h-2.8"/>'
-        + '<path d="M9.9 12h4.2" opacity=".75"/></svg>';
+        + '<path d="M8.2 6.2H5.4v11.6h2.8M15.8 6.2h2.8v11.6h-2.8" stroke="#0E7490"/>'
+        + '<path d="M9.9 12h4.2" stroke="#F59E0B" stroke-width="2"/>'
+        + '</svg>';
     return sp;
 };
 

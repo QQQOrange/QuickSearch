@@ -2363,7 +2363,14 @@ fn wrap_text(
      *
      * ⚠ 回写**没成功**时不能还：结果只在这块剪贴板里，还回去等于把用户唯一能
      *   手动 Ctrl+V 的东西也抹了。那种情况保持原样（并告诉用户结果已复制）。 */
-    let mut clip_keep = clip::snapshot();
+    /* v2.11.1：**优先还原成"复制之前"的那份内容**。
+     * 网格/横条是 Ctrl+C 唤出的，剪贴板早已被那次复制改成了选区本身 ——
+     * 这里再 snapshot() 抓到的就是选区，"还原"等于没还原（用户报的正是这个）。
+     * 钩子在按键生效前抢了一份原内容（`clip::capture_precopy`），60 秒内有效。 */
+    let mut clip_keep = match clip::take_precopy(Duration::from_secs(60)) {
+        Some(t) => Some(clip::text_snapshot(&t)),
+        None => clip::snapshot(),
+    };
     let copied = clip::set_text(&out);
     if let Some(s) = clip_keep.as_mut() {
         s.note_our_write();
@@ -2590,7 +2597,14 @@ fn text_op(
     /* v2.11.0：和包裹符号同一条修法 —— 借剪贴板之前先备份，回写成功后还回去
      * （见 `restore_clip_after_paste` 的长注释：为什么必须延迟、为什么用
      *  restore_if_unchanged 而不是无条件覆盖）。 */
-    let mut clip_keep = clip::snapshot();
+    /* v2.11.1：**优先还原成"复制之前"的那份内容**。
+     * 网格/横条是 Ctrl+C 唤出的，剪贴板早已被那次复制改成了选区本身 ——
+     * 这里再 snapshot() 抓到的就是选区，"还原"等于没还原（用户报的正是这个）。
+     * 钩子在按键生效前抢了一份原内容（`clip::capture_precopy`），60 秒内有效。 */
+    let mut clip_keep = match clip::take_precopy(Duration::from_secs(60)) {
+        Some(t) => Some(clip::text_snapshot(&t)),
+        None => clip::snapshot(),
+    };
     let copied = clip::set_text(&out);
     if let Some(s) = clip_keep.as_mut() {
         s.note_our_write();
