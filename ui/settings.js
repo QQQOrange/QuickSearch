@@ -571,9 +571,11 @@ function renderBarList() {
         const ops = document.createElement('span');
         ops.className = 'ops';
 
-        const mk = (text, title, cls, fn) => {
+        /* 只有「按钮文字 + 提示 + 做什么」三件事 —— 以前还有一个 class 参数，
+         * 那是给已删掉的 ↑↓ 按钮定宽用的，现在所有按钮都是同一个 .mini。 */
+        const mk = (text, title, fn) => {
             const b = document.createElement('button');
-            b.className = 'mini ' + (cls || '');
+            b.className = 'mini';
             b.textContent = text;
             if (title) b.title = title;
             b.addEventListener('click', fn);
@@ -586,26 +588,21 @@ function renderBarList() {
          * 又和抓手重复；用户口径是「顺序已支持拖拽调整，箭头属多余」。 */
 
         if (isSep) {
-            mk('删除', '删掉这条分隔线', '',
-                () => invoke('remove_separator', { index: idx }));
+            mk('删除', '删掉这条分隔线', () => invoke('remove_separator', { index: idx }));
         } else if (isOcr) {
             // OCR 行：位置直接拖；图标也能自己换（用户点名要的）。
             // 「去掉」只是把它从横条上拿掉，不影响热键 Ctrl+Alt+O。
-            mk('换图标', '给 OCR 按钮挑一张图片', '',
-                () => invoke('pick_icon', { engine: QS_OCR }));
+            mk('换图标', '给 OCR 按钮挑一张图片', () => invoke('pick_icon', { engine: QS_OCR }));
             // #143：挑过图才能编辑（一键消除背景），没挑过就是 OCR 徽标
             if (hasIconToEdit(QS_OCR, QS_OCR)) {
-                mk('编辑图标', '编辑这颗图标：一键消除背景、前后对比', '',
-                    () => openIconEditor(QS_OCR, QS_OCR));
+                mk('编辑图标', '编辑这颗图标：一键消除背景、前后对比', () => openIconEditor(QS_OCR, QS_OCR));
             }
             if (CONF.overrideIcons[QS_OCR]) {
-                mk('默认', '恢复默认的 OCR 徽标', '',
-                    () => invoke('reset_icon', { engine: QS_OCR }));
+                mk('默认', '恢复默认的 OCR 徽标', () => invoke('reset_icon', { engine: QS_OCR }));
             }
-            mk('去掉', '把 OCR 从横条上拿掉（不影响热键 Ctrl+Alt+O）', '',
-                () => invoke('remove_bar_ocr'));
+            mk('去掉', '把 OCR 从横条上拿掉（不影响热键 Ctrl+Alt+O）', () => invoke('remove_bar_ocr'));
         } else {
-            mk('换图标', '从电脑里挑一张图片', '', () => invoke('pick_icon', { engine: name }));
+            mk('换图标', '从电脑里挑一张图片', () => invoke('pick_icon', { engine: name }));
             /* #143「编辑图标」：收藏夹目录 / 外部软件的哨兵行也走这条
              * （它们的键就是哨兵本身，和 pick_icon 同一套机制）。
              * 外部软件按**软件名**找 icons 目录默认图（和 qsAppIconNode 同口径）；
@@ -620,7 +617,7 @@ function renderBarList() {
             const ieName = isApp ? app.name : (isFav ? null : name);
             const ieExtra = isFav ? ((favGroup && favGroup.icon) || '') : '';
             if (iconEditorEnabled() && (hasIconToEdit(name, ieName, ieExtra) || isImg)) {
-                mk('编辑图标', '编辑这颗图标：一键消除背景、前后对比', '', () => {
+                mk('编辑图标', '编辑这颗图标：一键消除背景、前后对比', () => {
                     if (hasIconToEdit(name, ieName, ieExtra)) {
                         openIconEditor(name, ieName, ieExtra);
                     } else {
@@ -630,11 +627,10 @@ function renderBarList() {
             }
             if (CONF.overrideIcons[name]) {
                 // 外部软件没有「内置图标」可言，恢复的是首字徽标
-                mk('默认', isApp ? '恢复成首字徽标' : '恢复内置图标', '',
+                mk('默认', isApp ? '恢复成首字徽标' : '恢复内置图标',
                     () => invoke('reset_icon', { engine: name }));
             }
-            mk('移出', '从横条上移除', '',
-                () => invoke('toggle_bar_engine', { engine: name, on: false }));
+            mk('移出', '从横条上移除', () => invoke('toggle_bar_engine', { engine: name, on: false }));
         }
 
         row.appendChild(grip);
